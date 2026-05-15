@@ -20,26 +20,34 @@ export default function App() {
   const [hEars, setHEars] = useState(3);
   const [vEars, setVEars] = useState(2);
 
+  const [curvedTop, setCurvedTop] = useState(false);
+  const [arcRise, setArcRise] = useState(100);
+
   const [activeTool, setActiveTool] = useState(null);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
   const [measurements, setMeasurements] = useState([]);
   const [hoverSnap, setHoverSnap] = useState(null);
+  const [draggingMeasurement, setDraggingMeasurement] = useState(null);
 
   const earLength = 30;
   const earDepth = 10;
   const margin = 90;
   const scale = 0.35;
+  const viewportPadding = 160;
 
   const MIN_SPACING = 240;
   const MAX_SPACING = 400;
+  const INITIAL_DIMENSION_OFFSET = 25;
+  const ARC_SEGMENTS = 64;
 
   const clearMeasureTool = () => {
     setActiveTool(null);
     setMeasurePoints([]);
     setMeasurements([]);
     setHoverSnap(null);
+    setDraggingMeasurement(null);
   };
 
   useEffect(() => {
@@ -50,6 +58,7 @@ export default function App() {
             setMeasurePoints([]);
             setMeasurements([]);
             setHoverSnap(null);
+            setDraggingMeasurement(null);
             return null;
           }
 
@@ -60,11 +69,33 @@ export default function App() {
       if (e.key === 'Escape') {
         clearMeasureTool();
       }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        setMeasurements(prev => prev.filter(m => !m.selected));
+        setDraggingMeasurement(null);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setDraggingMeasurement(null);
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
   }, []);
+
+  // Clear measurements when geometry changes
+  useEffect(() => {
+    setMeasurePoints([]);
+    setMeasurements([]);
+    setHoverSnap(null);
+    setDraggingMeasurement(null);
+  }, [width, height, manualMode, hEars, vEars, curvedTop, arcRise]);
 
   const points = useMemo(() => {
     const ears = [];
@@ -109,19 +140,27 @@ export default function App() {
     };
 
     if (!manualMode) {
-      addAutoSide(width, 'top');
+      // Top ears are temporarily disabled while curved top is active
+      if (!curvedTop) {
+        addAutoSide(width, 'top');
+      }
+
       addAutoSide(width, 'bottom');
       addAutoSide(height, 'left');
       addAutoSide(height, 'right');
     } else {
-      addManualSide(width, 'top', hEars);
+      // Top ears are temporarily disabled while curved top is active
+      if (!curvedTop) {
+        addManualSide(width, 'top', hEars);
+      }
+
       addManualSide(width, 'bottom', hEars);
       addManualSide(height, 'left', vEars);
       addManualSide(height, 'right', vEars);
     }
 
     return ears;
-  }, [width, height, manualMode, hEars, vEars]);
+  }, [width, height, manualMode, hEars, vEars, curvedTop]);
 
   const grouped = useMemo(
     () => ({
@@ -133,13 +172,99 @@ export default function App() {
     [points]
   );
 
+  const getTopArcPoints = () => {
+    const rise = Math.max(0, arcRise);
+
+    if (!curvedTop || rise <= 0) {
+      return [
+        [earDepth, earDepth],
+        [width - earDepth, earDepth]
+      ];
+    }
+
+    const x1 = earDepth;
+    const x2 = width - earDepth;
+    const yBase = earDepth;
+
+    const chord = x2 - x1;
+    if (chord <= 0) {
+      return [
+        [x1, yBase],
+        [x2, yBase]
+      ];
+    }
+
+    const radius = (chord * chord) / (8 * rise) + rise / 2;
+    const cx = (x1 + x2) / 2;
+    const cy = yBase + radius - rise;
+
+    const points = [];
+
+    for (let i = 0; i <= ARC_SEGMENTS; i++) {
+      const t = i / ARC_SEGMENTS;
+      const x = x1 + chord * t;
+      const inside = Math.max(0, radius * radius - (x - cx) * (x - cx));
+      const y = cy - Math.sqrt(inside);
+
+      points.push([x, y]);
+    }
+
+    return points;
+  };
+
   const buildVertices = () => {
     const verts = [[earDepth, earDepth]];
 
-    grouped.top.forEach(ear => {
+    if (curvedTop && arcRise > 0) {
+      const arcPoints = getTopArcPoints();
+
+      // First point is already in verts, so skip index 0
+      for (let i = 1; i < arcPoints.length; i++) {
+        verts.push(arcPoints[i]);
+      }
+    } else {
+      grouped.top.forEach(ear => {
+        const p = ear.pos;
+        verts.push([p, earDepth], [p, 0], [p + earLength, 0], [p + earLength, earDepth]);
+      });
+
+      verts.push([width - earDepth, earDepth]);
+    }
+
+    grouped.right.forEach(ear => {
       const p = ear.pos;
-      verts.push([p, earDepth], [p, 0], [p + earLength, 0], [p + earLength, earDepth]);
+      verts.push([width - earDepth, p], [width, p], [width, p + earLength], [width - earDepth, p + earLength]);
     });
+
+    verts.push([width - earDepth, height - earDepth]);
+
+    grouped.bottom.forEach(ear => {
+      const p = ear.pos;
+      verts.push([p + earLength, height - earDepth], [p + earLength, height], [p, height], [p, height - earDepth]);
+    });
+
+    verts.push([earDepth, height - earDepth]);
+
+    grouped.left.forEach(ear => {
+      const p = ear.pos;
+      verts.push([earDepth, p + earLength], [0, p + earLength], [0, p], [earDepth, p]);
+    });
+
+    return verts;
+  };
+
+  // Snap vertices intentionally do NOT include intermediate curved arc points yet
+  const buildSnapVertices = () => {
+    const verts = [];
+
+    verts.push([earDepth, earDepth]);
+
+    if (!curvedTop) {
+      grouped.top.forEach(ear => {
+        const p = ear.pos;
+        verts.push([p, earDepth], [p, 0], [p + earLength, 0], [p + earLength, earDepth]);
+      });
+    }
 
     verts.push([width - earDepth, earDepth]);
 
@@ -165,7 +290,10 @@ export default function App() {
     return verts;
   };
 
-  const snapPoints = useMemo(() => buildVertices(), [grouped, width, height]);
+  const snapPoints = useMemo(
+    () => buildSnapVertices(),
+    [grouped, width, height, curvedTop]
+  );
 
   const buildOutlinePath = () => {
     const verts = buildVertices();
@@ -175,9 +303,12 @@ export default function App() {
   };
 
   const getSvgPoint = (e) => {
-    const svg = e.currentTarget;
-    const rect = svg.getBoundingClientRect();
+    const svg =
+      e.currentTarget.ownerSVGElement ||
+      e.target.ownerSVGElement ||
+      e.currentTarget;
 
+    const rect = svg.getBoundingClientRect();
     const viewBox = svg.viewBox.baseVal;
 
     const x =
@@ -218,23 +349,189 @@ export default function App() {
     return null;
   };
 
+  const getMeasurementBaseData = (m) => {
+    const dx = m.p2[0] - m.p1[0];
+    const dy = m.p2[1] - m.p1[1];
+    const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    const ux = dx / distance;
+    const uy = dy / distance;
+
+    const nx = -uy;
+    const ny = ux;
+
+    return { dx, dy, distance, ux, uy, nx, ny };
+  };
+
+  const getMeasurementGeometry = (m) => {
+    const { distance, ux, uy, nx, ny } = getMeasurementBaseData(m);
+
+    const offset = m.offset ?? 0;
+
+    const d1 = [
+      m.p1[0] + nx * offset,
+      m.p1[1] + ny * offset
+    ];
+
+    const d2 = [
+      m.p2[0] + nx * offset,
+      m.p2[1] + ny * offset
+    ];
+
+    const mid = [
+      (d1[0] + d2[0]) / 2,
+      (d1[1] + d2[1]) / 2
+    ];
+
+    const offsetDirection = offset >= 0 ? 1 : -1;
+
+    const labelGapPx = 22;
+    const labelGapMm = labelGapPx / scale;
+
+    const label = [
+      mid[0] + nx * offsetDirection * labelGapMm,
+      mid[1] + ny * offsetDirection * labelGapMm
+    ];
+
+    let angle = Math.atan2(uy, ux) * 180 / Math.PI;
+
+    if (angle > 90 || angle < -90) {
+      angle += 180;
+    }
+
+    const arrowLength = 10 / scale;
+    const arrowWidth = 5 / scale;
+
+    const leftArrow = [
+      d1,
+      [
+        d1[0] + ux * arrowLength + nx * arrowWidth,
+        d1[1] + uy * arrowLength + ny * arrowWidth
+      ],
+      [
+        d1[0] + ux * arrowLength - nx * arrowWidth,
+        d1[1] + uy * arrowLength - ny * arrowWidth
+      ]
+    ];
+
+    const rightArrow = [
+      d2,
+      [
+        d2[0] - ux * arrowLength + nx * arrowWidth,
+        d2[1] - uy * arrowLength + ny * arrowWidth
+      ],
+      [
+        d2[0] - ux * arrowLength - nx * arrowWidth,
+        d2[1] - uy * arrowLength - ny * arrowWidth
+      ]
+    ];
+
+    return {
+      d1,
+      d2,
+      mid,
+      label,
+      angle,
+      distance,
+      nx,
+      ny,
+      leftArrow,
+      rightArrow
+    };
+  };
+
+  const polygonPoints = (pointsArray) => {
+    return pointsArray
+      .map(([x, y]) => `${x * scale},${y * scale}`)
+      .join(' ');
+  };
+
   const handlePreviewMouseMove = (e) => {
     if (activeTool !== 'measure') return;
 
     const { x, y } = getSvgPoint(e);
-    const snapped = findNearestSnapPoint(x, y);
 
+    if (draggingMeasurement) {
+      const measurement = measurements.find(m => m.id === draggingMeasurement.id);
+      if (!measurement) return;
+
+      const { nx, ny } = getMeasurementBaseData(measurement);
+
+      const dx = x - draggingMeasurement.startMouse[0];
+      const dy = y - draggingMeasurement.startMouse[1];
+
+      const projectedOffsetChange = dx * nx + dy * ny;
+      const newOffset = draggingMeasurement.startOffset + projectedOffsetChange;
+
+      setMeasurements(prev =>
+        prev.map(m =>
+          m.id === draggingMeasurement.id
+            ? { ...m, offset: newOffset, selected: true }
+            : m
+        )
+      );
+
+      return;
+    }
+
+    const snapped = findNearestSnapPoint(x, y);
     setHoverSnap(snapped);
   };
 
   const handlePreviewMouseLeave = () => {
-    setHoverSnap(null);
+    if (!draggingMeasurement) {
+      setHoverSnap(null);
+    }
+  };
+
+  const createMeasurement = (p1, p2) => {
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    const mid = [
+      (p1[0] + p2[0]) / 2,
+      (p1[1] + p2[1]) / 2
+    ];
+
+    const ux = dx / distance;
+    const uy = dy / distance;
+
+    const nx = -uy;
+    const ny = ux;
+
+    const rectangleCenter = [width / 2, height / 2];
+    const fromCenterToMeasurement = [
+      mid[0] - rectangleCenter[0],
+      mid[1] - rectangleCenter[1]
+    ];
+
+    const dot =
+      fromCenterToMeasurement[0] * nx +
+      fromCenterToMeasurement[1] * ny;
+
+    let offset = INITIAL_DIMENSION_OFFSET;
+
+    if (dot < 0) {
+      offset = -INITIAL_DIMENSION_OFFSET;
+    }
+
+    return {
+      id: crypto.randomUUID(),
+      p1,
+      p2,
+      distance,
+      offset,
+      selected: false
+    };
   };
 
   const handlePreviewClick = (e) => {
     if (activeTool !== 'measure') return;
 
     e.stopPropagation();
+
+    if (draggingMeasurement) return;
 
     const { x, y } = getSvgPoint(e);
     const snapped = findNearestSnapPoint(x, y);
@@ -250,27 +547,57 @@ export default function App() {
       const dy = p2[1] - p1[1];
       const distance = Math.sqrt(dx * dx + dy * dy);
 
-      const mid = [
-        (p1[0] + p2[0]) / 2,
-        (p1[1] + p2[1]) / 2
-      ];
+      if (distance === 0) {
+        setMeasurePoints([]);
+        return;
+      }
 
       setMeasurements(prev => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          p1,
-          p2,
-          distance,
-          mid,
-          selected: false
-        }
+        ...prev.map(m => ({ ...m, selected: false })),
+        createMeasurement(p1, p2)
       ]);
 
       setMeasurePoints([]);
     } else {
+      setMeasurements(prev => prev.map(m => ({ ...m, selected: false })));
       setMeasurePoints(nextPoints);
     }
+  };
+
+  const handleMeasurementMouseDown = (e, measurement) => {
+    if (activeTool !== 'measure') return;
+
+    e.stopPropagation();
+
+    const { x, y } = getSvgPoint(e);
+
+    setMeasurements(prev =>
+      prev.map(m =>
+        m.id === measurement.id
+          ? { ...m, selected: true }
+          : { ...m, selected: false }
+      )
+    );
+
+    setDraggingMeasurement({
+      id: measurement.id,
+      startMouse: [x, y],
+      startOffset: measurement.offset ?? 0
+    });
+  };
+
+  const handleMeasurementClick = (e, measurement) => {
+    if (activeTool !== 'measure') return;
+
+    e.stopPropagation();
+
+    setMeasurements(prev =>
+      prev.map(m =>
+        m.id === measurement.id
+          ? { ...m, selected: true }
+          : { ...m, selected: false }
+      )
+    );
   };
 
   const downloadDXF = () => {
@@ -303,7 +630,7 @@ export default function App() {
 
     const a = document.createElement('a');
     a.href = url;
-    a.download = `rectangle-${width}x${height}.dxf`;
+    a.download = `rectangle-${width}x${height}${curvedTop ? '-curved-top' : ''}.dxf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -359,6 +686,7 @@ export default function App() {
         if (activeTool === 'measure') {
           setMeasurePoints([]);
           setMeasurements([]);
+          setDraggingMeasurement(null);
         }
       }}
     >
@@ -401,7 +729,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-50 border">
+          <div className="p-4 rounded-xl bg-slate-50 border space-y-3">
             <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
               <input
                 type="checkbox"
@@ -411,7 +739,7 @@ export default function App() {
               Manual Mode
             </label>
 
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-xs text-slate-500">
               Toggle between automatic optimization and fixed ear count
             </p>
           </div>
@@ -429,7 +757,9 @@ export default function App() {
                   onChange={e => setHEars(Math.max(1, +e.target.value || 1))}
                   className="w-full mt-1 p-2 border rounded-lg"
                 />
-                <p className="text-[11px] text-slate-400 mt-1">Top + bottom</p>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Top + bottom. Top disabled when curved top is active.
+                </p>
               </div>
 
               <div>
@@ -448,6 +778,34 @@ export default function App() {
             </div>
           )}
 
+          {/* CURVED TOP */}
+          <div className="p-4 rounded-xl bg-slate-50 border space-y-3">
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              <input
+                type="checkbox"
+                checked={curvedTop}
+                onChange={e => setCurvedTop(e.target.checked)}
+              />
+              Curved top
+            </label>
+
+            {curvedTop && (
+              <div>
+                <label className="text-xs text-slate-500">Arc rise (mm)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={arcRise}
+                  onChange={e => setArcRise(Math.max(0, +e.target.value || 0))}
+                  className="w-full mt-1 p-2 border rounded-lg"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Current version disables top ears and exports the curve as segmented DXF polyline.
+                </p>
+              </div>
+            )}
+          </div>
+
           <button
             onClick={downloadDXF}
             className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-3 rounded-xl transition shadow-md"
@@ -459,6 +817,7 @@ export default function App() {
             <p>• Auto mode: optimized spacing 240–400mm</p>
             <p>• Manual mode: fixed ear count with 80mm visible margins</p>
             <p>• N=1 centers ear perfectly</p>
+            <p>• Curved top: first test version, top ears disabled</p>
           </div>
         </div>
 
@@ -473,13 +832,14 @@ export default function App() {
             ].join(' ')}
           >
             <svg
-              width={width * scale + 40}
-              height={height * scale + 40}
-              viewBox={`-20 -20 ${width * scale + 40} ${height * scale + 40}`}
+              width={width * scale + viewportPadding * 2}
+              height={(height + (curvedTop ? arcRise : 0)) * scale + viewportPadding * 2}
+              viewBox={`${-viewportPadding} ${-viewportPadding - (curvedTop ? arcRise * scale : 0)} ${width * scale + viewportPadding * 2} ${(height + (curvedTop ? arcRise : 0)) * scale + viewportPadding * 2}`}
               className="mx-auto"
               onMouseMove={handlePreviewMouseMove}
               onMouseLeave={handlePreviewMouseLeave}
               onClick={handlePreviewClick}
+              onMouseUp={() => setDraggingMeasurement(null)}
             >
               <path
                 d={buildOutlinePath()}
@@ -488,39 +848,128 @@ export default function App() {
                 strokeWidth="2"
               />
 
-              {/* Existing measurements */}
+              {/* CAD-style measurements */}
               {measurements.map((m) => {
-                const dx = m.p2[0] - m.p1[0];
-const dy = m.p2[1] - m.p1[1];
-
-let angle = Math.atan2(dy, dx) * 180 / Math.PI;
-
-// Keep text readable: never upside down
-if (angle > 90 || angle < -90) {
-  angle += 180;
-}
+                const geometry = getMeasurementGeometry(m);
+                const color = m.selected || draggingMeasurement?.id === m.id
+                  ? '#2563eb'
+                  : '#ef4444';
 
                 return (
-                  <g key={m.id}>
+                  <g
+                    key={m.id}
+                    onMouseDown={(e) => handleMeasurementMouseDown(e, m)}
+                    onClick={(e) => handleMeasurementClick(e, m)}
+                    style={{
+                      cursor:
+                        activeTool === 'measure'
+                          ? draggingMeasurement?.id === m.id
+                            ? 'grabbing'
+                            : 'grab'
+                          : 'default'
+                    }}
+                  >
+                    {/* Invisible larger hit area */}
+                    <line
+                      x1={geometry.d1[0] * scale}
+                      y1={geometry.d1[1] * scale}
+                      x2={geometry.d2[0] * scale}
+                      y2={geometry.d2[1] * scale}
+                      stroke="transparent"
+                      strokeWidth="14"
+                    />
+
+                    {/* Extension lines */}
                     <line
                       x1={m.p1[0] * scale}
                       y1={m.p1[1] * scale}
-                      x2={m.p2[0] * scale}
-                      y2={m.p2[1] * scale}
-                      stroke="#ef4444"
+                      x2={geometry.d1[0] * scale}
+                      y2={geometry.d1[1] * scale}
+                      stroke={color}
+                      strokeWidth="1.5"
+                    />
+
+                    <line
+                      x1={m.p2[0] * scale}
+                      y1={m.p2[1] * scale}
+                      x2={geometry.d2[0] * scale}
+                      y2={geometry.d2[1] * scale}
+                      stroke={color}
+                      strokeWidth="1.5"
+                    />
+
+                    {/* Dimension line */}
+                    <line
+                      x1={geometry.d1[0] * scale}
+                      y1={geometry.d1[1] * scale}
+                      x2={geometry.d2[0] * scale}
+                      y2={geometry.d2[1] * scale}
+                      stroke={color}
                       strokeWidth="2"
                     />
 
+                    {/* Arrowheads */}
+                    <polygon
+                      points={polygonPoints(geometry.leftArrow)}
+                      fill={color}
+                    />
+
+                    <polygon
+                      points={polygonPoints(geometry.rightArrow)}
+                      fill={color}
+                    />
+
+                    {/* Text hit area */}
                     <text
-                      x={m.mid[0] * scale}
-                      y={(m.mid[1] - 8) * scale}
-                      fill="#ef4444"
+                      x={geometry.label[0] * scale}
+                      y={geometry.label[1] * scale}
+                      fontSize="20"
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      fill="transparent"
+                      stroke="transparent"
+                      strokeWidth="12"
+                      transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
+                    >
+                      {geometry.distance.toFixed(1)} mm
+                    </text>
+
+                    {/* Dimension text */}
+                    <text
+                      x={geometry.label[0] * scale}
+                      y={geometry.label[1] * scale}
+                      fill={color}
                       fontSize="13"
                       textAnchor="middle"
-                      transform={`rotate(${angle} ${m.mid[0] * scale} ${(m.mid[1] - 8) * scale})`}
+                      dominantBaseline="middle"
+                      transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
                     >
-                      {m.distance.toFixed(1)} mm
+                      {geometry.distance.toFixed(1)} mm
                     </text>
+
+                    {/* Grip handles when selected */}
+                    {(m.selected || draggingMeasurement?.id === m.id) && (
+                      <>
+                        <rect
+                          x={geometry.d1[0] * scale - 4}
+                          y={geometry.d1[1] * scale - 4}
+                          width="8"
+                          height="8"
+                          fill="#2563eb"
+                          stroke="white"
+                          strokeWidth="1"
+                        />
+                        <rect
+                          x={geometry.d2[0] * scale - 4}
+                          y={geometry.d2[1] * scale - 4}
+                          width="8"
+                          height="8"
+                          fill="#2563eb"
+                          stroke="white"
+                          strokeWidth="1"
+                        />
+                      </>
+                    )}
                   </g>
                 );
               })}
@@ -540,7 +989,7 @@ if (angle > 90 || angle < -90) {
               ))}
 
               {/* Hover snap marker */}
-              {activeTool === 'measure' && hoverSnap && (
+              {activeTool === 'measure' && hoverSnap && !draggingMeasurement && (
                 <rect
                   x={hoverSnap[0] * scale - 5}
                   y={hoverSnap[1] * scale - 5}
@@ -592,7 +1041,9 @@ if (angle > 90 || angle < -90) {
             {activeTool === 'measure' && (
               <div className="mt-4 rounded-lg bg-white border p-3 text-xs text-slate-600 leading-relaxed">
                 <p className="font-semibold text-slate-700 mb-1">Measure tool</p>
-                <p>Click two snap points to create a measurement.</p>
+                <p>Click two snap points to create a CAD-style measurement.</p>
+                <p className="mt-2">Drag the dimension line or text to move it away from the part.</p>
+                <p className="mt-2">Select a dimension and press Delete to remove it.</p>
                 <p className="mt-2 text-slate-400">Press M or Escape to clear and exit.</p>
               </div>
             )}
