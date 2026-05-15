@@ -41,6 +41,9 @@ export default function App() {
   const MAX_SPACING = 400;
   const INITIAL_DIMENSION_OFFSET = 25;
   const ARC_SEGMENTS = 64;
+  const EAR_ARC_SEGMENTS = 12;
+
+  const visibleCornerMargin = margin - earDepth; // 90 - 10 = visible 80mm
 
   const clearMeasureTool = () => {
     setActiveTool(null);
@@ -140,7 +143,6 @@ export default function App() {
     };
 
     if (!manualMode) {
-      // Top ears are temporarily disabled while curved top is active
       if (!curvedTop) {
         addAutoSide(width, 'top');
       }
@@ -149,7 +151,6 @@ export default function App() {
       addAutoSide(height, 'left');
       addAutoSide(height, 'right');
     } else {
-      // Top ears are temporarily disabled while curved top is active
       if (!curvedTop) {
         addManualSide(width, 'top', hEars);
       }
@@ -172,56 +173,161 @@ export default function App() {
     [points]
   );
 
-  const getTopArcPoints = () => {
+  const getTopArcData = () => {
     const rise = Math.max(0, arcRise);
 
-    if (!curvedTop || rise <= 0) {
-      return [
-        [earDepth, earDepth],
-        [width - earDepth, earDepth]
-      ];
-    }
+    if (!curvedTop || rise <= 0) return null;
 
     const x1 = earDepth;
     const x2 = width - earDepth;
     const yBase = earDepth;
 
     const chord = x2 - x1;
-    if (chord <= 0) {
-      return [
-        [x1, yBase],
-        [x2, yBase]
-      ];
-    }
+    if (chord <= 0) return null;
 
     const radius = (chord * chord) / (8 * rise) + rise / 2;
     const cx = (x1 + x2) / 2;
     const cy = yBase + radius - rise;
 
-    const points = [];
+    const thetaStart = Math.atan2(yBase - cy, x1 - cx);
+    const thetaEnd = Math.atan2(yBase - cy, x2 - cx);
+    const angleSpan = thetaEnd - thetaStart;
+    const arcLength = radius * angleSpan;
 
-    for (let i = 0; i <= ARC_SEGMENTS; i++) {
-      const t = i / ARC_SEGMENTS;
-      const x = x1 + chord * t;
-      const inside = Math.max(0, radius * radius - (x - cx) * (x - cx));
-      const y = cy - Math.sqrt(inside);
+    const pointAt = (s, radialOffset = 0) => {
+      const theta = thetaStart + s / radius;
+      const r = radius + radialOffset;
 
-      points.push([x, y]);
+      return [
+        cx + r * Math.cos(theta),
+        cy + r * Math.sin(theta)
+      ];
+    };
+
+    return {
+      radius,
+      cx,
+      cy,
+      thetaStart,
+      thetaEnd,
+      angleSpan,
+      arcLength,
+      pointAt
+    };
+  };
+
+  const getCurvedTopEarRanges = () => {
+    const arc = getTopArcData();
+    if (!arc) return [];
+
+    const usable = arc.arcLength - 2 * visibleCornerMargin - earLength;
+    if (usable < 0) return [];
+
+    const ranges = [];
+
+    if (manualMode) {
+      const count = Math.max(1, hEars);
+
+      if (count === 1) {
+        const start = arc.arcLength / 2 - earLength / 2;
+        ranges.push({ start, end: start + earLength });
+        return ranges;
+      }
+
+      const spacing = usable / (count - 1);
+
+      for (let i = 0; i < count; i++) {
+        const start = visibleCornerMargin + i * spacing;
+        ranges.push({ start, end: start + earLength });
+      }
+
+      return ranges;
     }
 
-    return points;
+    let gaps = 1;
+    while (usable / gaps > MAX_SPACING) gaps++;
+    while (gaps > 1 && usable / gaps < MIN_SPACING) gaps--;
+
+    const spacing = usable / gaps;
+
+    for (let i = 0; i <= gaps; i++) {
+      const start = visibleCornerMargin + i * spacing;
+      ranges.push({ start, end: start + earLength });
+    }
+
+    return ranges;
+  };
+
+  const pushPoint = (verts, point) => {
+    const last = verts[verts.length - 1];
+
+    if (
+      !last ||
+      Math.abs(last[0] - point[0]) > 0.001 ||
+      Math.abs(last[1] - point[1]) > 0.001
+    ) {
+      verts.push(point);
+    }
+  };
+
+  const appendArcSegment = (verts, arc, startS, endS, radialOffset = 0, segmentCount = ARC_SEGMENTS) => {
+    const length = Math.abs(endS - startS);
+    if (length <= 0.001) return;
+
+    const segments = Math.max(1, Math.ceil(segmentCount * (length / arc.arcLength)));
+
+    for (let i = 1; i <= segments; i++) {
+      const t = i / segments;
+      const s = startS + (endS - startS) * t;
+      pushPoint(verts, arc.pointAt(s, radialOffset));
+    }
+  };
+
+  const buildCurvedTopVertices = (verts) => {
+    const arc = getTopArcData();
+
+    if (!arc) {
+      pushPoint(verts, [width - earDepth, earDepth]);
+      return;
+    }
+
+    const ears = getCurvedTopEarRanges();
+    let currentS = 0;
+
+    ears.forEach(ear => {
+      appendArcSegment(verts, arc, currentS, ear.start, 0, ARC_SEGMENTS);
+
+      const innerStart = arc.pointAt(ear.start, 0);
+      const outerStart = arc.pointAt(ear.start, earDepth);
+      const outerEnd = arc.pointAt(ear.end, earDepth);
+      const innerEnd = arc.pointAt(ear.end, 0);
+
+      pushPoint(verts, innerStart);
+      pushPoint(verts, outerStart);
+
+      appendArcSegment(
+        verts,
+        arc,
+        ear.start,
+        ear.end,
+        earDepth,
+        EAR_ARC_SEGMENTS
+      );
+
+      pushPoint(verts, outerEnd);
+      pushPoint(verts, innerEnd);
+
+      currentS = ear.end;
+    });
+
+    appendArcSegment(verts, arc, currentS, arc.arcLength, 0, ARC_SEGMENTS);
   };
 
   const buildVertices = () => {
     const verts = [[earDepth, earDepth]];
 
     if (curvedTop && arcRise > 0) {
-      const arcPoints = getTopArcPoints();
-
-      // First point is already in verts, so skip index 0
-      for (let i = 1; i < arcPoints.length; i++) {
-        verts.push(arcPoints[i]);
-      }
+      buildCurvedTopVertices(verts);
     } else {
       grouped.top.forEach(ear => {
         const p = ear.pos;
@@ -253,13 +359,25 @@ export default function App() {
     return verts;
   };
 
-  // Snap vertices intentionally do NOT include intermediate curved arc points yet
   const buildSnapVertices = () => {
     const verts = [];
 
     verts.push([earDepth, earDepth]);
 
-    if (!curvedTop) {
+    if (curvedTop && arcRise > 0) {
+      const arc = getTopArcData();
+
+      if (arc) {
+        getCurvedTopEarRanges().forEach(ear => {
+          verts.push(
+            arc.pointAt(ear.start, 0),
+            arc.pointAt(ear.start, earDepth),
+            arc.pointAt(ear.end, earDepth),
+            arc.pointAt(ear.end, 0)
+          );
+        });
+      }
+    } else {
       grouped.top.forEach(ear => {
         const p = ear.pos;
         verts.push([p, earDepth], [p, 0], [p + earLength, 0], [p + earLength, earDepth]);
@@ -292,7 +410,7 @@ export default function App() {
 
   const snapPoints = useMemo(
     () => buildSnapVertices(),
-    [grouped, width, height, curvedTop]
+    [grouped, width, height, curvedTop, arcRise, manualMode, hEars]
   );
 
   const buildOutlinePath = () => {
@@ -630,7 +748,7 @@ export default function App() {
 
     const a = document.createElement('a');
     a.href = url;
-    a.download = `rectangle-${width}x${height}${curvedTop ? '-curved-top' : ''}.dxf`;
+    a.download = `rectangle-${width}x${height}${curvedTop ? '-curved-top-ears' : ''}.dxf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -678,6 +796,8 @@ export default function App() {
       </button>
     );
   };
+
+  const extraTopSpace = curvedTop ? arcRise + earDepth : 0;
 
   return (
     <div
@@ -758,7 +878,7 @@ export default function App() {
                   className="w-full mt-1 p-2 border rounded-lg"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Top + bottom. Top disabled when curved top is active.
+                  Top + bottom. Top follows arc when curved top is active.
                 </p>
               </div>
 
@@ -800,7 +920,7 @@ export default function App() {
                   className="w-full mt-1 p-2 border rounded-lg"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Current version disables top ears and exports the curve as segmented DXF polyline.
+                  Top ears follow the arc. Export is still segmented polyline for now.
                 </p>
               </div>
             )}
@@ -817,7 +937,7 @@ export default function App() {
             <p>• Auto mode: optimized spacing 240–400mm</p>
             <p>• Manual mode: fixed ear count with 80mm visible margins</p>
             <p>• N=1 centers ear perfectly</p>
-            <p>• Curved top: first test version, top ears disabled</p>
+            <p>• Curved top: top ears follow the circular arc</p>
           </div>
         </div>
 
@@ -833,8 +953,8 @@ export default function App() {
           >
             <svg
               width={width * scale + viewportPadding * 2}
-              height={(height + (curvedTop ? arcRise : 0)) * scale + viewportPadding * 2}
-              viewBox={`${-viewportPadding} ${-viewportPadding - (curvedTop ? arcRise * scale : 0)} ${width * scale + viewportPadding * 2} ${(height + (curvedTop ? arcRise : 0)) * scale + viewportPadding * 2}`}
+              height={(height + extraTopSpace) * scale + viewportPadding * 2}
+              viewBox={`${-viewportPadding} ${-viewportPadding - extraTopSpace * scale} ${width * scale + viewportPadding * 2} ${(height + extraTopSpace) * scale + viewportPadding * 2}`}
               className="mx-auto"
               onMouseMove={handlePreviewMouseMove}
               onMouseLeave={handlePreviewMouseLeave}
@@ -869,7 +989,6 @@ export default function App() {
                           : 'default'
                     }}
                   >
-                    {/* Invisible larger hit area */}
                     <line
                       x1={geometry.d1[0] * scale}
                       y1={geometry.d1[1] * scale}
@@ -879,7 +998,6 @@ export default function App() {
                       strokeWidth="14"
                     />
 
-                    {/* Extension lines */}
                     <line
                       x1={m.p1[0] * scale}
                       y1={m.p1[1] * scale}
@@ -898,7 +1016,6 @@ export default function App() {
                       strokeWidth="1.5"
                     />
 
-                    {/* Dimension line */}
                     <line
                       x1={geometry.d1[0] * scale}
                       y1={geometry.d1[1] * scale}
@@ -908,18 +1025,9 @@ export default function App() {
                       strokeWidth="2"
                     />
 
-                    {/* Arrowheads */}
-                    <polygon
-                      points={polygonPoints(geometry.leftArrow)}
-                      fill={color}
-                    />
+                    <polygon points={polygonPoints(geometry.leftArrow)} fill={color} />
+                    <polygon points={polygonPoints(geometry.rightArrow)} fill={color} />
 
-                    <polygon
-                      points={polygonPoints(geometry.rightArrow)}
-                      fill={color}
-                    />
-
-                    {/* Text hit area */}
                     <text
                       x={geometry.label[0] * scale}
                       y={geometry.label[1] * scale}
@@ -934,7 +1042,6 @@ export default function App() {
                       {geometry.distance.toFixed(1)} mm
                     </text>
 
-                    {/* Dimension text */}
                     <text
                       x={geometry.label[0] * scale}
                       y={geometry.label[1] * scale}
@@ -947,7 +1054,6 @@ export default function App() {
                       {geometry.distance.toFixed(1)} mm
                     </text>
 
-                    {/* Grip handles when selected */}
                     {(m.selected || draggingMeasurement?.id === m.id) && (
                       <>
                         <rect
