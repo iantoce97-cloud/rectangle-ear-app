@@ -717,45 +717,425 @@ export default function App() {
       )
     );
   };
+const roundDXF = (value) => Math.round(value * 1000000) / 1000000;
 
-  const downloadDXF = () => {
-    const raw = buildVertices();
+const toDXFPoint = ([x, y]) => {
+  return [
+    roundDXF(x),
+    roundDXF(height - y)
+  ];
+};
 
-    const verts = raw.map(([x, y]) => [
-      Math.round(x * 1000) / 1000,
-      Math.round((height - y) * 1000) / 1000
-    ]);
+const arcBulge = (arc, startS, endS) => {
+  const includedAngle = (endS - startS) / arc.radius;
 
-    const cleaned = verts.filter((p, i, arr) => {
-      if (i === 0) return true;
-      const prev = arr[i - 1];
-      return !(p[0] === prev[0] && p[1] === prev[1]);
+  /*
+    DXF LWPOLYLINE bulge:
+    bulge = tan(includedAngle / 4)
+
+    Negative sign is used because SVG Y-axis and DXF Y-axis are flipped.
+    If the arcs appear inverted in Fusion, change this to positive.
+  */
+  return roundDXF(-Math.tan(includedAngle / 4));
+};
+
+const buildCurvedDXFLwPolyline = () => {
+  const arc = getTopArcData();
+  if (!arc) return '';
+
+  const vertices = [];
+  const startPoint = [earDepth, earDepth];
+  let currentPoint = startPoint;
+
+  const pushVertex = (point, bulge = 0) => {
+    const [x, y] = toDXFPoint(point);
+
+    const last = vertices[vertices.length - 1];
+
+    if (
+      last &&
+      Math.abs(last.x - x) < 0.000001 &&
+      Math.abs(last.y - y) < 0.000001
+    ) {
+      last.bulge = roundDXF(bulge);
+      return;
+    }
+
+    vertices.push({
+      x,
+      y,
+      bulge: roundDXF(bulge)
     });
-
-    let dxf = '';
-    dxf += '0\nSECTION\n2\nENTITIES\n';
-    dxf += '0\nPOLYLINE\n8\n0\n66\n1\n70\n1\n';
-
-    cleaned.forEach(([x, y]) => {
-      dxf += '0\nVERTEX\n8\n0\n';
-      dxf += `10\n${x}\n20\n${y}\n30\n0\n`;
-    });
-
-    dxf += '0\nSEQEND\n0\nENDSEC\n0\nEOF';
-
-    const blob = new Blob([dxf], { type: 'application/dxf' });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `rectangle-${width}x${height}${curvedTop ? '-curved-top-ears' : ''}.dxf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    URL.revokeObjectURL(url);
   };
 
+  const addLineTo = (nextPoint) => {
+    pushVertex(currentPoint, 0);
+    currentPoint = nextPoint;
+  };
+
+  const addArcTo = (startS, endS, radialOffset = 0) => {
+    if (Math.abs(endS - startS) < 0.001) return;
+
+    const startPointOnArc = arc.pointAt(startS, radialOffset);
+    const endPointOnArc = arc.pointAt(endS, radialOffset);
+
+    currentPoint = startPointOnArc;
+
+    pushVertex(currentPoint, arcBulge(arc, startS, endS));
+
+    currentPoint = endPointOnArc;
+  };
+
+  const ears = getCurvedTopEarRanges();
+  let currentS = 0;
+
+  ears.forEach(ear => {
+    // Main visible arc before ear
+    addArcTo(currentS, ear.start, 0);
+
+    const innerStart = arc.pointAt(ear.start, 0);
+    const outerStart = arc.pointAt(ear.start, earDepth);
+    const outerEnd = arc.pointAt(ear.end, earDepth);
+    const innerEnd = arc.pointAt(ear.end, 0);
+
+    // Ear side outward
+    currentPoint = innerStart;
+    addLineTo(outerStart);
+
+    // Ear top curve as one bulged segment
+    currentPoint = outerStart;
+    pushVertex(currentPoint, arcBulge(arc, ear.start, ear.end));
+    currentPoint = outerEnd;
+
+    // Ear side inward
+    addLineTo(innerEnd);
+
+    currentS = ear.end;
+  });
+
+  // Final visible main arc after last ear
+  addArcTo(currentS, arc.arcLength, 0);
+
+  // Right side ears
+  grouped.right.forEach(ear => {
+    const p = ear.pos;
+    addLineTo([width - earDepth, p]);
+    addLineTo([width, p]);
+    addLineTo([width, p + earLength]);
+    addLineTo([width - earDepth, p + earLength]);
+  });
+
+  addLineTo([width - earDepth, height - earDepth]);
+
+  // Bottom ears
+  grouped.bottom.forEach(ear => {
+    const p = ear.pos;
+    addLineTo([p + earLength, height - earDepth]);
+    addLineTo([p + earLength, height]);
+    addLineTo([p, height]);
+    addLineTo([p, height - earDepth]);
+  });
+
+  addLineTo([earDepth, height - earDepth]);
+
+  // Left side ears
+  grouped.left.forEach(ear => {
+    const p = ear.pos;
+    addLineTo([earDepth, p + earLength]);
+    addLineTo([0, p + earLength]);
+    addLineTo([0, p]);
+    addLineTo([earDepth, p]);
+  });
+
+  // Close back to start
+  addLineTo(startPoint);
+
+  let entity = '';
+  entity += '0\nLWPOLYLINE\n';
+  entity += '8\n0\n';
+  entity += `90\n${vertices.length}\n`;
+  entity += '70\n1\n'; // closed polyline
+
+  vertices.forEach(v => {
+    entity += `10\n${v.x}\n`;
+    entity += `20\n${v.y}\n`;
+
+    if (Math.abs(v.bulge) > 0.0000001) {
+      entity += `42\n${v.bulge}\n`;
+    }
+  });
+
+  return entity;
+};
+const buildStraightDXFLwPolyline = () => {
+  const raw = buildVertices();
+
+  const vertices = raw.map(([x, y]) => {
+    const [dx, dy] = toDXFPoint([x, y]);
+    return { x: dx, y: dy, bulge: 0 };
+  });
+
+  const cleaned = vertices.filter((p, i, arr) => {
+    if (i === 0) return true;
+    const prev = arr[i - 1];
+    return !(
+      Math.abs(p.x - prev.x) < 0.000001 &&
+      Math.abs(p.y - prev.y) < 0.000001
+    );
+  });
+
+  let entity = '';
+  entity += '0\nLWPOLYLINE\n';
+  entity += '8\n0\n';
+  entity += `90\n${cleaned.length}\n`;
+  entity += '70\n1\n'; // closed
+
+  cleaned.forEach(v => {
+    entity += `10\n${v.x}\n`;
+    entity += `20\n${v.y}\n`;
+
+    if (Math.abs(v.bulge) > 0.0000001) {
+      entity += `42\n${v.bulge}\n`;
+    }
+  });
+
+  return entity;
+};
+const fusionLineEntity = (p1, p2) => {
+  const [x1, y1] = toDXFPoint(p1);
+  const [x2, y2] = toDXFPoint(p2);
+
+  return (
+    '0\nLINE\n8\n0\n' +
+    `10\n${x1}\n20\n${y1}\n11\n${x2}\n21\n${y2}\n`
+  );
+};
+
+const fusionArcEntity = (arc, startS, endS, radialOffset = 0) => {
+  if (Math.abs(endS - startS) < 0.001) return '';
+
+  const radius = arc.radius + radialOffset;
+
+  const pointAtOffset = (s) => {
+    const theta = arc.thetaStart + s / arc.radius;
+
+    return [
+      arc.cx + radius * Math.cos(theta),
+      arc.cy + radius * Math.sin(theta)
+    ];
+  };
+
+  const startPoint = pointAtOffset(startS);
+  const endPoint = pointAtOffset(endS);
+
+  const [cx, cy] = toDXFPoint([arc.cx, arc.cy]);
+
+  const angleDeg = (point) => {
+    const [px, py] = toDXFPoint(point);
+    let angle = Math.atan2(py - cy, px - cx) * 180 / Math.PI;
+    if (angle < 0) angle += 360;
+    return roundDXF(angle);
+  };
+
+  /*
+    DXF ARC direction is counter-clockwise.
+    Because SVG Y is flipped compared with DXF,
+    we swap start/end angles.
+  */
+  const startAngle = angleDeg(endPoint);
+  const endAngle = angleDeg(startPoint);
+
+  return (
+    '0\nARC\n8\n0\n' +
+    `10\n${cx}\n20\n${cy}\n40\n${roundDXF(radius)}\n` +
+    `50\n${startAngle}\n51\n${endAngle}\n`
+  );
+};
+
+const buildFusionStraightEntities = () => {
+  const raw = buildVertices();
+  const entities = [];
+
+  for (let i = 0; i < raw.length; i++) {
+    const p1 = raw[i];
+    const p2 = raw[(i + 1) % raw.length];
+
+    if (
+      Math.abs(p1[0] - p2[0]) > 0.000001 ||
+      Math.abs(p1[1] - p2[1]) > 0.000001
+    ) {
+      entities.push(fusionLineEntity(p1, p2));
+    }
+  }
+
+  return entities;
+};
+
+const buildFusionCurvedEntities = () => {
+  const arc = getTopArcData();
+  if (!arc) return buildFusionStraightEntities();
+
+  const entities = [];
+  const startPoint = [earDepth, earDepth];
+  let currentPoint = startPoint;
+
+  const addLine = (nextPoint) => {
+    if (
+      Math.abs(currentPoint[0] - nextPoint[0]) > 0.000001 ||
+      Math.abs(currentPoint[1] - nextPoint[1]) > 0.000001
+    ) {
+      entities.push(fusionLineEntity(currentPoint, nextPoint));
+      currentPoint = nextPoint;
+    }
+  };
+
+  const addArc = (startS, endS, radialOffset = 0) => {
+    if (Math.abs(endS - startS) < 0.001) return;
+
+    entities.push(fusionArcEntity(arc, startS, endS, radialOffset));
+    currentPoint = arc.pointAt(endS, radialOffset);
+  };
+
+  const ears = getCurvedTopEarRanges();
+  let currentS = 0;
+
+  ears.forEach(ear => {
+    // Main visible top arc before the ear
+    addArc(currentS, ear.start, 0);
+
+    const innerStart = arc.pointAt(ear.start, 0);
+    const outerStart = arc.pointAt(ear.start, earDepth);
+    const outerEnd = arc.pointAt(ear.end, earDepth);
+    const innerEnd = arc.pointAt(ear.end, 0);
+
+    // Ear side out
+    currentPoint = innerStart;
+    addLine(outerStart);
+
+    // Ear top as one true ARC
+    entities.push(fusionArcEntity(arc, ear.start, ear.end, earDepth));
+    currentPoint = outerEnd;
+
+    // Ear side back in
+    addLine(innerEnd);
+
+    currentS = ear.end;
+  });
+
+  // Final visible top arc after last ear
+  addArc(currentS, arc.arcLength, 0);
+
+  // Right side ears
+  grouped.right.forEach(ear => {
+    const p = ear.pos;
+    addLine([width - earDepth, p]);
+    addLine([width, p]);
+    addLine([width, p + earLength]);
+    addLine([width - earDepth, p + earLength]);
+  });
+
+  addLine([width - earDepth, height - earDepth]);
+
+  // Bottom ears
+  grouped.bottom.forEach(ear => {
+    const p = ear.pos;
+    addLine([p + earLength, height - earDepth]);
+    addLine([p + earLength, height]);
+    addLine([p, height]);
+    addLine([p, height - earDepth]);
+  });
+
+  addLine([earDepth, height - earDepth]);
+
+  // Left side ears
+  grouped.left.forEach(ear => {
+    const p = ear.pos;
+    addLine([earDepth, p + earLength]);
+    addLine([0, p + earLength]);
+    addLine([0, p]);
+    addLine([earDepth, p]);
+  });
+
+  // Close profile
+  addLine(startPoint);
+
+  return entities;
+};
+
+const downloadFusionDXF = () => {
+  let dxf = '';
+
+  dxf += '0\nSECTION\n2\nHEADER\n';
+
+  // AutoCAD R12-style compatibility
+  dxf += '9\n$ACADVER\n1\nAC1009\n';
+
+  // Units: millimeters
+  dxf += '9\n$INSUNITS\n70\n4\n';
+
+  dxf += '0\nENDSEC\n';
+
+  dxf += '0\nSECTION\n2\nENTITIES\n';
+
+  const entities =
+    curvedTop && arcRise > 0
+      ? buildFusionCurvedEntities()
+      : buildFusionStraightEntities();
+
+  dxf += entities.join('');
+
+  dxf += '0\nENDSEC\n0\nEOF\n';
+
+  const blob = new Blob([dxf], { type: 'application/dxf' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `rectangle-${width}x${height}${curvedTop ? '-fusion-arcs' : '-fusion'}.dxf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  URL.revokeObjectURL(url);
+};
+const downloadDXF = () => {
+  let dxf = '';
+
+  dxf += '0\nSECTION\n2\nHEADER\n';
+
+  // AutoCAD 2000 DXF version
+  dxf += '9\n$ACADVER\n';
+  dxf += '1\nAC1015\n';
+
+  // Units: 4 = millimeters
+  dxf += '9\n$INSUNITS\n';
+  dxf += '70\n4\n';
+
+  dxf += '0\nENDSEC\n';
+
+  dxf += '0\nSECTION\n2\nENTITIES\n';
+
+  if (curvedTop && arcRise > 0) {
+    dxf += buildCurvedDXFLwPolyline();
+  } else {
+    dxf += buildStraightDXFLwPolyline();
+  }
+
+  dxf += '0\nENDSEC\n';
+  dxf += '0\nEOF\n';
+
+  const blob = new Blob([dxf], { type: 'application/dxf' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `rectangle-${width}x${height}${curvedTop ? '-closed-curve-polyline' : ''}.dxf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  URL.revokeObjectURL(url);
+};
   const ToolButton = ({ id, icon: Icon, label, shortcut, disabled = false }) => {
     const active = activeTool === id;
 
@@ -920,18 +1300,27 @@ export default function App() {
                   className="w-full mt-1 p-2 border rounded-lg"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Top ears follow the arc. Export is still segmented polyline for now.
+                  Top ears follow the arc. DXF exports as a closed curve polyline.
                 </p>
               </div>
             )}
           </div>
 
-          <button
-            onClick={downloadDXF}
-            className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-3 rounded-xl transition shadow-md"
-          >
-            Export DXF
-          </button>
+         <div className="space-y-3">
+  <button
+    onClick={downloadDXF}
+    className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-3 rounded-xl transition shadow-md"
+  >
+    Export DXF
+  </button>
+
+  <button
+    onClick={downloadFusionDXF}
+    className="w-full bg-blue-700 hover:bg-blue-600 text-white font-semibold py-3 rounded-xl transition shadow-md"
+  >
+    Export Fusion DXF
+  </button>
+</div>
 
           <div className="text-xs text-slate-500 leading-relaxed">
             <p>• Auto mode: optimized spacing 240–400mm</p>
