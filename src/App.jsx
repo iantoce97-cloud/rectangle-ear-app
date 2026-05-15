@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Ruler,
   MousePointer2,
@@ -24,6 +24,11 @@ export default function App() {
   const [arcRise, setArcRise] = useState(100);
 
   const [activeTool, setActiveTool] = useState(null);
+  // VIEWPORT / CAD CAMERA
+const [viewZoom, setViewZoom] = useState(1);
+const [viewPosition, setViewPosition] = useState(null);
+const [panState, setPanState] = useState(null);
+const lastMiddleClickRef = useRef(0);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -44,6 +49,10 @@ export default function App() {
   const EAR_ARC_SEGMENTS = 12;
 
   const visibleCornerMargin = margin - earDepth; // 90 - 10 = visible 80mm
+  const MIN_VIEW_ZOOM = 0.1;
+const MAX_VIEW_ZOOM = 8;
+
+const extraTopSpace = curvedTop ? arcRise + earDepth : 0;
 
   const clearMeasureTool = () => {
     setActiveTool(null);
@@ -79,9 +88,10 @@ export default function App() {
       }
     };
 
-    const handleMouseUp = () => {
-      setDraggingMeasurement(null);
-    };
+   const handleMouseUp = () => {
+  setDraggingMeasurement(null);
+  setPanState(null);
+};
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('mouseup', handleMouseUp);
@@ -419,7 +429,88 @@ export default function App() {
       .map((v, i) => `${i === 0 ? 'M' : 'L'} ${v[0] * scale} ${v[1] * scale}`)
       .join(' ') + ' Z';
   };
+const getBaseViewBox = () => {
+  return {
+    x: -viewportPadding,
+    y: -viewportPadding - extraTopSpace * scale,
+    width: width * scale + viewportPadding * 2,
+    height: (height + extraTopSpace) * scale + viewportPadding * 2
+  };
+};
 
+const getCurrentViewBox = () => {
+  const base = getBaseViewBox();
+
+  return {
+    x: viewPosition?.x ?? base.x,
+    y: viewPosition?.y ?? base.y,
+    width: base.width / viewZoom,
+    height: base.height / viewZoom
+  };
+};
+
+const resetView = () => {
+  setViewZoom(1);
+  setViewPosition(null);
+  setPanState(null);
+};
+
+const handleViewportWheel = (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+
+  const svg = e.currentTarget;
+  const rect = svg.getBoundingClientRect();
+
+  const current = getCurrentViewBox();
+  const base = getBaseViewBox();
+
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+
+  const mouseSvgX = current.x + (mouseX / rect.width) * current.width;
+  const mouseSvgY = current.y + (mouseY / rect.height) * current.height;
+
+  const zoomFactor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const nextZoom = Math.min(
+    MAX_VIEW_ZOOM,
+    Math.max(MIN_VIEW_ZOOM, viewZoom * zoomFactor)
+  );
+
+  const nextWidth = base.width / nextZoom;
+  const nextHeight = base.height / nextZoom;
+
+  const nextX = mouseSvgX - (mouseX / rect.width) * nextWidth;
+  const nextY = mouseSvgY - (mouseY / rect.height) * nextHeight;
+
+  setViewZoom(nextZoom);
+  setViewPosition({ x: nextX, y: nextY });
+};
+
+const handleViewportMouseDown = (e) => {
+  // Middle mouse button
+  if (e.button !== 1) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  const now = Date.now();
+
+  // Double middle-click resets view
+  if (now - lastMiddleClickRef.current < 300) {
+    resetView();
+    lastMiddleClickRef.current = 0;
+    return;
+  }
+
+  lastMiddleClickRef.current = now;
+
+  setPanState({
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    startView: getCurrentViewBox()
+  });
+};
   const getSvgPoint = (e) => {
     const svg =
       e.currentTarget.ownerSVGElement ||
@@ -458,7 +549,8 @@ export default function App() {
       }
     });
 
-    const snapToleranceMm = 30;
+   const snapTolerancePx = 14;
+const snapToleranceMm = snapTolerancePx / (scale * viewZoom);
 
     if (bestDist <= snapToleranceMm) {
       return best;
@@ -504,7 +596,7 @@ export default function App() {
     const offsetDirection = offset >= 0 ? 1 : -1;
 
     const labelGapPx = 22;
-    const labelGapMm = labelGapPx / scale;
+const labelGapMm = labelGapPx / (scale * viewZoom);
 
     const label = [
       mid[0] + nx * offsetDirection * labelGapMm,
@@ -517,8 +609,8 @@ export default function App() {
       angle += 180;
     }
 
-    const arrowLength = 10 / scale;
-    const arrowWidth = 5 / scale;
+    const arrowLength = 10 / (scale * viewZoom);
+const arrowWidth = 5 / (scale * viewZoom);
 
     const leftArrow = [
       d1,
@@ -565,42 +657,60 @@ export default function App() {
   };
 
   const handlePreviewMouseMove = (e) => {
-    if (activeTool !== 'measure') return;
+  if (panState) {
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
 
-    const { x, y } = getSvgPoint(e);
+    const dxPx = e.clientX - panState.startClientX;
+    const dyPx = e.clientY - panState.startClientY;
 
-    if (draggingMeasurement) {
-      const measurement = measurements.find(m => m.id === draggingMeasurement.id);
-      if (!measurement) return;
+    const dxSvg = (dxPx / rect.width) * panState.startView.width;
+    const dySvg = (dyPx / rect.height) * panState.startView.height;
 
-      const { nx, ny } = getMeasurementBaseData(measurement);
+    setViewPosition({
+      x: panState.startView.x - dxSvg,
+      y: panState.startView.y - dySvg
+    });
 
-      const dx = x - draggingMeasurement.startMouse[0];
-      const dy = y - draggingMeasurement.startMouse[1];
+    return;
+  }
 
-      const projectedOffsetChange = dx * nx + dy * ny;
-      const newOffset = draggingMeasurement.startOffset + projectedOffsetChange;
+  if (activeTool !== 'measure') return;
 
-      setMeasurements(prev =>
-        prev.map(m =>
-          m.id === draggingMeasurement.id
-            ? { ...m, offset: newOffset, selected: true }
-            : m
-        )
-      );
+  const { x, y } = getSvgPoint(e);
 
-      return;
-    }
+  if (draggingMeasurement) {
+    const measurement = measurements.find(m => m.id === draggingMeasurement.id);
+    if (!measurement) return;
 
-    const snapped = findNearestSnapPoint(x, y);
-    setHoverSnap(snapped);
-  };
+    const { nx, ny } = getMeasurementBaseData(measurement);
 
-  const handlePreviewMouseLeave = () => {
-    if (!draggingMeasurement) {
-      setHoverSnap(null);
-    }
-  };
+    const dx = x - draggingMeasurement.startMouse[0];
+    const dy = y - draggingMeasurement.startMouse[1];
+
+    const projectedOffsetChange = dx * nx + dy * ny;
+    const newOffset = draggingMeasurement.startOffset + projectedOffsetChange;
+
+    setMeasurements(prev =>
+      prev.map(m =>
+        m.id === draggingMeasurement.id
+          ? { ...m, offset: newOffset, selected: true }
+          : m
+      )
+    );
+
+    return;
+  }
+
+  const snapped = findNearestSnapPoint(x, y);
+  setHoverSnap(snapped);
+};
+
+const handlePreviewMouseLeave = () => {
+  if (!draggingMeasurement) {
+    setHoverSnap(null);
+  }
+};
 
   const createMeasurement = (p1, p2) => {
     const dx = p2[0] - p1[0];
@@ -1177,7 +1287,7 @@ const downloadDXF = () => {
     );
   };
 
-  const extraTopSpace = curvedTop ? arcRise + earDepth : 0;
+const currentViewBox = getCurrentViewBox();
 
   return (
     <div
@@ -1335,27 +1445,43 @@ const downloadDXF = () => {
 
           {/* PREVIEW */}
           <div
-            className={[
-              'bg-slate-50 rounded-xl p-4 border flex-1 overflow-auto flex items-center justify-center',
-              activeTool === 'measure' ? 'cursor-crosshair' : ''
-            ].join(' ')}
-          >
+  className={[
+    'bg-slate-50 rounded-xl p-4 border flex-1 overflow-hidden flex items-center justify-center',
+    activeTool === 'measure' ? 'cursor-crosshair' : ''
+  ].join(' ')}
+  onWheel={(e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }}
+>
             <svg
-              width={width * scale + viewportPadding * 2}
-              height={(height + extraTopSpace) * scale + viewportPadding * 2}
-              viewBox={`${-viewportPadding} ${-viewportPadding - extraTopSpace * scale} ${width * scale + viewportPadding * 2} ${(height + extraTopSpace) * scale + viewportPadding * 2}`}
-              className="mx-auto"
-              onMouseMove={handlePreviewMouseMove}
-              onMouseLeave={handlePreviewMouseLeave}
-              onClick={handlePreviewClick}
-              onMouseUp={() => setDraggingMeasurement(null)}
-            >
-              <path
-                d={buildOutlinePath()}
-                fill="none"
-                stroke="#0f172a"
-                strokeWidth="2"
-              />
+  width={width * scale + viewportPadding * 2}
+  height={(height + extraTopSpace) * scale + viewportPadding * 2}
+  viewBox={`${currentViewBox.x} ${currentViewBox.y} ${currentViewBox.width} ${currentViewBox.height}`}
+  className="mx-auto"
+  onWheel={handleViewportWheel}
+  onMouseDown={handleViewportMouseDown}
+  onMouseMove={handlePreviewMouseMove}
+  onMouseLeave={handlePreviewMouseLeave}
+  onClick={handlePreviewClick}
+  onMouseUp={() => {
+    setDraggingMeasurement(null);
+    setPanState(null);
+  }}
+  style={{
+    cursor: panState
+      ? 'grabbing'
+      : activeTool === 'measure'
+        ? 'crosshair'
+        : 'default'
+  }}
+>
+             <path
+  d={buildOutlinePath()}
+  fill="none"
+  stroke="#0f172a"
+  strokeWidth={2 / viewZoom}
+/>
 
               {/* CAD-style measurements */}
               {measurements.map((m) => {
@@ -1384,7 +1510,7 @@ const downloadDXF = () => {
                       x2={geometry.d2[0] * scale}
                       y2={geometry.d2[1] * scale}
                       stroke="transparent"
-                      strokeWidth="14"
+                      strokeWidth={14 / viewZoom}
                     />
 
                     <line
@@ -1393,7 +1519,7 @@ const downloadDXF = () => {
                       x2={geometry.d1[0] * scale}
                       y2={geometry.d1[1] * scale}
                       stroke={color}
-                      strokeWidth="1.5"
+                      strokeWidth={1.5 / viewZoom}
                     />
 
                     <line
@@ -1402,7 +1528,7 @@ const downloadDXF = () => {
                       x2={geometry.d2[0] * scale}
                       y2={geometry.d2[1] * scale}
                       stroke={color}
-                      strokeWidth="1.5"
+                      strokeWidth={1.5 / viewZoom}
                     />
 
                     <line
@@ -1411,7 +1537,7 @@ const downloadDXF = () => {
                       x2={geometry.d2[0] * scale}
                       y2={geometry.d2[1] * scale}
                       stroke={color}
-                      strokeWidth="2"
+                      strokeWidth={2 / viewZoom}
                     />
 
                     <polygon points={polygonPoints(geometry.leftArrow)} fill={color} />
@@ -1420,12 +1546,12 @@ const downloadDXF = () => {
                     <text
                       x={geometry.label[0] * scale}
                       y={geometry.label[1] * scale}
-                      fontSize="20"
+                     fontSize={20 / viewZoom}
                       textAnchor="middle"
                       dominantBaseline="middle"
                       fill="transparent"
                       stroke="transparent"
-                      strokeWidth="12"
+                     strokeWidth={12 / viewZoom}
                       transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
                     >
                       {geometry.distance.toFixed(1)} mm
@@ -1435,7 +1561,7 @@ const downloadDXF = () => {
                       x={geometry.label[0] * scale}
                       y={geometry.label[1] * scale}
                       fill={color}
-                      fontSize="13"
+                     fontSize={13 / viewZoom}
                       textAnchor="middle"
                       dominantBaseline="middle"
                       transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
@@ -1446,22 +1572,22 @@ const downloadDXF = () => {
                     {(m.selected || draggingMeasurement?.id === m.id) && (
                       <>
                         <rect
-                          x={geometry.d1[0] * scale - 4}
-                          y={geometry.d1[1] * scale - 4}
-                          width="8"
-                          height="8"
+                          x={geometry.d1[0] * scale - 4 / viewZoom}
+y={geometry.d1[1] * scale - 4 / viewZoom}
+width={8 / viewZoom}
+height={8 / viewZoom}
                           fill="#2563eb"
                           stroke="white"
-                          strokeWidth="1"
+                          strokeWidth={1 / viewZoom}
                         />
                         <rect
-                          x={geometry.d2[0] * scale - 4}
-                          y={geometry.d2[1] * scale - 4}
-                          width="8"
-                          height="8"
+                          x={geometry.d2[0] * scale - 4 / viewZoom}
+                          y={geometry.d2[1] * scale - 4 / viewZoom}
+                          width={8 / viewZoom}
+                          height={8 / viewZoom}
                           fill="#2563eb"
                           stroke="white"
-                          strokeWidth="1"
+                          strokeWidth={1 / viewZoom}
                         />
                       </>
                     )}
@@ -1473,10 +1599,10 @@ const downloadDXF = () => {
               {measurePoints.map((p, i) => (
                 <rect
                   key={i}
-                  x={p[0] * scale - 4}
-                  y={p[1] * scale - 4}
-                  width="8"
-                  height="8"
+                  x={p[0] * scale - 4 / viewZoom}
+y={p[1] * scale - 4 / viewZoom}
+width={8 / viewZoom}
+height={8 / viewZoom}
                   fill="#2563eb"
                   stroke="white"
                   strokeWidth="1"
@@ -1486,13 +1612,11 @@ const downloadDXF = () => {
               {/* Hover snap marker */}
               {activeTool === 'measure' && hoverSnap && !draggingMeasurement && (
                 <rect
-                  x={hoverSnap[0] * scale - 5}
-                  y={hoverSnap[1] * scale - 5}
-                  width="10"
-                  height="10"
-                  fill="none"
-                  stroke="#2563eb"
-                  strokeWidth="2"
+                 x={hoverSnap[0] * scale - 5 / viewZoom}
+y={hoverSnap[1] * scale - 5 / viewZoom}
+width={10 / viewZoom}
+height={10 / viewZoom}
+strokeWidth={2 / viewZoom}
                 />
               )}
             </svg>
