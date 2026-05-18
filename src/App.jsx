@@ -27,7 +27,10 @@ export default function App() {
 
   // straight | symmetric | asymmetric | double
   const [topShape, setTopShape] = useState('straight');
-  const [arcRise, setArcRise] = useState(100); // symmetric curved top only
+  const [arcRise, setArcRise] = useState(100); // symmetric curved / 3-arc crown rise
+  const [transitionHeight, setTransitionHeight] = useState(50); // symmetric 3-arc transition height percent
+  const [crownWidth, setCrownWidth] = useState(50); // symmetric 3-arc horizontal distance between merge points percent
+  const [removeSideHorizontalConstraint, setRemoveSideHorizontalConstraint] = useState(false);
 
   const [activeTool, setActiveTool] = useState(null);
 
@@ -69,15 +72,18 @@ export default function App() {
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
   const isSymmetricTop = topShape === 'symmetric';
+  const isSymmetricThreeArcTop = topShape === 'symmetricThreeArc';
   const isAsymmetricTop = topShape === 'asymmetric';
   const isDoubleArcTop = topShape === 'double';
   const isSplitHeightTop = isAsymmetricTop || isDoubleArcTop;
-  const hasArcTop = isSymmetricTop || isAsymmetricTop || isDoubleArcTop;
+  const hasArcTop = isSymmetricTop || isSymmetricThreeArcTop || isAsymmetricTop || isDoubleArcTop;
 
   const safeWidth = Math.max(earDepth * 4, n(width, earDepth * 4));
   const safeHeight = Math.max(earDepth * 4, n(height, earDepth * 4));
   const safeLeftHeight = clamp(n(leftHeight, safeHeight - 100), earDepth * 4, Math.max(earDepth * 4, safeHeight - 1));
-  const safeMiddlePosition = clamp(n(middlePosition, 50), 5, 95);
+  const safeMiddlePosition = clamp(n(middlePosition, 50), 1, 99);
+  const safeTransitionHeight = clamp(n(transitionHeight, 50), 1, 99);
+  const safeCrownWidth = clamp(n(crownWidth, 50), 1, 99);
   const autoMiddleHeight = clamp(
     Math.round((safeLeftHeight + safeHeight) / 2),
     Math.min(safeLeftHeight + 1, safeHeight - 1),
@@ -91,7 +97,7 @@ export default function App() {
   const splitMiddleBaseY = safeHeight - safeMiddleHeight + earDepth;
   const bottomBaseY = safeHeight - earDepth;
 
-  const extraTopSpace = isSymmetricTop ? n(arcRise, 0) + earDepth : 0;
+  const extraTopSpace = (isSymmetricTop || isSymmetricThreeArcTop) ? n(arcRise, 0) + earDepth : 0;
 
   const clearMeasureTool = () => {
     setActiveTool(null);
@@ -136,7 +142,7 @@ export default function App() {
     if (topShape === 'double') {
       const nextLeft = leftHeight === '' || n(leftHeight, 0) >= safeHeight ? Math.max(earDepth * 4, safeHeight - 100) : n(leftHeight, safeHeight - 100);
       setLeftHeight(nextLeft);
-      setMiddlePosition(prev => prev === '' ? 50 : clamp(n(prev, 50), 5, 95));
+      setMiddlePosition(prev => prev === '' ? 50 : clamp(n(prev, 50), 1, 99));
       setMiddleHeight(clamp(Math.round((nextLeft + safeHeight) / 2), nextLeft + 1, safeHeight - 1));
       setLeftVEars(prev => Math.max(1, n(prev, vEars)));
       setRightVEars(prev => Math.max(1, n(prev, vEars)));
@@ -201,7 +207,10 @@ export default function App() {
     leftVEars,
     rightVEars,
     topShape,
-    arcRise
+    arcRise,
+    transitionHeight,
+    crownWidth,
+    removeSideHorizontalConstraint
   ]);
 
   const makeSegment = (cx, cy, p0, p1) => {
@@ -304,6 +313,74 @@ export default function App() {
     return makeCompositeArc([segment]);
   };
 
+  const getSymmetricThreeArcTopData = () => {
+    if (!isSymmetricThreeArcTop) return null;
+
+    const rise = Math.max(0, n(arcRise, 0));
+    if (rise <= 0) return null;
+
+    const p0 = [earDepth, earDepth];
+    const peak = [safeWidth / 2, earDepth - rise];
+    const p4 = [safeWidth - earDepth, earDepth];
+    const yMeet = earDepth - rise * (safeTransitionHeight / 100);
+
+    if (yMeet >= p0[1] || yMeet <= peak[1]) return null;
+
+    const centerX = peak[0];
+    const minX = p0[0] + 0.001;
+    const maxX = peak[0] - 0.001;
+    if (maxX <= minX) return null;
+
+    const halfSpan = centerX - p0[0];
+    const crownHalfWidth = halfSpan * (safeCrownWidth / 100);
+    const bestX = clamp(centerX - crownHalfWidth, minX, maxX);
+
+    const getCenters = (x) => {
+      const leftDen = 2 * (yMeet - p0[1]);
+      const crownDen = 2 * (yMeet - peak[1]);
+      if (Math.abs(leftDen) < 0.000001 || Math.abs(crownDen) < 0.000001) return null;
+
+      const leftCy = ((x - p0[0]) ** 2 + yMeet ** 2 - p0[1] ** 2) / leftDen;
+      const crownCy = ((x - centerX) ** 2 + yMeet ** 2 - peak[1] ** 2) / crownDen;
+      return { leftCy, crownCy };
+    };
+
+    const centers = getCenters(bestX);
+    if (!centers) return null;
+
+    const leftMeet = [bestX, yMeet];
+    const rightMeet = [safeWidth - bestX, yMeet];
+
+    let leftSideCenter = [p0[0], centers.leftCy];
+    let rightSideCenter = [p4[0], centers.leftCy];
+
+    if (removeSideHorizontalConstraint) {
+      const crownCenter = [centerX, centers.crownCy];
+      const normal = [leftMeet[0] - crownCenter[0], leftMeet[1] - crownCenter[1]];
+      const chord = [leftMeet[0] - p0[0], leftMeet[1] - p0[1]];
+      const denominator = 2 * (normal[0] * chord[0] + normal[1] * chord[1]);
+
+      if (Math.abs(denominator) > 0.000001) {
+        const chordLengthSq = chord[0] * chord[0] + chord[1] * chord[1];
+        const t = -chordLengthSq / denominator;
+        const sideCx = leftMeet[0] + t * normal[0];
+        const sideCy = leftMeet[1] + t * normal[1];
+
+        if (Number.isFinite(sideCx) && Number.isFinite(sideCy)) {
+          leftSideCenter = [sideCx, sideCy];
+          rightSideCenter = [safeWidth - sideCx, sideCy];
+        }
+      }
+    }
+
+    return makeCompositeArc([
+      makeSegment(leftSideCenter[0], leftSideCenter[1], p0, leftMeet),
+      makeSegment(centerX, centers.crownCy, leftMeet, peak),
+      makeSegment(centerX, centers.crownCy, peak, rightMeet),
+      makeSegment(rightSideCenter[0], rightSideCenter[1], rightMeet, p4)
+    ]);
+  };
+
   const getAsymmetricTopArcData = () => {
     if (!isAsymmetricTop) return null;
 
@@ -353,6 +430,7 @@ export default function App() {
 
   const getActiveTopArcData = () => {
     if (isSymmetricTop) return getSymmetricTopArcData();
+    if (isSymmetricThreeArcTop) return getSymmetricThreeArcTopData();
     if (isAsymmetricTop) return getAsymmetricTopArcData();
     if (isDoubleArcTop) return getDoubleTopArcData();
     return null;
@@ -662,7 +740,7 @@ export default function App() {
 
   const snapPoints = useMemo(
     () => buildSnapVertices(),
-    [grouped, safeWidth, safeHeight, safeLeftHeight, safeMiddleHeight, safeMiddlePosition, topShape, arcRise, manualMode, hEars, leftVEars, rightVEars]
+    [grouped, safeWidth, safeHeight, safeLeftHeight, safeMiddleHeight, safeMiddlePosition, topShape, arcRise, transitionHeight, crownWidth, removeSideHorizontalConstraint, manualMode, hEars, leftVEars, rightVEars]
   );
 
   const buildOutlinePath = () => {
@@ -1341,11 +1419,12 @@ export default function App() {
             >
               <option value="straight">Straight</option>
               <option value="symmetric">Symmetric curved top</option>
+              <option value="symmetricThreeArc">Symmetric 3-arc top</option>
               <option value="asymmetric">Asymmetric arc top</option>
               <option value="double">Double arc top</option>
             </select>
 
-            {isSymmetricTop && (
+            {(isSymmetricTop || isSymmetricThreeArcTop) && (
               <div>
                 <label className="text-xs text-slate-500">Arc rise (mm)</label>
                 <input
@@ -1356,7 +1435,47 @@ export default function App() {
                   onBlur={() => handleNumberBlur(setArcRise, arcRise, 0, Infinity, 0)}
                   className="w-full mt-1 p-2 border rounded-lg"
                 />
-                <p className="text-[11px] text-slate-400 mt-1">Top ears follow a symmetric circular arc.</p>
+                <p className="text-[11px] text-slate-400 mt-1">Top ears follow the selected symmetric arc shape.</p>
+
+                {isSymmetricThreeArcTop && (
+                  <div className="mt-3">
+                    <label className="text-xs text-slate-500">Transition height (%)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="99"
+                      value={transitionHeight}
+                      onFocus={() => setFocusedNumberField('transitionHeight')}
+                      onChange={e => setTransitionHeight(e.target.value === '' ? '' : +e.target.value)}
+                      onBlur={() => handleNumberBlur(setTransitionHeight, transitionHeight, 1, 99, 50)}
+                      className="w-full mt-1 p-2 border rounded-lg"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1">1% = just above side height. 99% = just below side height + arc rise.</p>
+
+                    <label className="text-xs text-slate-500 mt-3 block">Crown width (%)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="99"
+                      value={crownWidth}
+                      onFocus={() => setFocusedNumberField('crownWidth')}
+                      onChange={e => setCrownWidth(e.target.value === '' ? '' : +e.target.value)}
+                      onBlur={() => handleNumberBlur(setCrownWidth, crownWidth, 1, 99, 50)}
+                      className="w-full mt-1 p-2 border rounded-lg"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1">Controls the horizontal distance between the two merge points. Smaller = narrower crown. Larger = wider crown.</p>
+
+                    <label className="flex items-center gap-2 text-xs text-slate-600 mt-3">
+                      <input
+                        type="checkbox"
+                        checked={removeSideHorizontalConstraint}
+                        onChange={e => setRemoveSideHorizontalConstraint(e.target.checked)}
+                      />
+                      Remove side horizontal constraint
+                    </label>
+                    <p className="text-[11px] text-slate-400 mt-1">When enabled, the side arcs are allowed to leave the side walls at an angle, creating a smoother transition into the crown while keeping tangent joins.</p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1383,12 +1502,12 @@ export default function App() {
                   <label className="text-xs text-slate-500">Middle position (%)</label>
                   <input
                     type="number"
-                    min="5"
-                    max="95"
+                    min="1"
+                    max="99"
                     value={middlePosition}
                     onFocus={() => setFocusedNumberField('middlePosition')}
                     onChange={e => setMiddlePosition(e.target.value === '' ? '' : +e.target.value)}
-                    onBlur={() => handleNumberBlur(setMiddlePosition, middlePosition, 5, 95, 50)}
+                    onBlur={() => handleNumberBlur(setMiddlePosition, middlePosition, 1, 99, 50)}
                     className="w-full mt-1 p-2 border rounded-lg"
                   />
                 </div>
@@ -1492,6 +1611,7 @@ export default function App() {
             <p>• N=1 centers ear perfectly</p>
             <p>• Asymmetric top: low left side, max right side, circular arc ends flat on the right</p>
             <p>• Double arc top: two connected circular arcs with editable middle point</p>
+            <p>• Symmetric 3-arc top: transition height + crown width controls with optional side horizontal constraint</p>
           </div>
         </div>
 
