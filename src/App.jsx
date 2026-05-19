@@ -9,7 +9,10 @@ import {
   Type,
   Grid3X3,
   Upload,
-  Wrench
+  Wrench,
+  ArrowLeft,
+  PenLine,
+  DraftingCompass
 } from 'lucide-react';
 
 export default function App() {
@@ -40,6 +43,11 @@ export default function App() {
   const [transitionHeight, setTransitionHeight] = useState(50); // symmetric 3-arc transition height percent
   const [crownWidth, setCrownWidth] = useState(50); // symmetric 3-arc horizontal distance between merge points percent
   const [removeSideHorizontalConstraint, setRemoveSideHorizontalConstraint] = useState(false);
+  const [cornerAngle, setCornerAngle] = useState(90);
+  const [workspaceMode, setWorkspaceMode] = useState('frame');
+  const [interiorDesigns, setInteriorDesigns] = useState([]);
+  const [selectedInteriorDesignId, setSelectedInteriorDesignId] = useState(null);
+  const [interiorDrag, setInteriorDrag] = useState(null);
 
   const [activeTool, setActiveTool] = useState(null);
 
@@ -49,6 +57,7 @@ export default function App() {
   const [panState, setPanState] = useState(null);
   const lastMiddleClickRef = useRef(0);
   const previewWheelBlockerRef = useRef(null);
+  const designFileInputRef = useRef(null);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -97,6 +106,12 @@ export default function App() {
 
   const safeWidth = Math.max(minPanelSize, n(width, minPanelSize));
   const safeHeight = Math.max(minPanelSize, n(height, minPanelSize));
+  const safeCornerAngle = clamp(n(cornerAngle, 90), 30, 150);
+  const shearOffset = safeWidth * Math.tan((safeCornerAngle - 90) * Math.PI / 180);
+  const minShearY = Math.min(0, shearOffset);
+  const maxShearY = Math.max(0, shearOffset);
+  const overallHeight = safeHeight + maxShearY - minShearY;
+  const isAngledPanel = Math.abs(shearOffset) > 0.000001;
   const safeLeftHeight = clamp(n(leftHeight, safeHeight - 100), minPanelSize, Math.max(minPanelSize, safeHeight - 1));
   const safeMiddlePosition = clamp(n(middlePosition, 50), 1, 99);
   const safeTransitionHeight = clamp(n(transitionHeight, 50), 1, 99);
@@ -115,6 +130,49 @@ export default function App() {
   const bottomBaseY = safeHeight - bottomEarDepth;
 
   const extraTopSpace = (isSymmetricTop || isSymmetricThreeArcTop) ? n(arcRise, 0) + topEarDepth : 0;
+
+  const leftWallLimit = Math.max(leftEarDepth, 0);
+  const rightWallLimit = safeWidth - Math.max(rightEarDepth, 0);
+  const angledRun = Math.max(1, rightWallLimit - leftWallLimit);
+  const angledEdgeLength = Math.hypot(angledRun, shearOffset) || 1;
+  const angledLengthProjection = angledRun / angledEdgeLength;
+  const topEdgeMarginForLayout = topVisibleCornerMargin * angledLengthProjection + topEarDepth;
+  const bottomEdgeMarginForLayout = Math.max(0, margin - bottomEarDepth) * angledLengthProjection + bottomEarDepth;
+  const topEarLengthForLayout = isAngledPanel && topShape === 'straight' ? topEarLength * angledLengthProjection : topEarLength;
+  const bottomEarLengthForLayout = isAngledPanel ? bottomEarLength * angledLengthProjection : bottomEarLength;
+  const topEdgeNormal = [shearOffset / angledEdgeLength, -angledRun / angledEdgeLength];
+  const bottomEdgeNormal = [-shearOffset / angledEdgeLength, angledRun / angledEdgeLength];
+
+  const transformPoint = ([x, y]) => {
+    const onLeftWall = x <= leftWallLimit + 0.001;
+    const onRightWall = x >= rightWallLimit - 0.001;
+
+    if (!onLeftWall && !onRightWall && topShape === 'straight' && y <= topEarDepth + 0.001) {
+      const t = clamp((x - leftWallLimit) / angledRun, 0, 1);
+      const base = [x, topEarDepth + t * shearOffset];
+      const outwardDepth = topEarDepth - y;
+      return [base[0] + topEdgeNormal[0] * outwardDepth, base[1] + topEdgeNormal[1] * outwardDepth];
+    }
+
+    if (!onLeftWall && !onRightWall && y >= safeHeight - bottomEarDepth - 0.001) {
+      const t = clamp((x - leftWallLimit) / angledRun, 0, 1);
+      const base = [x, safeHeight - bottomEarDepth + t * shearOffset];
+      const outwardDepth = y - (safeHeight - bottomEarDepth);
+      return [base[0] + bottomEdgeNormal[0] * outwardDepth, base[1] + bottomEdgeNormal[1] * outwardDepth];
+    }
+
+    if (onLeftWall) return [x, y];
+    if (onRightWall) return [x, y + shearOffset];
+
+    const t = (x - leftWallLimit) / angledRun;
+    return [x, y + t * shearOffset];
+  };
+
+  const transformPoints = (pointsArray) => pointsArray.map(transformPoint);
+
+  const angleFromOffset = (offset) => clamp(90 + Math.atan(offset / safeWidth) * 180 / Math.PI, 30, 150);
+
+  const offsetFromAngle = (angle) => safeWidth * Math.tan((clamp(angle, 30, 150) - 90) * Math.PI / 180);
 
   const clearMeasureTool = () => {
     setActiveTool(null);
@@ -182,6 +240,15 @@ export default function App() {
         });
       }
 
+      if (e.key.toLowerCase() === 'a') {
+        setActiveTool(prev => {
+          setMeasurePoints([]);
+          setHoverSnap(null);
+          setDraggingMeasurement(null);
+          return prev === 'angle' ? null : 'angle';
+        });
+      }
+
       if (e.key === 'Escape') {
         clearMeasureTool();
       }
@@ -195,6 +262,7 @@ export default function App() {
     const handleMouseUp = () => {
       setDraggingMeasurement(null);
       setPanState(null);
+      setInteriorDrag(null);
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -204,7 +272,7 @@ export default function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, []);
+  }, [workspaceMode]);
 
   // Clear measurements when geometry changes
   useEffect(() => {
@@ -228,6 +296,7 @@ export default function App() {
     transitionHeight,
     crownWidth,
     removeSideHorizontalConstraint,
+    cornerAngle,
     topEarLengthInput,
     topEarDepthInput,
     rightEarLengthInput,
@@ -516,9 +585,9 @@ export default function App() {
   const points = useMemo(() => {
     const ears = [];
 
-    const addAutoSide = (sideLength, orientation, length, depth) => {
+    const addAutoSide = (sideLength, orientation, length, depth, edgeMargin = margin) => {
       if (depth <= 0) return;
-      const usable = sideLength - 2 * margin - length;
+      const usable = sideLength - 2 * edgeMargin - length;
       if (usable < 0) return;
 
       let gaps = 1;
@@ -528,13 +597,13 @@ export default function App() {
       const spacing = usable / gaps;
 
       for (let i = 0; i <= gaps; i++) {
-        ears.push({ orientation, pos: margin + i * spacing });
+        ears.push({ orientation, pos: edgeMargin + i * spacing });
       }
     };
 
-    const addManualSide = (sideLength, orientation, count, length, depth) => {
+    const addManualSide = (sideLength, orientation, count, length, depth, edgeMargin = margin) => {
       if (depth <= 0) return;
-      const usable = sideLength - 2 * margin - length;
+      const usable = sideLength - 2 * edgeMargin - length;
       if (usable < 0) return;
 
       if (count === 1) {
@@ -544,7 +613,7 @@ export default function App() {
 
       const spacing = usable / (count - 1);
       for (let i = 0; i < count; i++) {
-        ears.push({ orientation, pos: margin + i * spacing });
+        ears.push({ orientation, pos: edgeMargin + i * spacing });
       }
     };
 
@@ -584,8 +653,8 @@ export default function App() {
     };
 
     if (!manualMode) {
-      if (topShape === 'straight') addAutoSide(safeWidth, 'top', topEarLength, topEarDepth);
-      addAutoSide(safeWidth, 'bottom', bottomEarLength, bottomEarDepth);
+      if (topShape === 'straight') addAutoSide(safeWidth, 'top', topEarLengthForLayout, topEarDepth, topEdgeMarginForLayout);
+      addAutoSide(safeWidth, 'bottom', bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout);
 
       if (isSplitHeightTop) {
         addAutoVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', leftEarLength, leftEarDepth);
@@ -595,8 +664,8 @@ export default function App() {
         addAutoSide(safeHeight, 'right', rightEarLength, rightEarDepth);
       }
     } else {
-      if (topShape === 'straight') addManualSide(safeWidth, 'top', Math.max(1, n(hEars, 1)), topEarLength, topEarDepth);
-      addManualSide(safeWidth, 'bottom', Math.max(1, n(hEars, 1)), bottomEarLength, bottomEarDepth);
+      if (topShape === 'straight') addManualSide(safeWidth, 'top', Math.max(1, n(hEars, 1)), topEarLengthForLayout, topEarDepth, topEdgeMarginForLayout);
+      addManualSide(safeWidth, 'bottom', Math.max(1, n(hEars, 1)), bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout);
 
       if (isSplitHeightTop) {
         addManualVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', Math.max(1, n(leftVEars, 1)), leftEarLength, leftEarDepth);
@@ -617,10 +686,14 @@ export default function App() {
     isSplitHeightTop,
     topEarLength,
     topEarDepth,
+    topEarLengthForLayout,
+    topEdgeMarginForLayout,
     rightEarLength,
     rightEarDepth,
     bottomEarLength,
     bottomEarDepth,
+    bottomEarLengthForLayout,
+    bottomEdgeMarginForLayout,
     leftEarLength,
     leftEarDepth,
     manualMode,
@@ -698,7 +771,7 @@ export default function App() {
     } else {
       grouped.top.forEach(ear => {
         const p = ear.pos;
-        verts.push([p, topEarDepth], [p, 0], [p + topEarLength, 0], [p + topEarLength, topEarDepth]);
+        verts.push([p, topEarDepth], [p, 0], [p + topEarLengthForLayout, 0], [p + topEarLengthForLayout, topEarDepth]);
       });
       verts.push([safeWidth - rightEarDepth, topEarDepth]);
     }
@@ -712,7 +785,7 @@ export default function App() {
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      verts.push([p + bottomEarLength, safeHeight - bottomEarDepth], [p + bottomEarLength, safeHeight], [p, safeHeight], [p, safeHeight - bottomEarDepth]);
+      verts.push([p + bottomEarLengthForLayout, safeHeight - bottomEarDepth], [p + bottomEarLengthForLayout, safeHeight], [p, safeHeight], [p, safeHeight - bottomEarDepth]);
     });
 
     verts.push([leftEarDepth, bottomBaseY]);
@@ -743,7 +816,7 @@ export default function App() {
     } else {
       grouped.top.forEach(ear => {
         const p = ear.pos;
-        verts.push([p, topEarDepth], [p, 0], [p + topEarLength, 0], [p + topEarLength, topEarDepth]);
+        verts.push([p, topEarDepth], [p, 0], [p + topEarLengthForLayout, 0], [p + topEarLengthForLayout, topEarDepth]);
       });
     }
 
@@ -758,7 +831,7 @@ export default function App() {
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      verts.push([p + bottomEarLength, safeHeight - bottomEarDepth], [p + bottomEarLength, safeHeight], [p, safeHeight], [p, safeHeight - bottomEarDepth]);
+      verts.push([p + bottomEarLengthForLayout, safeHeight - bottomEarDepth], [p + bottomEarLengthForLayout, safeHeight], [p, safeHeight], [p, safeHeight - bottomEarDepth]);
     });
 
     verts.push([leftEarDepth, bottomBaseY]);
@@ -778,21 +851,18 @@ export default function App() {
     return verts;
   };
 
-  const snapPoints = useMemo(
-    () => buildSnapVertices(),
-    [grouped, safeWidth, safeHeight, safeLeftHeight, safeMiddleHeight, safeMiddlePosition, topShape, arcRise, transitionHeight, crownWidth, removeSideHorizontalConstraint, manualMode, hEars, leftVEars, rightVEars]
-  );
+  const snapPoints = transformPoints(buildSnapVertices());
 
   const buildOutlinePath = () => {
-    const verts = buildVertices();
+    const verts = transformPoints(buildVertices());
     return verts.map((v, i) => `${i === 0 ? 'M' : 'L'} ${v[0] * scale} ${v[1] * scale}`).join(' ') + ' Z';
   };
 
   const getBaseViewBox = () => ({
     x: -viewportPadding,
-    y: -viewportPadding - extraTopSpace * scale,
+    y: (minShearY - extraTopSpace) * scale - viewportPadding,
     width: safeWidth * scale + viewportPadding * 2,
-    height: (safeHeight + extraTopSpace) * scale + viewportPadding * 2
+    height: (safeHeight + extraTopSpace + maxShearY - minShearY) * scale + viewportPadding * 2
   });
 
   const getCurrentViewBox = () => {
@@ -848,6 +918,21 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const handleInteriorKeyDown = (e) => {
+      if (workspaceMode !== 'interior') return;
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedInteriorDesignId) {
+        e.preventDefault();
+        deleteSelectedInteriorDesign();
+      }
+    };
+
+    window.addEventListener('keydown', handleInteriorKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleInteriorKeyDown);
+    };
+  }, [workspaceMode, selectedInteriorDesignId]);
+
   const handleViewportMouseDown = (e) => {
     if (e.button !== 1) return;
 
@@ -867,6 +952,16 @@ export default function App() {
 
   const getSvgPoint = (e) => {
     const svg = e.currentTarget.ownerSVGElement || e.target.ownerSVGElement || e.currentTarget;
+    const ctm = typeof svg.getScreenCTM === 'function' ? svg.getScreenCTM() : null;
+
+    if (ctm && typeof svg.createSVGPoint === 'function') {
+      const point = svg.createSVGPoint();
+      point.x = e.clientX;
+      point.y = e.clientY;
+      const svgPoint = point.matrixTransform(ctm.inverse());
+      return { x: svgPoint.x / scale, y: svgPoint.y / scale };
+    }
+
     const rect = svg.getBoundingClientRect();
     const viewBox = svg.viewBox.baseVal;
 
@@ -935,18 +1030,54 @@ export default function App() {
 
     return { d1, d2, mid, label, angle, distance, nx, ny, leftArrow, rightArrow };
   };
+
+  const normalizeAngle = (angle) => {
+    let next = angle;
+    while (next <= -Math.PI) next += Math.PI * 2;
+    while (next > Math.PI) next -= Math.PI * 2;
+    return next;
+  };
+
+  const getAngleMeasurementGeometry = (m) => {
+    const [p1, vertex, p3] = [m.p1, m.p2, m.p3];
+    const a1 = Math.atan2(p1[1] - vertex[1], p1[0] - vertex[0]);
+    const a2 = Math.atan2(p3[1] - vertex[1], p3[0] - vertex[0]);
+    const delta = normalizeAngle(a2 - a1);
+    const angle = Math.abs(delta) * 180 / Math.PI;
+    const len1 = Math.hypot(p1[0] - vertex[0], p1[1] - vertex[1]);
+    const len2 = Math.hypot(p3[0] - vertex[0], p3[1] - vertex[1]);
+    const displayRadius = 42 / (scale * viewZoom);
+    const radius = Math.max(12 / (scale * viewZoom), Math.min(displayRadius, len1 * 0.4, len2 * 0.4));
+    const labelRadius = radius + 22 / (scale * viewZoom);
+    const midAngle = a1 + delta / 2;
+    const start = [vertex[0] + Math.cos(a1) * radius, vertex[1] + Math.sin(a1) * radius];
+    const end = [vertex[0] + Math.cos(a1 + delta) * radius, vertex[1] + Math.sin(a1 + delta) * radius];
+    const label = [vertex[0] + Math.cos(midAngle) * labelRadius, vertex[1] + Math.sin(midAngle) * labelRadius];
+    const largeArc = Math.abs(delta) > Math.PI ? 1 : 0;
+    const sweep = delta >= 0 ? 1 : 0;
+    const arcPath = [
+      `M ${start[0] * scale} ${start[1] * scale}`,
+      `A ${radius * scale} ${radius * scale} 0 ${largeArc} ${sweep} ${end[0] * scale} ${end[1] * scale}`
+    ].join(' ');
+
+    return { angle, radius, start, end, label, arcPath };
+  };
+
   const createAutomaticGapMeasurement = (id, p1, p2, outsidePoint) => {
     if (!p1 || !p2 || Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) <= 0.001) return null;
 
-    const { distance, nx, ny } = getMeasurementBaseData({ p1, p2 });
-    const mid = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
-    const outsideVector = [outsidePoint[0] - mid[0], outsidePoint[1] - mid[1]];
+    const transformedP1 = transformPoint(p1);
+    const transformedP2 = transformPoint(p2);
+    const transformedOutsidePoint = transformPoint(outsidePoint);
+    const { distance, nx, ny } = getMeasurementBaseData({ p1: transformedP1, p2: transformedP2 });
+    const mid = [(transformedP1[0] + transformedP2[0]) / 2, (transformedP1[1] + transformedP2[1]) / 2];
+    const outsideVector = [transformedOutsidePoint[0] - mid[0], transformedOutsidePoint[1] - mid[1]];
     const offsetSign = outsideVector[0] * nx + outsideVector[1] * ny >= 0 ? 1 : -1;
 
     return {
       id,
-      p1,
-      p2,
+      p1: transformedP1,
+      p2: transformedP2,
       distance,
       offset: offsetSign * 42,
       selected: false
@@ -992,7 +1123,7 @@ export default function App() {
       }
     }
 
-    addHorizontalGap('auto-gap-bottom', grouped.bottom, safeHeight - bottomEarDepth, safeHeight + 120, bottomEarLength, bottomEarDepth);
+    addHorizontalGap('auto-gap-bottom', grouped.bottom, safeHeight - bottomEarDepth, safeHeight + 120, bottomEarLengthForLayout, bottomEarDepth);
 
     if (isAsymmetricTop || isDoubleArcTop) {
       addVerticalGap('auto-gap-left', grouped.left, leftEarDepth, -120, leftEarLength, leftEarDepth);
@@ -1019,7 +1150,7 @@ export default function App() {
       return;
     }
 
-    if (activeTool !== 'measure') return;
+    if (activeTool !== 'measure' && activeTool !== 'angle') return;
 
     const { x, y } = getSvgPoint(e);
 
@@ -1044,6 +1175,154 @@ export default function App() {
     if (!draggingMeasurement) setHoverSnap(null);
   };
 
+  const updateInteriorDesign = (id, changes) => {
+    setInteriorDesigns(prev => prev.map(item => (
+      item.id === id ? { ...item, ...changes } : item
+    )));
+  };
+
+  const getSelectedInteriorDesign = () => (
+    interiorDesigns.find(item => item.id === selectedInteriorDesignId) || null
+  );
+
+  const getInteriorDesignHandles = (design) => {
+    if (!design) return [];
+    const { x, y, width: itemWidth, height: itemHeight } = design;
+    const cx = x + itemWidth / 2;
+    const cy = y + itemHeight / 2;
+
+    return [
+      { id: 'nw', x, y, cursor: 'nwse-resize' },
+      { id: 'n', x: cx, y, cursor: 'ns-resize' },
+      { id: 'ne', x: x + itemWidth, y, cursor: 'nesw-resize' },
+      { id: 'e', x: x + itemWidth, y: cy, cursor: 'ew-resize' },
+      { id: 'se', x: x + itemWidth, y: y + itemHeight, cursor: 'nwse-resize' },
+      { id: 's', x: cx, y: y + itemHeight, cursor: 'ns-resize' },
+      { id: 'sw', x, y: y + itemHeight, cursor: 'nesw-resize' },
+      { id: 'w', x, y: cy, cursor: 'ew-resize' }
+    ];
+  };
+
+  const svgTextToDataUrl = (text) => {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    bytes.forEach(byte => {
+      binary += String.fromCharCode(byte);
+    });
+    return `data:image/svg+xml;base64,${btoa(binary)}`;
+  };
+
+  const handleInteriorDesignFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const svgText = String(reader.result || '');
+      const defaultSize = Math.max(80, Math.min(safeWidth, safeHeight) * 0.25);
+      const nextDesign = {
+        id: crypto.randomUUID(),
+        name: file.name.replace(/\.svg$/i, '') || 'SVG design',
+        href: svgTextToDataUrl(svgText),
+        svgText,
+        color: 'white',
+        x: safeWidth / 2 - defaultSize / 2,
+        y: safeHeight / 2 - defaultSize / 2,
+        width: defaultSize,
+        height: defaultSize
+      };
+
+      setInteriorDesigns(prev => [...prev, nextDesign]);
+      setSelectedInteriorDesignId(nextDesign.id);
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const startInteriorDesignDrag = (e, design, mode, handle = null) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const point = getSvgPoint(e);
+    setSelectedInteriorDesignId(design.id);
+    setInteriorDrag({
+      id: design.id,
+      mode,
+      handle,
+      startMouse: [point.x, point.y],
+      startDesign: { x: design.x, y: design.y, width: design.width, height: design.height }
+    });
+  };
+
+  const handleInteriorPreviewMouseMove = (e) => {
+    if (panState) {
+      handlePreviewMouseMove(e);
+      return;
+    }
+
+    if (!interiorDrag) return;
+
+    const point = getSvgPoint(e);
+    const dx = point.x - interiorDrag.startMouse[0];
+    const dy = point.y - interiorDrag.startMouse[1];
+    const start = interiorDrag.startDesign;
+    const minSize = 10;
+
+    if (interiorDrag.mode === 'move') {
+      updateInteriorDesign(interiorDrag.id, {
+        x: start.x + dx,
+        y: start.y + dy
+      });
+      return;
+    }
+
+    const next = { ...start };
+    const handle = interiorDrag.handle;
+
+    if (handle.includes('e')) next.width = Math.max(minSize, start.width + dx);
+    if (handle.includes('s')) next.height = Math.max(minSize, start.height + dy);
+    if (handle.includes('w')) {
+      const proposedWidth = Math.max(minSize, start.width - dx);
+      next.x = start.x + start.width - proposedWidth;
+      next.width = proposedWidth;
+    }
+    if (handle.includes('n')) {
+      const proposedHeight = Math.max(minSize, start.height - dy);
+      next.y = start.y + start.height - proposedHeight;
+      next.height = proposedHeight;
+    }
+
+    updateInteriorDesign(interiorDrag.id, next);
+  };
+
+  const handleInteriorNumberChange = (field, value) => {
+    const design = getSelectedInteriorDesign();
+    if (!design) return;
+    if (value === '') {
+      updateInteriorDesign(design.id, { [field]: '' });
+      return;
+    }
+
+    const min = field === 'width' || field === 'height' ? 10 : -Infinity;
+    updateInteriorDesign(design.id, { [field]: Math.max(min, Number(value)) });
+  };
+
+  const handleInteriorNumberBlur = (field, fallback) => {
+    const design = getSelectedInteriorDesign();
+    if (!design) return;
+
+    const min = field === 'width' || field === 'height' ? 10 : -Infinity;
+    updateInteriorDesign(design.id, { [field]: Math.max(min, n(design[field], fallback)) });
+  };
+
+  const deleteSelectedInteriorDesign = () => {
+    if (!selectedInteriorDesignId) return;
+    setInteriorDesigns(prev => prev.filter(item => item.id !== selectedInteriorDesignId));
+    setSelectedInteriorDesignId(null);
+    setInteriorDrag(null);
+  };
+
   const createMeasurement = (p1, p2) => {
     const dx = p2[0] - p1[0];
     const dy = p2[1] - p1[1];
@@ -1058,11 +1337,23 @@ export default function App() {
     const dot = fromCenterToMeasurement[0] * nx + fromCenterToMeasurement[1] * ny;
     const offset = dot < 0 ? -INITIAL_DIMENSION_OFFSET : INITIAL_DIMENSION_OFFSET;
 
-    return { id: crypto.randomUUID(), p1, p2, distance, offset, selected: false };
+    return { id: crypto.randomUUID(), type: 'distance', p1, p2, distance, offset, selected: false };
+  };
+
+  const createAngleMeasurement = (p1, p2, p3) => {
+    const len1 = Math.hypot(p1[0] - p2[0], p1[1] - p2[1]);
+    const len2 = Math.hypot(p3[0] - p2[0], p3[1] - p2[1]);
+    if (len1 <= 0.001 || len2 <= 0.001) return null;
+
+    const a1 = Math.atan2(p1[1] - p2[1], p1[0] - p2[0]);
+    const a2 = Math.atan2(p3[1] - p2[1], p3[0] - p2[0]);
+    const angle = Math.abs(normalizeAngle(a2 - a1)) * 180 / Math.PI;
+
+    return { id: crypto.randomUUID(), type: 'angle', p1, p2, p3, angle, selected: false };
   };
 
   const handlePreviewClick = (e) => {
-    if (activeTool !== 'measure') return;
+    if (activeTool !== 'measure' && activeTool !== 'angle') return;
     e.stopPropagation();
     if (draggingMeasurement) return;
 
@@ -1071,6 +1362,26 @@ export default function App() {
     if (!snapped) return;
 
     const nextPoints = [...measurePoints, snapped];
+
+    if (activeTool === 'angle') {
+      if (nextPoints.length === 3) {
+        const [p1, p2, p3] = nextPoints;
+        const nextAngle = createAngleMeasurement(p1, p2, p3);
+
+        if (!nextAngle) {
+          setMeasurePoints([]);
+          return;
+        }
+
+        setMeasurements(prev => [...prev.map(m => ({ ...m, selected: false })), nextAngle]);
+        setMeasurePoints([]);
+      } else {
+        setMeasurements(prev => prev.map(m => ({ ...m, selected: false })));
+        setMeasurePoints(nextPoints);
+      }
+
+      return;
+    }
 
     if (nextPoints.length === 2) {
       const [p1, p2] = nextPoints;
@@ -1097,7 +1408,7 @@ export default function App() {
   };
 
   const handleMeasurementClick = (e, measurement) => {
-    if (activeTool !== 'measure') return;
+    if (activeTool !== 'measure' && activeTool !== 'angle') return;
     e.stopPropagation();
     setMeasurements(prev => prev.map(m => m.id === measurement.id ? { ...m, selected: true } : { ...m, selected: false }));
   };
@@ -1105,7 +1416,193 @@ export default function App() {
   const roundDXF = (value) => Math.round(value * 1000000) / 1000000;
   const dxfLine = (...items) => `${items.join('\n')}\n`;
 
-  const toDXFPoint = ([x, y]) => [roundDXF(x), roundDXF(safeHeight - y)];
+  const toDXFPoint = (point) => {
+    const [x, y] = transformPoint(point);
+    return [roundDXF(x), roundDXF(overallHeight - (y - minShearY))];
+  };
+
+  const toRawDXFPoint = ([x, y]) => [roundDXF(x), roundDXF(overallHeight - (y - minShearY))];
+
+  const dxfPolylineEntity = (points, closed = true, layer = '0') => {
+    const cleaned = points
+      .map(point => toRawDXFPoint(point))
+      .filter((point, index, arr) => {
+        if (index === 0) return true;
+        const prev = arr[index - 1];
+        return Math.hypot(point[0] - prev[0], point[1] - prev[1]) > 0.000001;
+      });
+
+    if (cleaned.length < 2) return '';
+
+    let entity = dxfLine('0', 'LWPOLYLINE', '8', layer, '90', cleaned.length, '70', closed ? '1' : '0');
+    cleaned.forEach(([x, y]) => {
+      entity += dxfLine('10', x, '20', y);
+    });
+    return entity;
+  };
+
+  const parseSvgNumberList = (value) => (value || '')
+    .trim()
+    .split(/[\s,]+/)
+    .map(Number)
+    .filter(Number.isFinite);
+
+  const parseSvgPoints = (value) => {
+    const nums = parseSvgNumberList(value);
+    const points = [];
+    for (let i = 0; i < nums.length - 1; i += 2) {
+      points.push([nums[i], nums[i + 1]]);
+    }
+    return points;
+  };
+
+  const multiplyMatrix = (a, b) => ([
+    a[0] * b[0] + a[2] * b[1],
+    a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3],
+    a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4],
+    a[1] * b[4] + a[3] * b[5] + a[5]
+  ]);
+
+  const applyMatrix = (matrix, [x, y]) => ([
+    matrix[0] * x + matrix[2] * y + matrix[4],
+    matrix[1] * x + matrix[3] * y + matrix[5]
+  ]);
+
+  const parseSvgTransform = (value) => {
+    let matrix = [1, 0, 0, 1, 0, 0];
+    const pattern = /(\w+)\(([^)]*)\)/g;
+    let match;
+
+    while ((match = pattern.exec(value || ''))) {
+      const type = match[1];
+      const nums = parseSvgNumberList(match[2]);
+      let next = [1, 0, 0, 1, 0, 0];
+
+      if (type === 'matrix' && nums.length >= 6) {
+        next = nums.slice(0, 6);
+      } else if (type === 'translate') {
+        next = [1, 0, 0, 1, nums[0] || 0, nums[1] || 0];
+      } else if (type === 'scale') {
+        next = [nums[0] ?? 1, 0, 0, nums[1] ?? nums[0] ?? 1, 0, 0];
+      } else if (type === 'rotate') {
+        const angle = (nums[0] || 0) * Math.PI / 180;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const rotation = [cos, sin, -sin, cos, 0, 0];
+        if (nums.length >= 3) {
+          const [cx, cy] = [nums[1], nums[2]];
+          next = multiplyMatrix(multiplyMatrix([1, 0, 0, 1, cx, cy], rotation), [1, 0, 0, 1, -cx, -cy]);
+        } else {
+          next = rotation;
+        }
+      }
+
+      matrix = multiplyMatrix(matrix, next);
+    }
+
+    return matrix;
+  };
+
+  const isBlackSvgNode = (node) => {
+    const value = `${node.getAttribute('fill') || ''} ${node.getAttribute('stroke') || ''} ${node.getAttribute('style') || ''}`.toLowerCase();
+    if (value.includes('none')) return value.includes('stroke') && !value.includes('stroke:none');
+    if (!value.trim()) return true;
+    return value.includes('black') || value.includes('#000') || value.includes('rgb(0') || value.includes('currentcolor');
+  };
+
+  const getSvgRootBox = (svg) => {
+    const viewBox = parseSvgNumberList(svg.getAttribute('viewBox'));
+    if (viewBox.length >= 4) return { x: viewBox[0], y: viewBox[1], width: viewBox[2], height: viewBox[3] };
+    const widthValue = parseFloat(svg.getAttribute('width')) || 100;
+    const heightValue = parseFloat(svg.getAttribute('height')) || 100;
+    return { x: 0, y: 0, width: widthValue, height: heightValue };
+  };
+
+  const buildInteriorDesignDXFEntities = () => {
+    const entities = [];
+    const parser = new DOMParser();
+
+    interiorDesigns.forEach((design, designIndex) => {
+      if (!design.svgText) return;
+
+      const doc = parser.parseFromString(design.svgText, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+      if (!svg || doc.querySelector('parsererror')) return;
+
+      const rootBox = getSvgRootBox(svg);
+      const designWidth = Math.max(10, n(design.width, 10));
+      const designHeight = Math.max(10, n(design.height, 10));
+      const scaleX = designWidth / (rootBox.width || 1);
+      const scaleY = designHeight / (rootBox.height || 1);
+      const placePoint = ([x, y]) => [
+        n(design.x, 0) + (x - rootBox.x) * scaleX,
+        n(design.y, 0) + (y - rootBox.y) * scaleY
+      ];
+      const layer = `DESIGN_${designIndex + 1}`;
+
+      const addPolyline = (points, closed = true) => {
+        if (points.length < 2) return;
+        entities.push(dxfPolylineEntity(points.map(placePoint), closed, layer));
+      };
+
+      const walk = (node, parentMatrix = [1, 0, 0, 1, 0, 0]) => {
+        if (node.nodeType !== 1) return;
+        const matrix = multiplyMatrix(parentMatrix, parseSvgTransform(node.getAttribute('transform')));
+        const tag = node.tagName.toLowerCase();
+
+        if (tag === 'path' && isBlackSvgNode(node)) {
+          const d = node.getAttribute('d');
+          if (d) {
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', d);
+            try {
+              const length = path.getTotalLength();
+              const steps = Math.max(8, Math.ceil(length / 4));
+              const points = [];
+              for (let i = 0; i <= steps; i++) {
+                const point = path.getPointAtLength(length * (i / steps));
+                points.push(applyMatrix(matrix, [point.x, point.y]));
+              }
+              addPolyline(points, true);
+            } catch {
+              // Unsupported path data is skipped.
+            }
+          }
+        } else if (tag === 'rect' && isBlackSvgNode(node)) {
+          const x = parseFloat(node.getAttribute('x')) || 0;
+          const y = parseFloat(node.getAttribute('y')) || 0;
+          const w = parseFloat(node.getAttribute('width')) || 0;
+          const h = parseFloat(node.getAttribute('height')) || 0;
+          addPolyline([[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(point => applyMatrix(matrix, point)), true);
+        } else if ((tag === 'circle' || tag === 'ellipse') && isBlackSvgNode(node)) {
+          const cx = parseFloat(node.getAttribute('cx')) || 0;
+          const cy = parseFloat(node.getAttribute('cy')) || 0;
+          const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
+          const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
+          const points = [];
+          for (let i = 0; i < 72; i++) {
+            const angle = i * Math.PI * 2 / 72;
+            points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
+          }
+          addPolyline(points, true);
+        } else if ((tag === 'polygon' || tag === 'polyline') && isBlackSvgNode(node)) {
+          addPolyline(parseSvgPoints(node.getAttribute('points')).map(point => applyMatrix(matrix, point)), tag === 'polygon');
+        } else if (tag === 'line' && isBlackSvgNode(node)) {
+          const p1 = [parseFloat(node.getAttribute('x1')) || 0, parseFloat(node.getAttribute('y1')) || 0];
+          const p2 = [parseFloat(node.getAttribute('x2')) || 0, parseFloat(node.getAttribute('y2')) || 0];
+          addPolyline([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], false);
+        }
+
+        Array.from(node.children).forEach(child => walk(child, matrix));
+      };
+
+      walk(svg);
+    });
+
+    return entities.join('');
+  };
 
   const segmentBulge = (segment, startLocal, endLocal) => {
     const includedAngle = segment.direction * ((endLocal - startLocal) / segment.radius);
@@ -1113,6 +1610,8 @@ export default function App() {
   };
 
   const buildArcTopDXFLwPolyline = () => {
+    if (isAngledPanel) return buildStraightDXFLwPolyline();
+
     const arc = getActiveTopArcData();
     if (!arc) return '';
 
@@ -1180,8 +1679,8 @@ export default function App() {
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      addLineTo([p + bottomEarLength, safeHeight - bottomEarDepth]);
-      addLineTo([p + bottomEarLength, safeHeight]);
+      addLineTo([p + bottomEarLengthForLayout, safeHeight - bottomEarDepth]);
+      addLineTo([p + bottomEarLengthForLayout, safeHeight]);
       addLineTo([p, safeHeight]);
       addLineTo([p, safeHeight - bottomEarDepth]);
     });
@@ -1283,6 +1782,8 @@ export default function App() {
   };
 
   const buildFusionArcTopEntities = () => {
+    if (isAngledPanel) return buildFusionStraightEntities();
+
     const arc = getActiveTopArcData();
     if (!arc) return buildFusionStraightEntities();
 
@@ -1336,8 +1837,8 @@ export default function App() {
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      addLine([p + bottomEarLength, safeHeight - bottomEarDepth]);
-      addLine([p + bottomEarLength, safeHeight]);
+      addLine([p + bottomEarLengthForLayout, safeHeight - bottomEarDepth]);
+      addLine([p + bottomEarLengthForLayout, safeHeight]);
       addLine([p, safeHeight]);
       addLine([p, safeHeight - bottomEarDepth]);
     });
@@ -1385,6 +1886,7 @@ export default function App() {
     dxf += dxfLine('0', 'ENDSEC');
     dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
     dxf += hasArcTop ? buildArcTopDXFLwPolyline() : buildStraightDXFLwPolyline();
+    dxf += buildInteriorDesignDXFEntities();
     dxf += dxfLine('0', 'ENDSEC', '0', 'EOF');
 
     const blob = new Blob([dxf], { type: 'application/dxf' });
@@ -1407,10 +1909,13 @@ export default function App() {
         disabled={disabled}
         onClick={() => {
           if (disabled) return;
-          if (id === 'measure' && activeTool === 'measure') {
+          if ((id === 'measure' || id === 'angle') && activeTool === id) {
             clearMeasureTool();
             return;
           }
+          setMeasurePoints([]);
+          setHoverSnap(null);
+          setDraggingMeasurement(null);
           setActiveTool(id);
         }}
         className={[
@@ -1440,6 +1945,23 @@ export default function App() {
       return;
     }
     setter(clamp(Number(value), 1, 99));
+  };
+
+  const handleCornerAngleChange = (e) => {
+    const value = e.target.value;
+    setCornerAngle(value === '' ? '' : +value);
+  };
+
+  const handleCornerOffsetChange = (e) => {
+    const value = e.target.value;
+    if (value === '') {
+      setCornerAngle('');
+      return;
+    }
+
+    const maxOffset = offsetFromAngle(150);
+    const minOffset = offsetFromAngle(30);
+    setCornerAngle(angleFromOffset(clamp(Number(value), minOffset, maxOffset)));
   };
 
   const handleNumberBlur = (setter, value, min, max = Infinity, fallback = min) => {
@@ -1492,12 +2014,256 @@ export default function App() {
   };
 
   const currentViewBox = getCurrentViewBox();
+  const selectedInteriorDesign = getSelectedInteriorDesign();
+
+  const openInteriorDesigner = () => {
+    clearMeasureTool();
+    resetView();
+    setWorkspaceMode('interior');
+  };
+
+  if (workspaceMode === 'interior') {
+    return (
+      <div className="h-screen overflow-hidden bg-slate-100 p-3">
+        <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
+          <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => setWorkspaceMode('frame')}
+                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                <ArrowLeft size={16} />
+                Back to frame
+              </button>
+              <div>
+                <h1 className="text-lg font-bold text-slate-800">Interior Designer</h1>
+                <p className="text-xs text-slate-500">{safeWidth} x {safeHeight} mm frame</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 min-h-0 p-3 flex gap-3">
+            <div
+              ref={previewWheelBlockerRef}
+              className="relative flex-1 min-w-0 min-h-0 rounded-lg border bg-slate-50 overflow-hidden"
+              onWheel={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+            >
+              <svg
+                width="100%"
+                height="100%"
+                viewBox={`${currentViewBox.x} ${currentViewBox.y} ${currentViewBox.width} ${currentViewBox.height}`}
+                className="h-full w-full"
+              onWheel={handleViewportWheel}
+              onMouseDown={handleViewportMouseDown}
+                onMouseMove={handleInteriorPreviewMouseMove}
+                onMouseUp={() => {
+                  setPanState(null);
+                  setInteriorDrag(null);
+                }}
+                onMouseLeave={() => {
+                  setPanState(null);
+                  setInteriorDrag(null);
+                }}
+                onClick={() => setSelectedInteriorDesignId(null)}
+                style={{ cursor: panState ? 'grabbing' : 'default' }}
+              >
+                <path
+                  d={buildOutlinePath()}
+                  fill="#000000"
+                  stroke="#0f172a"
+                  strokeWidth={2 / viewZoom}
+                />
+
+                {interiorDesigns.map((design) => {
+                  const selected = design.id === selectedInteriorDesignId;
+                  const x = n(design.x, 0);
+                  const y = n(design.y, 0);
+                  const itemWidth = Math.max(10, n(design.width, 10));
+                  const itemHeight = Math.max(10, n(design.height, 10));
+
+                  return (
+                    <g key={design.id}>
+                      <image
+                        href={design.href}
+                        x={x * scale}
+                        y={y * scale}
+                        width={itemWidth * scale}
+                        height={itemHeight * scale}
+                        preserveAspectRatio="none"
+                        onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedInteriorDesignId(design.id);
+                        }}
+                        style={{
+                          cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move',
+                          filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
+                        }}
+                      />
+
+                      {selected && (
+                        <g>
+                          <rect
+                            x={x * scale}
+                            y={y * scale}
+                            width={itemWidth * scale}
+                            height={itemHeight * scale}
+                            fill="none"
+                            stroke="#2563eb"
+                            strokeWidth={1.5 / viewZoom}
+                            strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
+                            pointerEvents="none"
+                          />
+                          {getInteriorDesignHandles({ ...design, x, y, width: itemWidth, height: itemHeight }).map(handle => (
+                            <rect
+                              key={handle.id}
+                              x={handle.x * scale - 5 / viewZoom}
+                              y={handle.y * scale - 5 / viewZoom}
+                              width={10 / viewZoom}
+                              height={10 / viewZoom}
+                              fill="#2563eb"
+                              stroke="white"
+                              strokeWidth={1 / viewZoom}
+                              onMouseDown={(e) => startInteriorDesignDrag(e, design, 'resize', handle.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              style={{ cursor: handle.cursor }}
+                            />
+                          ))}
+                        </g>
+                      )}
+                    </g>
+                  );
+                })}
+              </svg>
+
+              <div
+                className="absolute left-3 bottom-3 rounded-lg border border-slate-200 bg-white/95 p-2 shadow-sm"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-2">
+                  {[
+                    ['white', 'White', 'bg-white border-slate-300'],
+                    ['black', 'Black', 'bg-black border-black']
+                  ].map(([value, label, swatchClass]) => {
+                    const selected = selectedInteriorDesign?.color === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        disabled={!selectedInteriorDesign}
+                        onClick={() => selectedInteriorDesign && updateInteriorDesign(selectedInteriorDesign.id, { color: value })}
+                        className={[
+                          'flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs font-medium transition',
+                          selected
+                            ? 'border-blue-500 bg-blue-50 text-blue-700'
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                          !selectedInteriorDesign ? 'opacity-45 cursor-not-allowed hover:bg-white' : ''
+                        ].join(' ')}
+                      >
+                        <span className={['h-4 w-4 rounded-sm border', swatchClass].join(' ')} />
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="w-56 shrink-0 rounded-lg border bg-slate-50 p-3">
+              <div className="flex items-center gap-2 mb-3">
+                <Wrench size={18} className="text-slate-700" />
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-800">Design Tools</h2>
+                  <p className="text-[11px] text-slate-500">No tool selected</p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <input
+                  ref={designFileInputRef}
+                  type="file"
+                  accept=".svg,image/svg+xml"
+                  onChange={handleInteriorDesignFileChange}
+                  className="hidden"
+                />
+                <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
+                  <Type size={17} />
+                  <span className="flex-1 text-left">Text</span>
+                </button>
+                <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
+                  <Grid3X3 size={17} />
+                  <span className="flex-1 text-left">Patterns</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => designFileInputRef.current?.click()}
+                  className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                >
+                  <Upload size={17} />
+                  <span className="flex-1 text-left">Insert SVG</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadDXF}
+                  className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-slate-900 text-white border-slate-900 hover:bg-slate-800"
+                >
+                  <Upload size={17} />
+                  <span className="flex-1 text-left">Export DXF</span>
+                </button>
+              </div>
+
+              {selectedInteriorDesign && (
+                <div className="mt-3 rounded-lg bg-white border p-3 text-xs text-slate-600">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <p className="font-semibold text-slate-700 truncate">{selectedInteriorDesign.name}</p>
+                    <button
+                      type="button"
+                      onClick={deleteSelectedInteriorDesign}
+                      className="inline-flex items-center justify-center rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 hover:bg-red-100"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      ['X', 'x'],
+                      ['Y', 'y'],
+                      ['Width', 'width'],
+                      ['Height', 'height']
+                    ].map(([label, field]) => (
+                      <div key={field}>
+                        <label className="text-[11px] text-slate-500">{label}</label>
+                        <input
+                          type="number"
+                          value={selectedInteriorDesign[field]}
+                          onChange={e => handleInteriorNumberChange(field, e.target.value)}
+                          onBlur={() => handleInteriorNumberBlur(field, field === 'width' || field === 'height' ? 100 : 0)}
+                          className="w-full mt-1 p-1.5 border rounded-md"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
       className="h-screen overflow-hidden bg-slate-100 p-3"
       onClick={() => {
-        if (activeTool === 'measure') {
+        if (activeTool === 'measure' || activeTool === 'angle') {
           setMeasurePoints([]);
           setMeasurements([]);
           setDraggingMeasurement(null);
@@ -1538,6 +2304,47 @@ export default function App() {
               />
             </div>
           </div>
+
+          <details className="rounded-lg bg-slate-50 border px-3 py-2">
+            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Corner angle</summary>
+            <div className="grid grid-cols-3 gap-3 mt-2">
+              <div>
+                <label className="text-xs text-slate-500">Angle (deg)</label>
+                <input
+                  type="number"
+                  min="30"
+                  max="150"
+                  value={cornerAngle}
+                  onFocus={() => setFocusedNumberField('cornerAngle')}
+                  onChange={handleCornerAngleChange}
+                  onBlur={() => handleNumberBlur(setCornerAngle, cornerAngle, 30, 150, 90)}
+                  className="w-full mt-1 p-2 border rounded-md text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-500">Offset (mm)</label>
+                <input
+                  type="number"
+                  value={Number.isFinite(shearOffset) ? Math.round(shearOffset * 10) / 10 : ''}
+                  onFocus={() => setFocusedNumberField('cornerOffset')}
+                  onChange={handleCornerOffsetChange}
+                  onBlur={() => setFocusedNumberField(null)}
+                  className="w-full mt-1 p-2 border rounded-md text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-500">Overall height</label>
+                <input
+                  type="number"
+                  value={Math.round(overallHeight * 10) / 10}
+                  readOnly
+                  className="w-full mt-1 p-2 border rounded-md bg-slate-100 text-slate-600 text-sm"
+                />
+              </div>
+            </div>
+          </details>
 
           <div className="p-3 rounded-lg bg-slate-50 border space-y-2">
             <label className="text-xs text-slate-500">Top shape</label>
@@ -1759,6 +2566,15 @@ export default function App() {
             </div>
           )}
 
+          <button
+            type="button"
+            onClick={openInteriorDesigner}
+            className="w-full inline-flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white font-semibold py-2.5 rounded-lg transition shadow-sm"
+          >
+            <PenLine size={17} />
+            Interior design
+          </button>
+
           <div className="grid grid-cols-2 gap-2">
             <button onClick={downloadDXF} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-lg transition shadow-sm">
               Export DXF
@@ -1784,7 +2600,7 @@ export default function App() {
             ref={previewWheelBlockerRef}
             className={[
       'bg-slate-50 rounded-lg p-2 border flex-1 min-w-0 min-h-0 overflow-hidden flex items-center justify-center',
-      activeTool === 'measure' ? 'cursor-crosshair' : ''
+      activeTool === 'measure' || activeTool === 'angle' ? 'cursor-crosshair' : ''
             ].join(' ')}
             onWheel={(e) => {
               e.preventDefault();
@@ -1805,14 +2621,14 @@ export default function App() {
                 setDraggingMeasurement(null);
                 setPanState(null);
               }}
-              style={{ cursor: panState ? 'grabbing' : activeTool === 'measure' ? 'crosshair' : 'default' }}
+              style={{ cursor: panState ? 'grabbing' : activeTool === 'measure' || activeTool === 'angle' ? 'crosshair' : 'default' }}
             >
               <path d={buildOutlinePath()} fill="none" stroke="#0f172a" strokeWidth={2 / viewZoom} />
 
               {isDoubleArcTop && (
                 <circle
-                  cx={(leftEarDepth + (safeWidth - leftEarDepth - rightEarDepth) * (safeMiddlePosition / 100)) * scale}
-                  cy={splitMiddleBaseY * scale}
+                  cx={transformPoint([leftEarDepth + (safeWidth - leftEarDepth - rightEarDepth) * (safeMiddlePosition / 100), splitMiddleBaseY])[0] * scale}
+                  cy={transformPoint([leftEarDepth + (safeWidth - leftEarDepth - rightEarDepth) * (safeMiddlePosition / 100), splitMiddleBaseY])[1] * scale}
                   r={3 / viewZoom}
                   fill="#64748b"
                 />
@@ -1865,6 +2681,58 @@ export default function App() {
 
               {/* CAD-style measurements */}
               {measurements.map((m) => {
+                if (m.type === 'angle') {
+                  const geometry = getAngleMeasurementGeometry(m);
+                  const color = m.selected ? '#2563eb' : '#7c3aed';
+
+                  return (
+                    <g
+                      key={m.id}
+                      onClick={(e) => handleMeasurementClick(e, m)}
+                      style={{ cursor: activeTool === 'angle' ? 'pointer' : 'default' }}
+                    >
+                      <line x1={m.p2[0] * scale} y1={m.p2[1] * scale} x2={m.p1[0] * scale} y2={m.p1[1] * scale} stroke={color} strokeWidth={1.5 / viewZoom} strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`} />
+                      <line x1={m.p2[0] * scale} y1={m.p2[1] * scale} x2={m.p3[0] * scale} y2={m.p3[1] * scale} stroke={color} strokeWidth={1.5 / viewZoom} strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`} />
+                      <path d={geometry.arcPath} fill="none" stroke="transparent" strokeWidth={14 / viewZoom} />
+                      <path d={geometry.arcPath} fill="none" stroke={color} strokeWidth={2 / viewZoom} />
+                      <circle cx={m.p2[0] * scale} cy={m.p2[1] * scale} r={3.5 / viewZoom} fill={color} stroke="white" strokeWidth={1 / viewZoom} />
+
+                      <text
+                        x={geometry.label[0] * scale}
+                        y={geometry.label[1] * scale}
+                        fontSize={20 / viewZoom}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fill="none"
+                        stroke="white"
+                        strokeWidth={6 / viewZoom}
+                      >
+                        {geometry.angle.toFixed(1)} deg
+                      </text>
+
+                      <text
+                        x={geometry.label[0] * scale}
+                        y={geometry.label[1] * scale}
+                        fill={color}
+                        fontSize={12 / viewZoom}
+                        fontWeight="600"
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                      >
+                        {geometry.angle.toFixed(1)} deg
+                      </text>
+
+                      {m.selected && (
+                        <>
+                          <rect x={m.p1[0] * scale - 4 / viewZoom} y={m.p1[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth={1 / viewZoom} />
+                          <rect x={m.p2[0] * scale - 4 / viewZoom} y={m.p2[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth={1 / viewZoom} />
+                          <rect x={m.p3[0] * scale - 4 / viewZoom} y={m.p3[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth={1 / viewZoom} />
+                        </>
+                      )}
+                    </g>
+                  );
+                }
+
                 const geometry = getMeasurementGeometry(m);
                 const color = m.selected || draggingMeasurement?.id === m.id ? '#2563eb' : '#ef4444';
 
@@ -1922,7 +2790,7 @@ export default function App() {
                 <rect key={i} x={p[0] * scale - 4 / viewZoom} y={p[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth="1" />
               ))}
 
-              {activeTool === 'measure' && hoverSnap && !draggingMeasurement && (
+              {(activeTool === 'measure' || activeTool === 'angle') && hoverSnap && !draggingMeasurement && (
                 <rect x={hoverSnap[0] * scale - 5 / viewZoom} y={hoverSnap[1] * scale - 5 / viewZoom} width={10 / viewZoom} height={10 / viewZoom} fill="none" stroke="#2563eb" strokeWidth={2 / viewZoom} />
               )}
             </svg>
@@ -1940,6 +2808,7 @@ export default function App() {
 
             <div className="space-y-1.5">
               <ToolButton id="measure" icon={Ruler} label="Measure" shortcut="M" />
+              <ToolButton id="angle" icon={DraftingCompass} label="Angle" shortcut="A" />
               <ToolButton id="select" icon={MousePointer2} label="Select" disabled />
               <ToolButton id="move" icon={Move} label="Move" disabled />
               <ToolButton id="add-ear" icon={Plus} label="Add ear" disabled />
@@ -1957,6 +2826,16 @@ export default function App() {
                 <p className="mt-2">Drag the dimension line or text to move it away from the part.</p>
                 <p className="mt-2">Select a dimension and press Delete to remove it.</p>
                 <p className="mt-2 text-slate-400">Press M or Escape to clear and exit.</p>
+              </div>
+            )}
+
+            {activeTool === 'angle' && (
+              <div className="mt-3 rounded-lg bg-white border p-2 text-xs text-slate-600 leading-relaxed">
+                <p className="font-semibold text-slate-700 mb-1">Angle tool</p>
+                <p>Click three snap points to create an angle measurement.</p>
+                <p className="mt-2">The second point is the corner of the angle.</p>
+                <p className="mt-2">Select an angle and press Delete to remove it.</p>
+                <p className="mt-2 text-slate-400">Press A or Escape to clear and exit.</p>
               </div>
             )}
           </div>
