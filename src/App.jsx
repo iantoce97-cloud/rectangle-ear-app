@@ -25,6 +25,15 @@ export default function App() {
   const [leftVEars, setLeftVEars] = useState(2);
   const [rightVEars, setRightVEars] = useState(2);
 
+  const [topEarLengthInput, setTopEarLengthInput] = useState(30);
+  const [topEarDepthInput, setTopEarDepthInput] = useState(10);
+  const [rightEarLengthInput, setRightEarLengthInput] = useState(30);
+  const [rightEarDepthInput, setRightEarDepthInput] = useState(10);
+  const [bottomEarLengthInput, setBottomEarLengthInput] = useState(30);
+  const [bottomEarDepthInput, setBottomEarDepthInput] = useState(10);
+  const [leftEarLengthInput, setLeftEarLengthInput] = useState(30);
+  const [leftEarDepthInput, setLeftEarDepthInput] = useState(10);
+
   // straight | symmetric | asymmetric | double
   const [topShape, setTopShape] = useState('straight');
   const [arcRise, setArcRise] = useState(100); // symmetric curved / 3-arc crown rise
@@ -39,6 +48,7 @@ export default function App() {
   const [viewPosition, setViewPosition] = useState(null);
   const [panState, setPanState] = useState(null);
   const lastMiddleClickRef = useRef(0);
+  const previewWheelBlockerRef = useRef(null);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -47,8 +57,23 @@ export default function App() {
   const [draggingMeasurement, setDraggingMeasurement] = useState(null);
   const [focusedNumberField, setFocusedNumberField] = useState(null);
 
-  const earLength = 30;
-  const earDepth = 10;
+  const n = (value, fallback = 0) => {
+    if (value === '') return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+  const topEarLength = Math.max(1, n(topEarLengthInput, 30));
+  const topEarDepth = Math.max(0, n(topEarDepthInput, 10));
+  const rightEarLength = Math.max(1, n(rightEarLengthInput, 30));
+  const rightEarDepth = Math.max(0, n(rightEarDepthInput, 10));
+  const bottomEarLength = Math.max(1, n(bottomEarLengthInput, 30));
+  const bottomEarDepth = Math.max(0, n(bottomEarDepthInput, 10));
+  const leftEarLength = Math.max(1, n(leftEarLengthInput, 30));
+  const leftEarDepth = Math.max(0, n(leftEarDepthInput, 10));
+  const minPanelSize = 1;
   const margin = 90;
   const scale = 0.35;
   const viewportPadding = 160;
@@ -59,17 +84,9 @@ export default function App() {
   const ARC_SEGMENTS = 64;
   const EAR_ARC_SEGMENTS = 12;
 
-  const visibleCornerMargin = margin - earDepth;
+  const topVisibleCornerMargin = Math.max(0, margin - topEarDepth);
   const MIN_VIEW_ZOOM = 0.1;
   const MAX_VIEW_ZOOM = 8;
-
-  const n = (value, fallback = 0) => {
-    if (value === '') return fallback;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
-
-  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
   const isSymmetricTop = topShape === 'symmetric';
   const isSymmetricThreeArcTop = topShape === 'symmetricThreeArc';
@@ -78,9 +95,9 @@ export default function App() {
   const isSplitHeightTop = isAsymmetricTop || isDoubleArcTop;
   const hasArcTop = isSymmetricTop || isSymmetricThreeArcTop || isAsymmetricTop || isDoubleArcTop;
 
-  const safeWidth = Math.max(earDepth * 4, n(width, earDepth * 4));
-  const safeHeight = Math.max(earDepth * 4, n(height, earDepth * 4));
-  const safeLeftHeight = clamp(n(leftHeight, safeHeight - 100), earDepth * 4, Math.max(earDepth * 4, safeHeight - 1));
+  const safeWidth = Math.max(minPanelSize, n(width, minPanelSize));
+  const safeHeight = Math.max(minPanelSize, n(height, minPanelSize));
+  const safeLeftHeight = clamp(n(leftHeight, safeHeight - 100), minPanelSize, Math.max(minPanelSize, safeHeight - 1));
   const safeMiddlePosition = clamp(n(middlePosition, 50), 1, 99);
   const safeTransitionHeight = clamp(n(transitionHeight, 50), 1, 99);
   const safeCrownWidth = clamp(n(crownWidth, 50), 1, 99);
@@ -91,13 +108,13 @@ export default function App() {
   );
   const safeMiddleHeight = autoMiddleHeight;
 
-  // Base top edge is lowered by earDepth so the outward top ears do not exceed outside heights.
-  const splitLeftBaseY = safeHeight - safeLeftHeight + earDepth;
-  const splitRightBaseY = earDepth;
-  const splitMiddleBaseY = safeHeight - safeMiddleHeight + earDepth;
-  const bottomBaseY = safeHeight - earDepth;
+  // Base edges are inset by each side's ear depth so ears stay inside the outside dimensions.
+  const splitLeftBaseY = safeHeight - safeLeftHeight + topEarDepth;
+  const splitRightBaseY = topEarDepth;
+  const splitMiddleBaseY = safeHeight - safeMiddleHeight + topEarDepth;
+  const bottomBaseY = safeHeight - bottomEarDepth;
 
-  const extraTopSpace = (isSymmetricTop || isSymmetricThreeArcTop) ? n(arcRise, 0) + earDepth : 0;
+  const extraTopSpace = (isSymmetricTop || isSymmetricThreeArcTop) ? n(arcRise, 0) + topEarDepth : 0;
 
   const clearMeasureTool = () => {
     setActiveTool(null);
@@ -115,7 +132,7 @@ export default function App() {
 
     setLeftHeight(prev => {
       if (prev === '') return prev;
-      const next = clamp(n(prev, safeHeight - 100), earDepth * 4, Math.max(earDepth * 4, safeHeight - 1));
+      const next = clamp(n(prev, safeHeight - 100), minPanelSize, Math.max(minPanelSize, safeHeight - 1));
       return next === prev ? prev : next;
     });
 
@@ -134,13 +151,13 @@ export default function App() {
   useEffect(() => {
     if (focusedNumberField) return;
     if (topShape === 'asymmetric') {
-      setLeftHeight(prev => (prev === '' || n(prev, 0) >= safeHeight ? Math.max(earDepth * 4, safeHeight - 100) : prev));
+      setLeftHeight(prev => (prev === '' || n(prev, 0) >= safeHeight ? Math.max(minPanelSize, safeHeight - 100) : prev));
       setLeftVEars(prev => Math.max(1, n(prev, vEars)));
       setRightVEars(prev => Math.max(1, n(prev, vEars)));
     }
 
     if (topShape === 'double') {
-      const nextLeft = leftHeight === '' || n(leftHeight, 0) >= safeHeight ? Math.max(earDepth * 4, safeHeight - 100) : n(leftHeight, safeHeight - 100);
+      const nextLeft = leftHeight === '' || n(leftHeight, 0) >= safeHeight ? Math.max(minPanelSize, safeHeight - 100) : n(leftHeight, safeHeight - 100);
       setLeftHeight(nextLeft);
       setMiddlePosition(prev => prev === '' ? 50 : clamp(n(prev, 50), 1, 99));
       setMiddleHeight(clamp(Math.round((nextLeft + safeHeight) / 2), nextLeft + 1, safeHeight - 1));
@@ -210,7 +227,15 @@ export default function App() {
     arcRise,
     transitionHeight,
     crownWidth,
-    removeSideHorizontalConstraint
+    removeSideHorizontalConstraint,
+    topEarLengthInput,
+    topEarDepthInput,
+    rightEarLengthInput,
+    rightEarDepthInput,
+    bottomEarLengthInput,
+    bottomEarDepthInput,
+    leftEarLengthInput,
+    leftEarDepthInput
   ]);
 
   const makeSegment = (cx, cy, p0, p1) => {
@@ -299,9 +324,9 @@ export default function App() {
     const rise = Math.max(0, n(arcRise, 0));
     if (rise <= 0) return null;
 
-    const x1 = earDepth;
-    const x2 = safeWidth - earDepth;
-    const y = earDepth;
+    const x1 = leftEarDepth;
+    const x2 = safeWidth - rightEarDepth;
+    const y = topEarDepth;
     const chord = x2 - x1;
     if (chord <= 0) return null;
 
@@ -319,10 +344,10 @@ export default function App() {
     const rise = Math.max(0, n(arcRise, 0));
     if (rise <= 0) return null;
 
-    const p0 = [earDepth, earDepth];
-    const peak = [safeWidth / 2, earDepth - rise];
-    const p4 = [safeWidth - earDepth, earDepth];
-    const yMeet = earDepth - rise * (safeTransitionHeight / 100);
+    const p0 = [leftEarDepth, topEarDepth];
+    const peak = [safeWidth / 2, topEarDepth - rise];
+    const p4 = [safeWidth - rightEarDepth, topEarDepth];
+    const yMeet = topEarDepth - rise * (safeTransitionHeight / 100);
 
     if (yMeet >= p0[1] || yMeet <= peak[1]) return null;
 
@@ -384,8 +409,8 @@ export default function App() {
   const getAsymmetricTopArcData = () => {
     if (!isAsymmetricTop) return null;
 
-    const p0 = [earDepth, splitLeftBaseY];
-    const p1 = [safeWidth - earDepth, splitRightBaseY];
+    const p0 = [leftEarDepth, splitLeftBaseY];
+    const p1 = [safeWidth - rightEarDepth, splitRightBaseY];
 
     const dx = p0[0] - p1[0];
     const denominator = 2 * (p0[1] - p1[1]);
@@ -402,8 +427,8 @@ export default function App() {
   const getDoubleTopArcData = () => {
     if (!isDoubleArcTop) return null;
 
-    const p0 = [earDepth, splitLeftBaseY];
-    const p2 = [safeWidth - earDepth, splitRightBaseY];
+    const p0 = [leftEarDepth, splitLeftBaseY];
+    const p2 = [safeWidth - rightEarDepth, splitRightBaseY];
     const usableWidth = Math.max(1, p2[0] - p0[0]);
     const pm = [p0[0] + usableWidth * (safeMiddlePosition / 100), splitMiddleBaseY];
 
@@ -437,20 +462,20 @@ export default function App() {
   };
 
   const getStartPoint = () => {
-    if (isSplitHeightTop) return [earDepth, splitLeftBaseY];
-    return [earDepth, earDepth];
+    if (isSplitHeightTop) return [leftEarDepth, splitLeftBaseY];
+    return [leftEarDepth, topEarDepth];
   };
 
   const getRightTopBasePoint = () => {
-    if (isSplitHeightTop) return [safeWidth - earDepth, splitRightBaseY];
-    return [safeWidth - earDepth, earDepth];
+    if (isSplitHeightTop) return [safeWidth - rightEarDepth, splitRightBaseY];
+    return [safeWidth - rightEarDepth, topEarDepth];
   };
 
   const getTopArcEarRanges = () => {
     const arc = getActiveTopArcData();
-    if (!arc) return [];
+    if (!arc || topEarDepth <= 0) return [];
 
-    const usable = arc.arcLength - 2 * visibleCornerMargin - earLength;
+    const usable = arc.arcLength - 2 * topVisibleCornerMargin - topEarLength;
     if (usable < 0) return [];
 
     const ranges = [];
@@ -459,16 +484,16 @@ export default function App() {
       const count = Math.max(1, n(hEars, 1));
 
       if (count === 1) {
-        const start = arc.arcLength / 2 - earLength / 2;
-        ranges.push({ start, end: start + earLength });
+        const start = arc.arcLength / 2 - topEarLength / 2;
+        ranges.push({ start, end: start + topEarLength });
         return ranges;
       }
 
       const spacing = usable / (count - 1);
 
       for (let i = 0; i < count; i++) {
-        const start = visibleCornerMargin + i * spacing;
-        ranges.push({ start, end: start + earLength });
+        const start = topVisibleCornerMargin + i * spacing;
+        ranges.push({ start, end: start + topEarLength });
       }
 
       return ranges;
@@ -481,8 +506,8 @@ export default function App() {
     const spacing = usable / gaps;
 
     for (let i = 0; i <= gaps; i++) {
-      const start = visibleCornerMargin + i * spacing;
-      ranges.push({ start, end: start + earLength });
+      const start = topVisibleCornerMargin + i * spacing;
+      ranges.push({ start, end: start + topEarLength });
     }
 
     return ranges;
@@ -491,8 +516,9 @@ export default function App() {
   const points = useMemo(() => {
     const ears = [];
 
-    const addAutoSide = (sideLength, orientation) => {
-      const usable = sideLength - 2 * margin - earLength;
+    const addAutoSide = (sideLength, orientation, length, depth) => {
+      if (depth <= 0) return;
+      const usable = sideLength - 2 * margin - length;
       if (usable < 0) return;
 
       let gaps = 1;
@@ -506,12 +532,13 @@ export default function App() {
       }
     };
 
-    const addManualSide = (sideLength, orientation, count) => {
-      const usable = sideLength - 2 * margin - earLength;
+    const addManualSide = (sideLength, orientation, count, length, depth) => {
+      if (depth <= 0) return;
+      const usable = sideLength - 2 * margin - length;
       if (usable < 0) return;
 
       if (count === 1) {
-        ears.push({ orientation, pos: sideLength / 2 - earLength / 2 });
+        ears.push({ orientation, pos: sideLength / 2 - length / 2 });
         return;
       }
 
@@ -521,9 +548,11 @@ export default function App() {
       }
     };
 
-    const addAutoVerticalSpan = (startY, endY, orientation) => {
+    const addAutoVerticalSpan = (startY, endY, orientation, length, depth) => {
+      if (depth <= 0) return;
       const sideLength = endY - startY;
-      const usable = sideLength - 2 * visibleCornerMargin - earLength;
+      const visibleMargin = Math.max(0, margin - depth);
+      const usable = sideLength - 2 * visibleMargin - length;
       if (usable < 0) return;
 
       let gaps = 1;
@@ -532,47 +561,49 @@ export default function App() {
 
       const spacing = usable / gaps;
       for (let i = 0; i <= gaps; i++) {
-        ears.push({ orientation, pos: startY + visibleCornerMargin + i * spacing });
+        ears.push({ orientation, pos: startY + visibleMargin + i * spacing });
       }
     };
 
-    const addManualVerticalSpan = (startY, endY, orientation, count) => {
+    const addManualVerticalSpan = (startY, endY, orientation, count, length, depth) => {
+      if (depth <= 0) return;
       const sideLength = endY - startY;
-      const usable = sideLength - 2 * visibleCornerMargin - earLength;
+      const visibleMargin = Math.max(0, margin - depth);
+      const usable = sideLength - 2 * visibleMargin - length;
       if (usable < 0) return;
 
       if (count === 1) {
-        ears.push({ orientation, pos: startY + sideLength / 2 - earLength / 2 });
+        ears.push({ orientation, pos: startY + sideLength / 2 - length / 2 });
         return;
       }
 
       const spacing = usable / (count - 1);
       for (let i = 0; i < count; i++) {
-        ears.push({ orientation, pos: startY + visibleCornerMargin + i * spacing });
+        ears.push({ orientation, pos: startY + visibleMargin + i * spacing });
       }
     };
 
     if (!manualMode) {
-      if (topShape === 'straight') addAutoSide(safeWidth, 'top');
-      addAutoSide(safeWidth, 'bottom');
+      if (topShape === 'straight') addAutoSide(safeWidth, 'top', topEarLength, topEarDepth);
+      addAutoSide(safeWidth, 'bottom', bottomEarLength, bottomEarDepth);
 
       if (isSplitHeightTop) {
-        addAutoVerticalSpan(splitLeftBaseY, bottomBaseY, 'left');
-        addAutoVerticalSpan(splitRightBaseY, bottomBaseY, 'right');
+        addAutoVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', leftEarLength, leftEarDepth);
+        addAutoVerticalSpan(splitRightBaseY, bottomBaseY, 'right', rightEarLength, rightEarDepth);
       } else {
-        addAutoSide(safeHeight, 'left');
-        addAutoSide(safeHeight, 'right');
+        addAutoSide(safeHeight, 'left', leftEarLength, leftEarDepth);
+        addAutoSide(safeHeight, 'right', rightEarLength, rightEarDepth);
       }
     } else {
-      if (topShape === 'straight') addManualSide(safeWidth, 'top', Math.max(1, n(hEars, 1)));
-      addManualSide(safeWidth, 'bottom', Math.max(1, n(hEars, 1)));
+      if (topShape === 'straight') addManualSide(safeWidth, 'top', Math.max(1, n(hEars, 1)), topEarLength, topEarDepth);
+      addManualSide(safeWidth, 'bottom', Math.max(1, n(hEars, 1)), bottomEarLength, bottomEarDepth);
 
       if (isSplitHeightTop) {
-        addManualVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', Math.max(1, n(leftVEars, 1)));
-        addManualVerticalSpan(splitRightBaseY, bottomBaseY, 'right', Math.max(1, n(rightVEars, 1)));
+        addManualVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', Math.max(1, n(leftVEars, 1)), leftEarLength, leftEarDepth);
+        addManualVerticalSpan(splitRightBaseY, bottomBaseY, 'right', Math.max(1, n(rightVEars, 1)), rightEarLength, rightEarDepth);
       } else {
-        addManualSide(safeHeight, 'left', Math.max(1, n(vEars, 1)));
-        addManualSide(safeHeight, 'right', Math.max(1, n(vEars, 1)));
+        addManualSide(safeHeight, 'left', Math.max(1, n(vEars, 1)), leftEarLength, leftEarDepth);
+        addManualSide(safeHeight, 'right', Math.max(1, n(vEars, 1)), rightEarLength, rightEarDepth);
       }
     }
 
@@ -580,9 +611,18 @@ export default function App() {
   }, [
     safeWidth,
     safeHeight,
-    safeLeftHeight,
-    safeMiddleHeight,
-    safeMiddlePosition,
+    bottomBaseY,
+    splitLeftBaseY,
+    splitRightBaseY,
+    isSplitHeightTop,
+    topEarLength,
+    topEarDepth,
+    rightEarLength,
+    rightEarDepth,
+    bottomEarLength,
+    bottomEarDepth,
+    leftEarLength,
+    leftEarDepth,
     manualMode,
     hEars,
     vEars,
@@ -634,13 +674,13 @@ export default function App() {
       appendArcSegment(verts, arc, currentS, ear.start, 0, ARC_SEGMENTS);
 
       const innerStart = arc.pointAt(ear.start, 0);
-      const outerStart = arc.pointAt(ear.start, earDepth);
-      const outerEnd = arc.pointAt(ear.end, earDepth);
+      const outerStart = arc.pointAt(ear.start, topEarDepth);
+      const outerEnd = arc.pointAt(ear.end, topEarDepth);
       const innerEnd = arc.pointAt(ear.end, 0);
 
       pushPoint(verts, innerStart);
       pushPoint(verts, outerStart);
-      appendArcSegment(verts, arc, ear.start, ear.end, earDepth, EAR_ARC_SEGMENTS);
+      appendArcSegment(verts, arc, ear.start, ear.end, topEarDepth, EAR_ARC_SEGMENTS);
       pushPoint(verts, outerEnd);
       pushPoint(verts, innerEnd);
 
@@ -658,28 +698,28 @@ export default function App() {
     } else {
       grouped.top.forEach(ear => {
         const p = ear.pos;
-        verts.push([p, earDepth], [p, 0], [p + earLength, 0], [p + earLength, earDepth]);
+        verts.push([p, topEarDepth], [p, 0], [p + topEarLength, 0], [p + topEarLength, topEarDepth]);
       });
-      verts.push([safeWidth - earDepth, earDepth]);
+      verts.push([safeWidth - rightEarDepth, topEarDepth]);
     }
 
     grouped.right.forEach(ear => {
       const p = ear.pos;
-      verts.push([safeWidth - earDepth, p], [safeWidth, p], [safeWidth, p + earLength], [safeWidth - earDepth, p + earLength]);
+      verts.push([safeWidth - rightEarDepth, p], [safeWidth, p], [safeWidth, p + rightEarLength], [safeWidth - rightEarDepth, p + rightEarLength]);
     });
 
-    verts.push([safeWidth - earDepth, bottomBaseY]);
+    verts.push([safeWidth - rightEarDepth, bottomBaseY]);
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      verts.push([p + earLength, safeHeight - earDepth], [p + earLength, safeHeight], [p, safeHeight], [p, safeHeight - earDepth]);
+      verts.push([p + bottomEarLength, safeHeight - bottomEarDepth], [p + bottomEarLength, safeHeight], [p, safeHeight], [p, safeHeight - bottomEarDepth]);
     });
 
-    verts.push([earDepth, bottomBaseY]);
+    verts.push([leftEarDepth, bottomBaseY]);
 
     grouped.left.forEach(ear => {
       const p = ear.pos;
-      verts.push([earDepth, p + earLength], [0, p + earLength], [0, p], [earDepth, p]);
+      verts.push([leftEarDepth, p + leftEarLength], [0, p + leftEarLength], [0, p], [leftEarDepth, p]);
     });
 
     return verts;
@@ -694,8 +734,8 @@ export default function App() {
         getTopArcEarRanges().forEach(ear => {
           verts.push(
             arc.pointAt(ear.start, 0),
-            arc.pointAt(ear.start, earDepth),
-            arc.pointAt(ear.end, earDepth),
+            arc.pointAt(ear.start, topEarDepth),
+            arc.pointAt(ear.end, topEarDepth),
             arc.pointAt(ear.end, 0)
           );
         });
@@ -703,7 +743,7 @@ export default function App() {
     } else {
       grouped.top.forEach(ear => {
         const p = ear.pos;
-        verts.push([p, earDepth], [p, 0], [p + earLength, 0], [p + earLength, earDepth]);
+        verts.push([p, topEarDepth], [p, 0], [p + topEarLength, 0], [p + topEarLength, topEarDepth]);
       });
     }
 
@@ -711,26 +751,26 @@ export default function App() {
 
     grouped.right.forEach(ear => {
       const p = ear.pos;
-      verts.push([safeWidth - earDepth, p], [safeWidth, p], [safeWidth, p + earLength], [safeWidth - earDepth, p + earLength]);
+      verts.push([safeWidth - rightEarDepth, p], [safeWidth, p], [safeWidth, p + rightEarLength], [safeWidth - rightEarDepth, p + rightEarLength]);
     });
 
-    verts.push([safeWidth - earDepth, bottomBaseY]);
+    verts.push([safeWidth - rightEarDepth, bottomBaseY]);
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      verts.push([p + earLength, safeHeight - earDepth], [p + earLength, safeHeight], [p, safeHeight], [p, safeHeight - earDepth]);
+      verts.push([p + bottomEarLength, safeHeight - bottomEarDepth], [p + bottomEarLength, safeHeight], [p, safeHeight], [p, safeHeight - bottomEarDepth]);
     });
 
-    verts.push([earDepth, bottomBaseY]);
+    verts.push([leftEarDepth, bottomBaseY]);
 
     grouped.left.forEach(ear => {
       const p = ear.pos;
-      verts.push([earDepth, p + earLength], [0, p + earLength], [0, p], [earDepth, p]);
+      verts.push([leftEarDepth, p + leftEarLength], [0, p + leftEarLength], [0, p], [leftEarDepth, p]);
     });
 
     if (isDoubleArcTop) {
-      const p0 = [earDepth, splitLeftBaseY];
-      const p2 = [safeWidth - earDepth, splitRightBaseY];
+      const p0 = [leftEarDepth, splitLeftBaseY];
+      const p2 = [safeWidth - rightEarDepth, splitRightBaseY];
       const pm = [p0[0] + (p2[0] - p0[0]) * (safeMiddlePosition / 100), splitMiddleBaseY];
       verts.push(pm);
     }
@@ -796,6 +836,17 @@ export default function App() {
       y: mouseSvgY - (mouseY / rect.height) * nextHeight
     });
   };
+  useEffect(() => {
+    const preview = previewWheelBlockerRef.current;
+    if (!preview) return;
+    const stopPageScroll = (e) => {
+      e.preventDefault();
+    };
+    preview.addEventListener('wheel', stopPageScroll, { passive: false });
+    return () => {
+      preview.removeEventListener('wheel', stopPageScroll);
+    };
+  }, []);
 
   const handleViewportMouseDown = (e) => {
     if (e.button !== 1) return;
@@ -884,6 +935,75 @@ export default function App() {
 
     return { d1, d2, mid, label, angle, distance, nx, ny, leftArrow, rightArrow };
   };
+  const createAutomaticGapMeasurement = (id, p1, p2, outsidePoint) => {
+    if (!p1 || !p2 || Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) <= 0.001) return null;
+
+    const { distance, nx, ny } = getMeasurementBaseData({ p1, p2 });
+    const mid = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
+    const outsideVector = [outsidePoint[0] - mid[0], outsidePoint[1] - mid[1]];
+    const offsetSign = outsideVector[0] * nx + outsideVector[1] * ny >= 0 ? 1 : -1;
+
+    return {
+      id,
+      p1,
+      p2,
+      distance,
+      offset: offsetSign * 42,
+      selected: false
+    };
+  };
+
+  const automaticGapMeasurements = (() => {
+    const result = [];
+
+    const addMeasurement = (measurement) => {
+      if (measurement) result.push(measurement);
+    };
+
+    const addHorizontalGap = (id, ears, y, outsideY, length, depth) => {
+      if (depth <= 0) return;
+      const sorted = [...ears].sort((a, b) => a.pos - b.pos);
+      if (sorted.length < 2) return;
+
+      const p1 = [sorted[0].pos + length, y];
+      const p2 = [sorted[1].pos, y];
+      addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [(p1[0] + p2[0]) / 2, outsideY]));
+    };
+
+    const addVerticalGap = (id, ears, x, outsideX, length, depth) => {
+      if (depth <= 0) return;
+      const sorted = [...ears].sort((a, b) => a.pos - b.pos);
+      if (sorted.length < 2) return;
+
+      const p1 = [x, sorted[0].pos + length];
+      const p2 = [x, sorted[1].pos];
+      addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [outsideX, (p1[1] + p2[1]) / 2]));
+    };
+
+    if (hasArcTop) {
+      const arc = getActiveTopArcData();
+      const ears = getTopArcEarRanges();
+
+      if (arc && ears.length >= 2) {
+        const p1 = arc.pointAt(ears[0].end, 0);
+        const p2 = arc.pointAt(ears[1].start, 0);
+        const outsideY = Math.min(p1[1], p2[1]) - 120;
+        addMeasurement(createAutomaticGapMeasurement('auto-gap-top', p1, p2, [(p1[0] + p2[0]) / 2, outsideY]));
+      }
+    }
+
+    addHorizontalGap('auto-gap-bottom', grouped.bottom, safeHeight - bottomEarDepth, safeHeight + 120, bottomEarLength, bottomEarDepth);
+
+    if (isAsymmetricTop || isDoubleArcTop) {
+      addVerticalGap('auto-gap-left', grouped.left, leftEarDepth, -120, leftEarLength, leftEarDepth);
+      addVerticalGap('auto-gap-right', grouped.right, safeWidth - rightEarDepth, safeWidth + 120, rightEarLength, rightEarDepth);
+    } else {
+      addVerticalGap('auto-gap-left', grouped.left, leftEarDepth, -120, leftEarLength, leftEarDepth);
+    }
+
+    return result;
+  })();
+
 
   const polygonPoints = (pointsArray) => pointsArray.map(([x, y]) => `${x * scale},${y * scale}`).join(' ');
 
@@ -1034,13 +1154,13 @@ export default function App() {
       addArcTo(currentS, ear.start, 0);
 
       const innerStart = arc.pointAt(ear.start, 0);
-      const outerStart = arc.pointAt(ear.start, earDepth);
-      const outerEnd = arc.pointAt(ear.end, earDepth);
+      const outerStart = arc.pointAt(ear.start, topEarDepth);
+      const outerEnd = arc.pointAt(ear.end, topEarDepth);
       const innerEnd = arc.pointAt(ear.end, 0);
 
       currentPoint = innerStart;
       addLineTo(outerStart);
-      addArcTo(ear.start, ear.end, earDepth);
+      addArcTo(ear.start, ear.end, topEarDepth);
       addLineTo(innerEnd);
 
       currentS = ear.end;
@@ -1050,30 +1170,30 @@ export default function App() {
 
     grouped.right.forEach(ear => {
       const p = ear.pos;
-      addLineTo([safeWidth - earDepth, p]);
+      addLineTo([safeWidth - rightEarDepth, p]);
       addLineTo([safeWidth, p]);
-      addLineTo([safeWidth, p + earLength]);
-      addLineTo([safeWidth - earDepth, p + earLength]);
+      addLineTo([safeWidth, p + rightEarLength]);
+      addLineTo([safeWidth - rightEarDepth, p + rightEarLength]);
     });
 
-    addLineTo([safeWidth - earDepth, bottomBaseY]);
+    addLineTo([safeWidth - rightEarDepth, bottomBaseY]);
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      addLineTo([p + earLength, safeHeight - earDepth]);
-      addLineTo([p + earLength, safeHeight]);
+      addLineTo([p + bottomEarLength, safeHeight - bottomEarDepth]);
+      addLineTo([p + bottomEarLength, safeHeight]);
       addLineTo([p, safeHeight]);
-      addLineTo([p, safeHeight - earDepth]);
+      addLineTo([p, safeHeight - bottomEarDepth]);
     });
 
-    addLineTo([earDepth, bottomBaseY]);
+    addLineTo([leftEarDepth, bottomBaseY]);
 
     grouped.left.forEach(ear => {
       const p = ear.pos;
-      addLineTo([earDepth, p + earLength]);
-      addLineTo([0, p + earLength]);
+      addLineTo([leftEarDepth, p + leftEarLength]);
+      addLineTo([0, p + leftEarLength]);
       addLineTo([0, p]);
-      addLineTo([earDepth, p]);
+      addLineTo([leftEarDepth, p]);
     });
 
     addLineTo(startPoint);
@@ -1191,12 +1311,12 @@ export default function App() {
       addArc(currentS, ear.start, 0);
 
       const innerStart = arc.pointAt(ear.start, 0);
-      const outerStart = arc.pointAt(ear.start, earDepth);
+      const outerStart = arc.pointAt(ear.start, topEarDepth);
       const innerEnd = arc.pointAt(ear.end, 0);
 
       currentPoint = innerStart;
       addLine(outerStart);
-      addArc(ear.start, ear.end, earDepth);
+      addArc(ear.start, ear.end, topEarDepth);
       addLine(innerEnd);
 
       currentS = ear.end;
@@ -1206,30 +1326,30 @@ export default function App() {
 
     grouped.right.forEach(ear => {
       const p = ear.pos;
-      addLine([safeWidth - earDepth, p]);
+      addLine([safeWidth - rightEarDepth, p]);
       addLine([safeWidth, p]);
-      addLine([safeWidth, p + earLength]);
-      addLine([safeWidth - earDepth, p + earLength]);
+      addLine([safeWidth, p + rightEarLength]);
+      addLine([safeWidth - rightEarDepth, p + rightEarLength]);
     });
 
-    addLine([safeWidth - earDepth, bottomBaseY]);
+    addLine([safeWidth - rightEarDepth, bottomBaseY]);
 
     grouped.bottom.forEach(ear => {
       const p = ear.pos;
-      addLine([p + earLength, safeHeight - earDepth]);
-      addLine([p + earLength, safeHeight]);
+      addLine([p + bottomEarLength, safeHeight - bottomEarDepth]);
+      addLine([p + bottomEarLength, safeHeight]);
       addLine([p, safeHeight]);
-      addLine([p, safeHeight - earDepth]);
+      addLine([p, safeHeight - bottomEarDepth]);
     });
 
-    addLine([earDepth, bottomBaseY]);
+    addLine([leftEarDepth, bottomBaseY]);
 
     grouped.left.forEach(ear => {
       const p = ear.pos;
-      addLine([earDepth, p + earLength]);
-      addLine([0, p + earLength]);
+      addLine([leftEarDepth, p + leftEarLength]);
+      addLine([0, p + leftEarLength]);
       addLine([0, p]);
-      addLine([earDepth, p]);
+      addLine([leftEarDepth, p]);
     });
 
     addLine(startPoint);
@@ -1294,7 +1414,7 @@ export default function App() {
           setActiveTool(id);
         }}
         className={[
-          'w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm transition border',
+          'w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition border',
           active ? 'bg-slate-900 text-white border-slate-900 shadow-md' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50',
           disabled ? 'opacity-40 cursor-not-allowed hover:bg-white' : 'cursor-pointer'
         ].join(' ')}
@@ -1313,6 +1433,15 @@ export default function App() {
     );
   };
 
+  const handlePercentageChange = (setter) => (e) => {
+    const value = e.target.value;
+    if (value === '') {
+      setter('');
+      return;
+    }
+    setter(clamp(Number(value), 1, 99));
+  };
+
   const handleNumberBlur = (setter, value, min, max = Infinity, fallback = min) => {
     const parsed = n(value, fallback);
     setter(clamp(parsed, min, max));
@@ -1320,14 +1449,14 @@ export default function App() {
   };
 
   const handleHeightBlur = () => {
-    const nextHeight = Math.max(earDepth * 4, n(height, earDepth * 4));
+    const nextHeight = Math.max(minPanelSize, n(height, minPanelSize));
     setHeight(nextHeight);
 
     if (isSplitHeightTop) {
       const nextLeft = clamp(
         n(leftHeight, nextHeight - 100),
-        earDepth * 4,
-        Math.max(earDepth * 4, nextHeight - 1)
+        minPanelSize,
+        Math.max(minPanelSize, nextHeight - 1)
       );
       setLeftHeight(nextLeft);
 
@@ -1346,8 +1475,8 @@ export default function App() {
   const handleLeftHeightBlur = () => {
     const nextLeft = clamp(
       n(leftHeight, safeHeight - 100),
-      earDepth * 4,
-      Math.max(earDepth * 4, safeHeight - 1)
+      minPanelSize,
+      Math.max(minPanelSize, safeHeight - 1)
     );
     setLeftHeight(nextLeft);
 
@@ -1366,7 +1495,7 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen bg-slate-100 flex items-center justify-center p-6"
+      className="h-screen overflow-hidden bg-slate-100 p-3"
       onClick={() => {
         if (activeTool === 'measure') {
           setMeasurePoints([]);
@@ -1375,16 +1504,16 @@ export default function App() {
         }
       }}
     >
-      <div className="w-full max-w-7xl grid lg:grid-cols-[420px_1fr] gap-6" onClick={(e) => e.stopPropagation()}>
+      <div className="h-full w-full grid lg:grid-cols-[minmax(340px,420px)_1fr] gap-3" onClick={(e) => e.stopPropagation()}>
 
         {/* LEFT PANEL - CONTROLS */}
-        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-6 space-y-6">
+        <div className="min-h-0 overflow-y-auto bg-white rounded-xl shadow-lg border border-slate-200 p-4 space-y-3">
           <div>
-            <h1 className="text-2xl font-bold text-slate-800">Ear Pattern Generator</h1>
-            <p className="text-slate-500 text-sm mt-1">Parametric CAD DXF generator</p>
+            <h1 className="text-xl font-bold text-slate-800">Ear Pattern Generator</h1>
+            <p className="text-slate-500 text-xs mt-0.5">Parametric CAD DXF generator</p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-slate-500">Width (mm)</label>
               <input
@@ -1392,8 +1521,8 @@ export default function App() {
                 value={width}
                 onFocus={() => setFocusedNumberField('width')}
                 onChange={e => setWidth(e.target.value === '' ? '' : +e.target.value)}
-                onBlur={() => handleNumberBlur(setWidth, width, earDepth * 4)}
-                className="w-full mt-1 p-2 border rounded-lg"
+                onBlur={() => handleNumberBlur(setWidth, width, minPanelSize)}
+                className="w-full mt-1 p-2 border rounded-md text-sm"
               />
             </div>
 
@@ -1405,17 +1534,17 @@ export default function App() {
                 onFocus={() => setFocusedNumberField('height')}
                 onChange={e => setHeight(e.target.value === '' ? '' : +e.target.value)}
                 onBlur={handleHeightBlur}
-                className="w-full mt-1 p-2 border rounded-lg"
+                className="w-full mt-1 p-2 border rounded-md text-sm"
               />
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-50 border space-y-3">
+          <div className="p-3 rounded-lg bg-slate-50 border space-y-2">
             <label className="text-xs text-slate-500">Top shape</label>
             <select
               value={topShape}
               onChange={e => setTopShape(e.target.value)}
-              className="w-full p-2 border rounded-lg bg-white"
+              className="w-full p-2 border rounded-md bg-white text-sm"
             >
               <option value="straight">Straight</option>
               <option value="symmetric">Symmetric curved top</option>
@@ -1433,7 +1562,7 @@ export default function App() {
                   value={arcRise}
                   onChange={e => setArcRise(e.target.value === '' ? '' : +e.target.value)}
                   onBlur={() => handleNumberBlur(setArcRise, arcRise, 0, Infinity, 0)}
-                  className="w-full mt-1 p-2 border rounded-lg"
+                  className="w-full mt-1 p-2 border rounded-md text-sm"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">Top ears follow the selected symmetric arc shape.</p>
 
@@ -1446,9 +1575,9 @@ export default function App() {
                       max="99"
                       value={transitionHeight}
                       onFocus={() => setFocusedNumberField('transitionHeight')}
-                      onChange={e => setTransitionHeight(e.target.value === '' ? '' : +e.target.value)}
+                      onChange={handlePercentageChange(setTransitionHeight)}
                       onBlur={() => handleNumberBlur(setTransitionHeight, transitionHeight, 1, 99, 50)}
-                      className="w-full mt-1 p-2 border rounded-lg"
+                      className="w-full mt-1 p-2 border rounded-md text-sm"
                     />
                     <p className="text-[11px] text-slate-400 mt-1">1% = just above side height. 99% = just below side height + arc rise.</p>
 
@@ -1459,9 +1588,9 @@ export default function App() {
                       max="99"
                       value={crownWidth}
                       onFocus={() => setFocusedNumberField('crownWidth')}
-                      onChange={e => setCrownWidth(e.target.value === '' ? '' : +e.target.value)}
+                      onChange={handlePercentageChange(setCrownWidth)}
                       onBlur={() => handleNumberBlur(setCrownWidth, crownWidth, 1, 99, 50)}
-                      className="w-full mt-1 p-2 border rounded-lg"
+                      className="w-full mt-1 p-2 border rounded-md text-sm"
                     />
                     <p className="text-[11px] text-slate-400 mt-1">Controls the horizontal distance between the two merge points. Smaller = narrower crown. Larger = wider crown.</p>
 
@@ -1484,20 +1613,20 @@ export default function App() {
                 <label className="text-xs text-slate-500">Left outside height (mm)</label>
                 <input
                   type="number"
-                  min={earDepth * 4}
-                  max={Math.max(earDepth * 4, safeHeight - 1)}
+                  min={minPanelSize}
+                  max={Math.max(minPanelSize, safeHeight - 1)}
                   value={leftHeight}
                   onFocus={() => setFocusedNumberField('leftHeight')}
                   onChange={e => setLeftHeight(e.target.value === '' ? '' : +e.target.value)}
                   onBlur={handleLeftHeightBlur}
-                  className="w-full mt-1 p-2 border rounded-lg"
+                  className="w-full mt-1 p-2 border rounded-md text-sm"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">The base arc is lowered by ear depth so top ears stay inside the outside height.</p>
               </div>
             )}
 
             {isDoubleArcTop && (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-slate-500">Middle position (%)</label>
                   <input
@@ -1506,9 +1635,9 @@ export default function App() {
                     max="99"
                     value={middlePosition}
                     onFocus={() => setFocusedNumberField('middlePosition')}
-                    onChange={e => setMiddlePosition(e.target.value === '' ? '' : +e.target.value)}
+                    onChange={handlePercentageChange(setMiddlePosition)}
                     onBlur={() => handleNumberBlur(setMiddlePosition, middlePosition, 1, 99, 50)}
-                    className="w-full mt-1 p-2 border rounded-lg"
+                    className="w-full mt-1 p-2 border rounded-md text-sm"
                   />
                 </div>
 
@@ -1520,7 +1649,7 @@ export default function App() {
                     max={safeHeight - 1}
                     value={autoMiddleHeight}
                     readOnly
-                    className="w-full mt-1 p-2 border rounded-lg bg-slate-100 text-slate-600"
+                    className="w-full mt-1 p-2 border rounded-md bg-slate-100 text-slate-600 text-sm"
                   />
                 </div>
                 <p className="text-[11px] text-slate-400 col-span-2">
@@ -1530,7 +1659,41 @@ export default function App() {
             )}
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-50 border space-y-3">
+          <details className="rounded-lg bg-slate-50 border px-3 py-2">
+            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Ear sizes</summary>
+            <div className="grid grid-cols-4 gap-2 mt-2 text-xs">
+              {[
+                ['Top', topEarLengthInput, setTopEarLengthInput, topEarDepthInput, setTopEarDepthInput],
+                ['Right', rightEarLengthInput, setRightEarLengthInput, rightEarDepthInput, setRightEarDepthInput],
+                ['Bottom', bottomEarLengthInput, setBottomEarLengthInput, bottomEarDepthInput, setBottomEarDepthInput],
+                ['Left', leftEarLengthInput, setLeftEarLengthInput, leftEarDepthInput, setLeftEarDepthInput]
+              ].map(([label, lengthValue, setLength, depthValue, setDepth]) => (
+                <div key={label} className="rounded-md bg-white border p-2">
+                  <p className="font-semibold text-slate-600 mb-1">{label}</p>
+                  <label className="text-[11px] text-slate-500">Length</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={lengthValue}
+                    onChange={e => setLength(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setLength, lengthValue, 1, Infinity, 30)}
+                    className="w-full mt-1 mb-1.5 p-1.5 border rounded-md"
+                  />
+                  <label className="text-[11px] text-slate-500">Depth</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={depthValue}
+                    onChange={e => setDepth(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setDepth, depthValue, 0, Infinity, 10)}
+                    className="w-full mt-1 p-1.5 border rounded-md"
+                  />
+                </div>
+              ))}
+            </div>
+          </details>
+
+          <div className="p-3 rounded-lg bg-slate-50 border space-y-2">
             <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
               <input type="checkbox" checked={manualMode} onChange={e => setManualMode(e.target.checked)} />
               Manual Mode
@@ -1539,7 +1702,7 @@ export default function App() {
           </div>
 
           {manualMode && (
-            <div className="space-y-4">
+            <div className="space-y-1.5">
               <div>
                 <label className="text-xs text-slate-500">Horizontal ears</label>
                 <input
@@ -1548,13 +1711,13 @@ export default function App() {
                   value={hEars}
                   onChange={e => setHEars(e.target.value === '' ? '' : +e.target.value)}
                   onBlur={() => handleNumberBlur(setHEars, hEars, 1, Infinity, 1)}
-                  className="w-full mt-1 p-2 border rounded-lg"
+                  className="w-full mt-1 p-2 border rounded-md text-sm"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">Bottom ears plus top ears when an arc top is active.</p>
               </div>
 
               {isSplitHeightTop ? (
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-xs text-slate-500">Left side ears</label>
                     <input
@@ -1563,7 +1726,7 @@ export default function App() {
                       value={leftVEars}
                       onChange={e => setLeftVEars(e.target.value === '' ? '' : +e.target.value)}
                       onBlur={() => handleNumberBlur(setLeftVEars, leftVEars, 1, Infinity, 1)}
-                      className="w-full mt-1 p-2 border rounded-lg"
+                      className="w-full mt-1 p-2 border rounded-md text-sm"
                     />
                   </div>
 
@@ -1575,7 +1738,7 @@ export default function App() {
                       value={rightVEars}
                       onChange={e => setRightVEars(e.target.value === '' ? '' : +e.target.value)}
                       onBlur={() => handleNumberBlur(setRightVEars, rightVEars, 1, Infinity, 1)}
-                      className="w-full mt-1 p-2 border rounded-lg"
+                      className="w-full mt-1 p-2 border rounded-md text-sm"
                     />
                   </div>
                 </div>
@@ -1588,7 +1751,7 @@ export default function App() {
                     value={vEars}
                     onChange={e => setVEars(e.target.value === '' ? '' : +e.target.value)}
                     onBlur={() => handleNumberBlur(setVEars, vEars, 1, Infinity, 1)}
-                    className="w-full mt-1 p-2 border rounded-lg"
+                    className="w-full mt-1 p-2 border rounded-md text-sm"
                   />
                   <p className="text-[11px] text-slate-400 mt-1">Left + right</p>
                 </div>
@@ -1596,31 +1759,32 @@ export default function App() {
             </div>
           )}
 
-          <div className="space-y-3">
-            <button onClick={downloadDXF} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-3 rounded-xl transition shadow-md">
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={downloadDXF} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-lg transition shadow-sm">
               Export DXF
             </button>
-            <button onClick={downloadFusionDXF} className="w-full bg-blue-700 hover:bg-blue-600 text-white font-semibold py-3 rounded-xl transition shadow-md">
+            <button onClick={downloadFusionDXF} className="w-full bg-blue-700 hover:bg-blue-600 text-white font-semibold py-2.5 rounded-lg transition shadow-sm">
               Export Fusion DXF
             </button>
           </div>
 
-          <div className="text-xs text-slate-500 leading-relaxed">
+          <details className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500"><summary className="cursor-pointer select-none font-medium text-slate-600">Notes</summary><div className="mt-2 leading-relaxed">
             <p>• Auto mode: optimized spacing 240–400mm</p>
             <p>• Manual mode: fixed ear count with 80mm visible margins</p>
             <p>• N=1 centers ear perfectly</p>
             <p>• Asymmetric top: low left side, max right side, circular arc ends flat on the right</p>
             <p>• Double arc top: two connected circular arcs with editable middle point</p>
             <p>• Symmetric 3-arc top: transition height + crown width controls with optional side horizontal constraint</p>
-          </div>
+          </div></details>
         </div>
 
         {/* RIGHT AREA - PREVIEW + TOOL PANEL */}
-        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-4 flex gap-4 min-h-[520px]">
+        <div className="min-h-0 bg-white rounded-xl shadow-lg border border-slate-200 p-3 flex gap-3">
           <div
+            ref={previewWheelBlockerRef}
             className={[
-              'bg-slate-50 rounded-xl p-4 border flex-1 overflow-hidden flex items-center justify-center',
-              activeTool === 'measure' ? 'cursor-crosshair' : ''
+      'bg-slate-50 rounded-lg p-2 border flex-1 min-w-0 min-h-0 overflow-hidden flex items-center justify-center',
+      activeTool === 'measure' ? 'cursor-crosshair' : ''
             ].join(' ')}
             onWheel={(e) => {
               e.preventDefault();
@@ -1628,10 +1792,10 @@ export default function App() {
             }}
           >
             <svg
-              width={safeWidth * scale + viewportPadding * 2}
-              height={(safeHeight + extraTopSpace) * scale + viewportPadding * 2}
+              width="100%"
+              height="100%"
               viewBox={`${currentViewBox.x} ${currentViewBox.y} ${currentViewBox.width} ${currentViewBox.height}`}
-              className="mx-auto"
+              className="h-full w-full"
               onWheel={handleViewportWheel}
               onMouseDown={handleViewportMouseDown}
               onMouseMove={handlePreviewMouseMove}
@@ -1647,12 +1811,57 @@ export default function App() {
 
               {isDoubleArcTop && (
                 <circle
-                  cx={(earDepth + (safeWidth - 2 * earDepth) * (safeMiddlePosition / 100)) * scale}
+                  cx={(leftEarDepth + (safeWidth - leftEarDepth - rightEarDepth) * (safeMiddlePosition / 100)) * scale}
                   cy={splitMiddleBaseY * scale}
                   r={3 / viewZoom}
                   fill="#64748b"
                 />
               )}
+
+              {/* Automatic ear gap dimensions */}
+              <g pointerEvents="none">
+                {automaticGapMeasurements.map((m) => {
+                  const geometry = getMeasurementGeometry(m);
+                  const color = '#475569';
+
+                  return (
+                    <g key={m.id}>
+                      <line x1={m.p1[0] * scale} y1={m.p1[1] * scale} x2={geometry.d1[0] * scale} y2={geometry.d1[1] * scale} stroke={color} strokeWidth={1 / viewZoom} strokeDasharray={`${4 / viewZoom} ${4 / viewZoom}`} />
+                      <line x1={m.p2[0] * scale} y1={m.p2[1] * scale} x2={geometry.d2[0] * scale} y2={geometry.d2[1] * scale} stroke={color} strokeWidth={1 / viewZoom} strokeDasharray={`${4 / viewZoom} ${4 / viewZoom}`} />
+                      <line x1={geometry.d1[0] * scale} y1={geometry.d1[1] * scale} x2={geometry.d2[0] * scale} y2={geometry.d2[1] * scale} stroke={color} strokeWidth={1.5 / viewZoom} />
+                      <polygon points={polygonPoints(geometry.leftArrow)} fill={color} />
+                      <polygon points={polygonPoints(geometry.rightArrow)} fill={color} />
+
+                      <text
+                        x={geometry.label[0] * scale}
+                        y={geometry.label[1] * scale}
+                        fontSize={20 / viewZoom}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fill="none"
+                        stroke="white"
+                        strokeWidth={6 / viewZoom}
+                        transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
+                      >
+                        {geometry.distance.toFixed(1)} mm
+                      </text>
+
+                      <text
+                        x={geometry.label[0] * scale}
+                        y={geometry.label[1] * scale}
+                        fill={color}
+                        fontSize={12 / viewZoom}
+                        fontWeight="600"
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
+                      >
+                        {geometry.distance.toFixed(1)} mm
+                      </text>
+                    </g>
+                  );
+                })}
+              </g>
 
               {/* CAD-style measurements */}
               {measurements.map((m) => {
@@ -1720,8 +1929,8 @@ export default function App() {
           </div>
 
           {/* TOOL PANEL */}
-          <div className={['rounded-xl border bg-slate-50 p-3 transition-all duration-200', activeTool ? 'w-64' : 'w-48'].join(' ')}>
-            <div className="flex items-center gap-2 mb-4">
+          <div className={['rounded-lg border bg-slate-50 p-2 transition-all duration-200 shrink-0', activeTool ? 'w-52' : 'w-40'].join(' ')}>
+            <div className="flex items-center gap-2 mb-2">
               <Wrench size={18} className="text-slate-700" />
               <div>
                 <h2 className="text-sm font-semibold text-slate-800">Tools</h2>
@@ -1729,7 +1938,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <ToolButton id="measure" icon={Ruler} label="Measure" shortcut="M" />
               <ToolButton id="select" icon={MousePointer2} label="Select" disabled />
               <ToolButton id="move" icon={Move} label="Move" disabled />
@@ -1742,7 +1951,7 @@ export default function App() {
             </div>
 
             {activeTool === 'measure' && (
-              <div className="mt-4 rounded-lg bg-white border p-3 text-xs text-slate-600 leading-relaxed">
+              <div className="mt-3 rounded-lg bg-white border p-2 text-xs text-slate-600 leading-relaxed">
                 <p className="font-semibold text-slate-700 mb-1">Measure tool</p>
                 <p>Click two snap points to create a CAD-style measurement.</p>
                 <p className="mt-2">Drag the dimension line or text to move it away from the part.</p>
