@@ -1,4 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { svgPathProperties } from 'svg-path-properties';
+import { SVGPathData, SVGPathDataTransformer, encodeSVGPath } from 'svg-pathdata';
+import ClipperLib from 'clipper-lib';
 import {
   Ruler,
   MousePointer2,
@@ -36,6 +39,19 @@ export default function App() {
   const [bottomEarDepthInput, setBottomEarDepthInput] = useState(10);
   const [leftEarLengthInput, setLeftEarLengthInput] = useState(30);
   const [leftEarDepthInput, setLeftEarDepthInput] = useState(10);
+  const [splitPanelEnabled, setSplitPanelEnabled] = useState(false);
+  const [splitPositionInput, setSplitPositionInput] = useState(500);
+  const [splitGapInput, setSplitGapInput] = useState(20);
+  const [splitEarLengthInput, setSplitEarLengthInput] = useState(30);
+  const [splitEarDepthInput, setSplitEarDepthInput] = useState(10);
+  const [splitManualMode, setSplitManualMode] = useState(false);
+  const [splitLeftCutEars, setSplitLeftCutEars] = useState(2);
+  const [splitRightCutEars, setSplitRightCutEars] = useState(2);
+  const [syncSplitEars, setSyncSplitEars] = useState(false);
+  const [splitLeftTopEars, setSplitLeftTopEars] = useState(2);
+  const [splitLeftBottomEars, setSplitLeftBottomEars] = useState(2);
+  const [splitRightTopEars, setSplitRightTopEars] = useState(2);
+  const [splitRightBottomEars, setSplitRightBottomEars] = useState(2);
 
   // straight | symmetric | asymmetric | double
   const [topShape, setTopShape] = useState('straight');
@@ -48,6 +64,20 @@ export default function App() {
   const [interiorDesigns, setInteriorDesigns] = useState([]);
   const [selectedInteriorDesignId, setSelectedInteriorDesignId] = useState(null);
   const [interiorDrag, setInteriorDrag] = useState(null);
+  const [showInteriorExportPreview, setShowInteriorExportPreview] = useState(false);
+  const [interiorClipEnabled, setInteriorClipEnabled] = useState(false);
+  const [interiorMarginInput, setInteriorMarginInput] = useState(40);
+  const [showInteriorMarginGuide, setShowInteriorMarginGuide] = useState(false);
+  const [patternEnabled, setPatternEnabled] = useState(false);
+  const [patternThickness, setPatternThickness] = useState(15);
+  const [patternMinLength, setPatternMinLength] = useState(80);
+  const [patternMaxLength, setPatternMaxLength] = useState(260);
+  const [patternRowSpacing, setPatternRowSpacing] = useState(90);
+  const [patternGap, setPatternGap] = useState(90);
+  const [patternSeed, setPatternSeed] = useState(1);
+  const [patternRoundedEnds, setPatternRoundedEnds] = useState(false);
+  const [patternRandomRowSpacing, setPatternRandomRowSpacing] = useState(false);
+  const [patternRandomGap, setPatternRandomGap] = useState(false);
 
   const [activeTool, setActiveTool] = useState(null);
 
@@ -82,6 +112,9 @@ export default function App() {
   const bottomEarDepth = Math.max(0, n(bottomEarDepthInput, 10));
   const leftEarLength = Math.max(1, n(leftEarLengthInput, 30));
   const leftEarDepth = Math.max(0, n(leftEarDepthInput, 10));
+  const splitGap = Math.max(0, n(splitGapInput, 20));
+  const splitEarLength = Math.max(1, n(splitEarLengthInput, 30));
+  const splitEarDepth = Math.max(0, n(splitEarDepthInput, 10));
   const minPanelSize = 1;
   const margin = 90;
   const scale = 0.35;
@@ -106,6 +139,12 @@ export default function App() {
 
   const safeWidth = Math.max(minPanelSize, n(width, minPanelSize));
   const safeHeight = Math.max(minPanelSize, n(height, minPanelSize));
+  const minSplitPanelWidth = leftEarDepth + splitEarDepth + 1;
+  const maxSplitPanelWidth = Math.max(minSplitPanelWidth, safeWidth - rightEarDepth - splitGap - splitEarDepth - 1);
+  const safeSplitPanelWidth = clamp(n(splitPositionInput, safeWidth / 2), minSplitPanelWidth, maxSplitPanelWidth);
+  const safeSplitPosition = safeSplitPanelWidth - splitEarDepth;
+  const safeRightSplitPosition = safeSplitPanelWidth + splitGap + splitEarDepth;
+  const hasPanelSplit = splitPanelEnabled && safeWidth - leftEarDepth - rightEarDepth > 2 && safeSplitPosition > leftEarDepth && safeRightSplitPosition < safeWidth - rightEarDepth;
   const safeCornerAngle = clamp(n(cornerAngle, 90), 30, 150);
   const shearOffset = safeWidth * Math.tan((safeCornerAngle - 90) * Math.PI / 180);
   const minShearY = Math.min(0, shearOffset);
@@ -169,6 +208,7 @@ export default function App() {
   };
 
   const transformPoints = (pointsArray) => pointsArray.map(transformPoint);
+  const interiorMargin = Math.max(0, n(interiorMarginInput, 40));
 
   const angleFromOffset = (offset) => clamp(90 + Math.atan(offset / safeWidth) * 180 / Math.PI, 30, 150);
 
@@ -304,7 +344,20 @@ export default function App() {
     bottomEarLengthInput,
     bottomEarDepthInput,
     leftEarLengthInput,
-    leftEarDepthInput
+    leftEarDepthInput,
+    splitPanelEnabled,
+    splitPositionInput,
+    splitGapInput,
+    splitEarLengthInput,
+    splitEarDepthInput,
+    splitManualMode,
+    splitLeftCutEars,
+    splitRightCutEars,
+    syncSplitEars,
+    splitLeftTopEars,
+    splitLeftBottomEars,
+    splitRightTopEars,
+    splitRightBottomEars
   ]);
 
   const makeSegment = (cx, cy, p0, p1) => {
@@ -733,6 +786,81 @@ export default function App() {
     }
   };
 
+  const getVerticalEarRanges = (startY, endY, length, depth, useManual, countValue) => {
+    const minY = Math.min(startY, endY);
+    const maxY = Math.max(startY, endY);
+    const sideLength = maxY - minY;
+
+    if (depth <= 0 || length <= 0 || sideLength <= 0) {
+      return [];
+    }
+
+    const visibleMargin = Math.max(0, margin - depth);
+    const usable = sideLength - 2 * visibleMargin - length;
+    if (usable < 0) {
+      return [];
+    }
+
+    const ranges = [];
+    if (useManual) {
+      const count = Math.max(1, n(countValue, 1));
+      if (count === 1) {
+        const start = minY + sideLength / 2 - length / 2;
+        ranges.push({ start, end: start + length });
+      } else {
+        const spacing = usable / (count - 1);
+        for (let i = 0; i < count; i++) {
+          const start = minY + visibleMargin + i * spacing;
+          ranges.push({ start, end: start + length });
+        }
+      }
+    } else {
+      let gaps = 1;
+      while (usable / gaps > MAX_SPACING) gaps++;
+      while (gaps > 1 && usable / gaps < MIN_SPACING) gaps--;
+      const spacing = usable / gaps;
+      for (let i = 0; i <= gaps; i++) {
+        const start = minY + visibleMargin + i * spacing;
+        ranges.push({ start, end: start + length });
+      }
+    }
+
+    return ranges;
+  };
+
+  const addVerticalEarsToEdge = (verts, x, startY, endY, side, length, depth, useManual, countValue, fixedRanges = null) => {
+    const direction = endY >= startY ? 1 : -1;
+
+    if (depth <= 0 || length <= 0 || Math.abs(endY - startY) <= 0.001) {
+      pushPoint(verts, [x, endY]);
+      return;
+    }
+
+    const ranges = fixedRanges || getVerticalEarRanges(startY, endY, length, depth, useManual, countValue);
+    if (ranges.length === 0) {
+      pushPoint(verts, [x, endY]);
+      return;
+    }
+
+    const ordered = direction > 0 ? ranges : [...ranges].reverse();
+    let cursor = startY;
+    const outwardX = side === 'right' ? x + depth : x - depth;
+
+    ordered.forEach(range => {
+      const entryY = direction > 0 ? range.start : range.end;
+      const exitY = direction > 0 ? range.end : range.start;
+      pushPoint(verts, [x, entryY]);
+      pushPoint(verts, [outwardX, entryY]);
+      pushPoint(verts, [outwardX, exitY]);
+      pushPoint(verts, [x, exitY]);
+      cursor = exitY;
+    });
+
+    if (Math.abs(cursor - endY) > 0.001) {
+      pushPoint(verts, [x, endY]);
+    }
+  };
+
   const buildArcTopVertices = (verts) => {
     const arc = getActiveTopArcData();
     if (!arc) {
@@ -761,6 +889,304 @@ export default function App() {
     });
 
     appendArcSegment(verts, arc, currentS, arc.arcLength, 0, ARC_SEGMENTS);
+  };
+
+  const getHorizontalEarRanges = (startX, endX, length, depth, edgeMargin, useManual, countValue) => {
+    if (depth <= 0 || length <= 0) return [];
+
+    const sideLength = endX - startX;
+    const usable = sideLength - 2 * edgeMargin - length;
+    if (usable < 0) return [];
+
+    const ranges = [];
+
+    if (useManual) {
+      const count = Math.max(1, n(countValue, 1));
+      if (count === 1) {
+        const start = startX + sideLength / 2 - length / 2;
+        ranges.push({ start, end: start + length });
+        return ranges;
+      }
+
+      const spacing = usable / (count - 1);
+      for (let i = 0; i < count; i++) {
+        const start = startX + edgeMargin + i * spacing;
+        ranges.push({ start, end: start + length });
+      }
+
+      return ranges;
+    }
+
+    let gaps = 1;
+    while (usable / gaps > MAX_SPACING) gaps++;
+    while (gaps > 1 && usable / gaps < MIN_SPACING) gaps--;
+
+    const spacing = usable / gaps;
+    for (let i = 0; i <= gaps; i++) {
+      const start = startX + edgeMargin + i * spacing;
+      ranges.push({ start, end: start + length });
+    }
+
+    return ranges;
+  };
+
+  const getArcEarRangesForSpan = (startS, endS, useManual = manualMode, countValue = hEars) => {
+    if (topEarDepth <= 0 || topEarLength <= 0) return [];
+
+    const spanLength = endS - startS;
+    const usable = spanLength - 2 * topVisibleCornerMargin - topEarLength;
+    if (usable < 0) return [];
+
+    const ranges = [];
+
+    if (useManual) {
+      const count = Math.max(1, n(countValue, 1));
+      if (count === 1) {
+        const start = startS + spanLength / 2 - topEarLength / 2;
+        ranges.push({ start, end: start + topEarLength });
+        return ranges;
+      }
+
+      const spacing = usable / (count - 1);
+      for (let i = 0; i < count; i++) {
+        const start = startS + topVisibleCornerMargin + i * spacing;
+        ranges.push({ start, end: start + topEarLength });
+      }
+
+      return ranges;
+    }
+
+    let gaps = 1;
+    while (usable / gaps > MAX_SPACING) gaps++;
+    while (gaps > 1 && usable / gaps < MIN_SPACING) gaps--;
+
+    const spacing = usable / gaps;
+    for (let i = 0; i <= gaps; i++) {
+      const start = startS + topVisibleCornerMargin + i * spacing;
+      ranges.push({ start, end: start + topEarLength });
+    }
+
+    return ranges;
+  };
+
+  const getArcSAtX = (arc, x) => {
+    const samples = 256;
+    let bestS = 0;
+    let bestDistance = Infinity;
+    let previous = arc.pointAt(0, 0);
+    let previousS = 0;
+
+    for (let i = 1; i <= samples; i++) {
+      const s = arc.arcLength * (i / samples);
+      const point = arc.pointAt(s, 0);
+      const distance = Math.abs(point[0] - x);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestS = s;
+      }
+
+      if ((previous[0] - x) * (point[0] - x) <= 0 && Math.abs(point[0] - previous[0]) > 0.000001) {
+        let low = previousS;
+        let high = s;
+        for (let j = 0; j < 24; j++) {
+          const mid = (low + high) / 2;
+          const midPoint = arc.pointAt(mid, 0);
+          if ((previous[0] - x) * (midPoint[0] - x) <= 0) high = mid;
+          else low = mid;
+        }
+        return (low + high) / 2;
+      }
+
+      previous = point;
+      previousS = s;
+    }
+
+    return bestS;
+  };
+
+  const getArcTopSpanVertices = (arc, startS, endS, countValue = hEars) => {
+    const verts = [arc.pointAt(startS, 0)];
+    const ears = getArcEarRangesForSpan(startS, endS, true, countValue);
+    let currentS = startS;
+
+    ears.forEach(ear => {
+      appendArcSegment(verts, arc, currentS, ear.start, 0, ARC_SEGMENTS);
+
+      const innerStart = arc.pointAt(ear.start, 0);
+      const outerStart = arc.pointAt(ear.start, topEarDepth);
+      const outerEnd = arc.pointAt(ear.end, topEarDepth);
+      const innerEnd = arc.pointAt(ear.end, 0);
+
+      pushPoint(verts, innerStart);
+      pushPoint(verts, outerStart);
+      appendArcSegment(verts, arc, ear.start, ear.end, topEarDepth, EAR_ARC_SEGMENTS);
+      pushPoint(verts, outerEnd);
+      pushPoint(verts, innerEnd);
+
+      currentS = ear.end;
+    });
+
+    appendArcSegment(verts, arc, currentS, endS, 0, ARC_SEGMENTS);
+    pushPoint(verts, arc.pointAt(endS, 0));
+    return verts;
+  };
+
+  const getStraightTopEdgeVertices = (startX, endX, countValue = hEars) => {
+    const verts = [[startX, topEarDepth]];
+    const ears = getHorizontalEarRanges(
+      startX,
+      endX,
+      topEarLengthForLayout,
+      topEarDepth,
+      topEdgeMarginForLayout,
+      true,
+      countValue
+    );
+
+    ears.forEach(ear => {
+      verts.push(
+        [ear.start, topEarDepth],
+        [ear.start, 0],
+        [ear.end, 0],
+        [ear.end, topEarDepth]
+      );
+    });
+
+    verts.push([endX, topEarDepth]);
+    return verts;
+  };
+
+  const getBottomEdgeVerticesLeftToRightForSpan = (startX, endX, countValue = hEars) => {
+    const verts = [[startX, bottomBaseY]];
+    const ears = getHorizontalEarRanges(
+      startX,
+      endX,
+      bottomEarLengthForLayout,
+      bottomEarDepth,
+      bottomEdgeMarginForLayout,
+      true,
+      countValue
+    );
+
+    ears.forEach(ear => {
+      verts.push(
+        [ear.start, safeHeight - bottomEarDepth],
+        [ear.start, safeHeight],
+        [ear.end, safeHeight],
+        [ear.end, safeHeight - bottomEarDepth]
+      );
+    });
+
+    verts.push([endX, bottomBaseY]);
+    return verts;
+  };
+
+  const getTopEdgeVertices = () => {
+    const verts = [getStartPoint()];
+    if (hasArcTop) {
+      buildArcTopVertices(verts);
+    } else {
+      grouped.top.forEach(ear => {
+        const p = ear.pos;
+        verts.push([p, topEarDepth], [p, 0], [p + topEarLengthForLayout, 0], [p + topEarLengthForLayout, topEarDepth]);
+      });
+      verts.push([safeWidth - rightEarDepth, topEarDepth]);
+    }
+    return verts;
+  };
+
+  const splitPolylineAtX = (verts, x) => {
+    const left = [];
+    const right = [];
+    let intersection = null;
+
+    const pushSide = (target, point) => {
+      const last = target[target.length - 1];
+      if (!last || Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.001) {
+        target.push(point);
+      }
+    };
+
+    for (let i = 0; i < verts.length - 1; i++) {
+      const a = verts[i];
+      const b = verts[i + 1];
+      if (i === 0) {
+        if (a[0] <= x + 0.001) pushSide(left, a);
+        if (a[0] >= x - 0.001) pushSide(right, a);
+      }
+
+      const crosses = (a[0] - x) * (b[0] - x) <= 0 && Math.abs(a[0] - b[0]) > 0.000001;
+      if (crosses) {
+        const t = clamp((x - a[0]) / (b[0] - a[0]), 0, 1);
+        intersection = [x, a[1] + (b[1] - a[1]) * t];
+        pushSide(left, intersection);
+        pushSide(right, intersection);
+      }
+
+      if (b[0] <= x + 0.001) pushSide(left, b);
+      if (b[0] >= x - 0.001) pushSide(right, b);
+    }
+
+    if (!intersection) {
+      const nearest = verts.reduce((best, point) => (
+        Math.abs(point[0] - x) < Math.abs(best[0] - x) ? point : best
+      ), verts[0]);
+      intersection = [x, nearest[1]];
+    }
+
+    return { left, right, intersection };
+  };
+
+  const getBottomEdgeVerticesLeftToRight = () => {
+    return getBottomEdgeVerticesLeftToRightForSpan(leftEarDepth, safeWidth - rightEarDepth);
+  };
+
+  const getSplitPanelVertexSets = () => {
+    if (!hasPanelSplit) return [buildVertices()];
+
+    const splitX = safeSplitPosition;
+    const rightSplitX = safeRightSplitPosition;
+    const arc = getActiveTopArcData();
+    const splitS = arc ? getArcSAtX(arc, splitX) : null;
+    const rightSplitS = arc ? getArcSAtX(arc, rightSplitX) : null;
+    const leftTop = arc
+      ? getArcTopSpanVertices(arc, 0, splitS, splitLeftTopEars)
+      : getStraightTopEdgeVertices(leftEarDepth, splitX, splitLeftTopEars);
+    const rightTop = arc
+      ? getArcTopSpanVertices(arc, rightSplitS, arc.arcLength, splitRightTopEars)
+      : getStraightTopEdgeVertices(rightSplitX, safeWidth - rightEarDepth, splitRightTopEars);
+    const bottomLeftToRight = getBottomEdgeVerticesLeftToRightForSpan(leftEarDepth, splitX, splitLeftBottomEars);
+    const bottomRightToLeft = getBottomEdgeVerticesLeftToRightForSpan(rightSplitX, safeWidth - rightEarDepth, splitRightBottomEars).reverse();
+    const splitTop = arc ? arc.pointAt(splitS, 0) : [splitX, topEarDepth];
+    const splitBottom = [splitX, bottomBaseY];
+    const rightSplitTop = arc ? arc.pointAt(rightSplitS, 0) : [rightSplitX, topEarDepth];
+    const rightSplitBottom = [rightSplitX, bottomBaseY];
+    const syncedSplitEarRanges = syncSplitEars
+      ? getVerticalEarRanges(splitTop[1], splitBottom[1], splitEarLength, splitEarDepth, splitManualMode, splitLeftCutEars)
+      : null;
+
+    const leftVerts = [...leftTop];
+    addVerticalEarsToEdge(leftVerts, splitX, splitTop[1], splitBottom[1], 'right', splitEarLength, splitEarDepth, splitManualMode, splitLeftCutEars, syncedSplitEarRanges);
+    bottomLeftToRight.slice().reverse().forEach(point => pushPoint(leftVerts, point));
+    grouped.left.forEach(ear => {
+      const p = ear.pos;
+      leftVerts.push([leftEarDepth, p + leftEarLength], [0, p + leftEarLength], [0, p], [leftEarDepth, p]);
+    });
+
+    const rightVerts = [...rightTop];
+    grouped.right.forEach(ear => {
+      const p = ear.pos;
+      rightVerts.push(
+        [safeWidth - rightEarDepth, p],
+        [safeWidth, p],
+        [safeWidth, p + rightEarLength],
+        [safeWidth - rightEarDepth, p + rightEarLength]
+      );
+    });
+    bottomRightToLeft.forEach(point => pushPoint(rightVerts, point));
+    addVerticalEarsToEdge(rightVerts, rightSplitX, rightSplitBottom[1], rightSplitTop[1], 'left', splitEarLength, splitEarDepth, splitManualMode, splitRightCutEars, syncedSplitEarRanges);
+
+    return [leftVerts, rightVerts];
   };
 
   const buildVertices = () => {
@@ -851,11 +1277,338 @@ export default function App() {
     return verts;
   };
 
-  const snapPoints = transformPoints(buildSnapVertices());
+  const getPanelVertexSets = () => (hasPanelSplit ? getSplitPanelVertexSets() : [buildVertices()]);
+
+  const snapPoints = hasPanelSplit
+    ? transformPoints(getPanelVertexSets().flat())
+    : transformPoints(buildSnapVertices());
+
+  const appendCleanArcSpan = (verts, arc, startS, endS) => {
+    const length = Math.abs(endS - startS);
+    const segments = Math.max(1, Math.ceil(ARC_SEGMENTS * (length / arc.arcLength)));
+    for (let i = 1; i <= segments; i++) {
+      const s = startS + (endS - startS) * (i / segments);
+      pushPoint(verts, arc.pointAt(s, 0));
+    }
+  };
+
+  const getCleanTopSpanVertices = (startX, endX) => {
+    const arc = getActiveTopArcData();
+    if (!arc) {
+      const y1 = isSplitHeightTop
+        ? safeHeight - (safeLeftHeight + (safeHeight - safeLeftHeight) * ((startX - leftEarDepth) / Math.max(1, safeWidth - leftEarDepth - rightEarDepth))) + topEarDepth
+        : topEarDepth;
+      const y2 = isSplitHeightTop
+        ? safeHeight - (safeLeftHeight + (safeHeight - safeLeftHeight) * ((endX - leftEarDepth) / Math.max(1, safeWidth - leftEarDepth - rightEarDepth))) + topEarDepth
+        : topEarDepth;
+      return [[startX, y1], [endX, y2]];
+    }
+
+    const startS = getArcSAtX(arc, startX);
+    const endS = getArcSAtX(arc, endX);
+    const verts = [arc.pointAt(startS, 0)];
+    appendCleanArcSpan(verts, arc, startS, endS);
+    return verts;
+  };
+
+  const getCleanMainBodyPanelVertexSets = () => {
+    if (!hasPanelSplit) {
+      const top = getCleanTopSpanVertices(leftEarDepth, safeWidth - rightEarDepth);
+      return [[
+        ...top,
+        [safeWidth - rightEarDepth, bottomBaseY],
+        [leftEarDepth, bottomBaseY]
+      ]];
+    }
+
+    const splitX = safeSplitPosition;
+    const rightSplitX = safeRightSplitPosition;
+    const leftTop = getCleanTopSpanVertices(leftEarDepth, splitX);
+    const rightTop = getCleanTopSpanVertices(rightSplitX, safeWidth - rightEarDepth);
+
+    return [
+      [
+        ...leftTop,
+        [splitX, bottomBaseY],
+        [leftEarDepth, bottomBaseY]
+      ],
+      [
+        ...rightTop,
+        [safeWidth - rightEarDepth, bottomBaseY],
+        [rightSplitX, bottomBaseY]
+      ].filter((point, index, arr) => index === 0 || Math.hypot(point[0] - arr[index - 1][0], point[1] - arr[index - 1][1]) > 0.001)
+    ].map(panel => panel.filter(Boolean));
+  };
+
+  const polygonArea = (pointsArray) => {
+    let area = 0;
+    for (let i = 0; i < pointsArray.length; i++) {
+      const a = pointsArray[i];
+      const b = pointsArray[(i + 1) % pointsArray.length];
+      area += a[0] * b[1] - b[0] * a[1];
+    }
+    return area / 2;
+  };
+
+  const offsetPolygonInward = (pointsArray, distance) => {
+    if (distance <= 0) return [pointsArray];
+
+    const scaleFactor = 1000;
+    const source = pointsArray.map(([x, y]) => ({
+      X: Math.round(x * scaleFactor),
+      Y: Math.round(y * scaleFactor)
+    }));
+    const sourceArea = Math.abs(polygonArea(pointsArray));
+
+    const solve = (delta) => {
+      const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * scaleFactor);
+      offsetter.AddPath(source, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+      const solution = new ClipperLib.Paths();
+      offsetter.Execute(solution, delta * scaleFactor);
+      return solution
+        .map(path => path.map(point => [point.X / scaleFactor, point.Y / scaleFactor]))
+        .filter(path => path.length >= 3);
+    };
+
+    const negative = solve(-distance);
+    const negativeArea = negative.reduce((sum, path) => sum + Math.abs(polygonArea(path)), 0);
+    if (negative.length && negativeArea < sourceArea) return negative;
+
+    const positive = solve(distance);
+    const positiveArea = positive.reduce((sum, path) => sum + Math.abs(polygonArea(path)), 0);
+    if (positive.length && positiveArea < sourceArea) return positive;
+
+    return [];
+  };
+
+  const interiorMarginBoundarySets = getCleanMainBodyPanelVertexSets()
+    .flatMap(panel => offsetPolygonInward(transformPoints(panel), interiorMargin));
+
+  const buildInteriorMarginPath = () => (
+    interiorMarginBoundarySets
+      .map(panel => panel.map((v, i) => `${i === 0 ? 'M' : 'L'} ${v[0] * scale} ${v[1] * scale}`).join(' ') + ' Z')
+      .join(' ')
+  );
+
+  const seededRandom = (seed) => {
+    let value = Math.max(1, Math.floor(n(seed, 1))) % 2147483647;
+    return () => {
+      value = (value * 16807) % 2147483647;
+      return (value - 1) / 2147483646;
+    };
+  };
+
+  const makeSlotPolygon = (cx, cy, length, thickness, angle) => {
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const nx = -uy;
+    const ny = ux;
+    const halfLength = length / 2;
+    const halfThickness = thickness / 2;
+    return [
+      [cx - ux * halfLength - nx * halfThickness, cy - uy * halfLength - ny * halfThickness],
+      [cx + ux * halfLength - nx * halfThickness, cy + uy * halfLength - ny * halfThickness],
+      [cx + ux * halfLength + nx * halfThickness, cy + uy * halfLength + ny * halfThickness],
+      [cx - ux * halfLength + nx * halfThickness, cy - uy * halfLength + ny * halfThickness]
+    ];
+  };
+
+  const makeRoundedSlotPolygon = (cx, cy, length, thickness, angle) => {
+    const safeLength = Math.max(thickness, length);
+    const radius = thickness / 2;
+    const straightHalf = Math.max(0, safeLength / 2 - radius);
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const leftCenter = [cx - ux * straightHalf, cy - uy * straightHalf];
+    const rightCenter = [cx + ux * straightHalf, cy + uy * straightHalf];
+    const points = [];
+    const segments = 10;
+
+    for (let i = 0; i <= segments; i++) {
+      const theta = angle - Math.PI / 2 + (Math.PI * i) / segments;
+      points.push([rightCenter[0] + Math.cos(theta) * radius, rightCenter[1] + Math.sin(theta) * radius]);
+    }
+
+    for (let i = 0; i <= segments; i++) {
+      const theta = angle + Math.PI / 2 + (Math.PI * i) / segments;
+      points.push([leftCenter[0] + Math.cos(theta) * radius, leftCenter[1] + Math.sin(theta) * radius]);
+    }
+
+    return points;
+  };
+
+  const clipPatternSlotToMargin = (points) => {
+    if (!interiorMarginBoundarySets.length) return [];
+
+    const subject = cleanClipperPaths([toClipperPath(points)]);
+    const clips = cleanClipperPaths(interiorMarginBoundarySets.map(toClipperPath));
+    if (!subject.length || !clips.length) return [];
+
+    const clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    clipper.AddPaths(clips, ClipperLib.PolyType.ptClip, true);
+
+    const solution = new ClipperLib.Paths();
+    clipper.Execute(
+      ClipperLib.ClipType.ctIntersection,
+      solution,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+
+    return cleanClipperPaths(solution).map(fromClipperPath);
+  };
+
+  const getPatternContourProjectedLength = (points, angle) => {
+    if (points.length < 2) return 0;
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const projections = points.map(point => point[0] * ux + point[1] * uy);
+    return Math.max(...projections) - Math.min(...projections);
+  };
+
+  const roundClippedPatternContour = (points, thickness, angle) => {
+    if (points.length < 3) return points;
+
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const nx = -uy;
+    const ny = ux;
+    const projections = points.map(point => point[0] * ux + point[1] * uy);
+    const normals = points.map(point => point[0] * nx + point[1] * ny);
+    const minProjection = Math.min(...projections);
+    const maxProjection = Math.max(...projections);
+    const centerProjection = (minProjection + maxProjection) / 2;
+    const centerNormal = normals.reduce((sum, value) => sum + value, 0) / normals.length;
+    const center = [
+      ux * centerProjection + nx * centerNormal,
+      uy * centerProjection + ny * centerNormal
+    ];
+
+    return makeRoundedSlotPolygon(
+      center[0],
+      center[1],
+      maxProjection - minProjection,
+      thickness,
+      angle
+    );
+  };
+
+  const getPatternContours = () => {
+    if (!patternEnabled || interiorMarginBoundarySets.length === 0) return [];
+
+    const thickness = Math.max(1, n(patternThickness, 15));
+    const minLength = Math.max(1, n(patternMinLength, 80));
+    const maxLength = Math.max(minLength, n(patternMaxLength, 260));
+    const rowSpacing = Math.max(thickness + 1, n(patternRowSpacing, 90));
+    const gap = Math.max(0, n(patternGap, 90));
+    const random = seededRandom(patternSeed);
+    const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const nx = -uy;
+    const ny = ux;
+    const allPoints = interiorMarginBoundarySets.flat();
+    const projections = allPoints.map(point => point[0] * ux + point[1] * uy);
+    const normals = allPoints.map(point => point[0] * nx + point[1] * ny);
+    const minProjection = Math.min(...projections) - maxLength;
+    const maxProjection = Math.max(...projections) + maxLength;
+    const minNormal = Math.min(...normals) + thickness / 2;
+    const maxNormal = Math.max(...normals) - thickness / 2;
+    const contours = [];
+
+    if (maxNormal < minNormal) return [];
+
+    const getNextGap = () => (
+      patternRandomGap ? gap * (0.55 + random() * 0.9) : gap
+    );
+
+    const minRandomRowSpacing = Math.max(thickness + 1, rowSpacing - 40);
+    const maxRandomRowSpacing = Math.max(minRandomRowSpacing, rowSpacing + 40);
+    const rowJitter = 20;
+    const rows = [];
+    let normalCursor = minNormal;
+    while (normalCursor <= maxNormal) {
+      rows.push(normalCursor);
+      normalCursor += rowSpacing;
+    }
+    if (rows.length === 0 || maxNormal - rows[rows.length - 1] >= minRandomRowSpacing) rows.push(maxNormal);
+
+    const placedSlots = [];
+    let rowIndex = 0;
+    rows.forEach(normal => {
+      let projection = minProjection + (patternRandomGap ? random() * Math.max(1, gap) : 0);
+      while (projection <= maxProjection) {
+        const length = minLength + random() * (maxLength - minLength);
+        const centerProjection = projection + length / 2;
+        let lineNormal = normal;
+
+        if (patternRandomRowSpacing) {
+          const slotStart = projection;
+          const slotEnd = projection + length;
+          const overlapsTooClose = (candidate) => placedSlots.some(slot => (
+            Math.max(slotStart, slot.startProjection) <= Math.min(slotEnd, slot.endProjection)
+            && Math.abs(candidate - slot.normal) < minRandomRowSpacing
+          ));
+
+          for (let attempt = 0; attempt < 12; attempt++) {
+            const candidate = clamp(normal + (random() - 0.5) * rowJitter * 2, minNormal, maxNormal);
+            if (!overlapsTooClose(candidate)) {
+              lineNormal = candidate;
+              break;
+            }
+          }
+        }
+
+        const cx = ux * centerProjection + nx * lineNormal;
+        const cy = uy * centerProjection + ny * lineNormal;
+        const rawSlot = patternRoundedEnds
+          ? makeRoundedSlotPolygon(cx, cy, length, thickness, angle)
+          : makeSlotPolygon(cx, cy, length, thickness, angle);
+
+        clipPatternSlotToMargin(rawSlot).forEach(points => {
+          const projectedLength = getPatternContourProjectedLength(points, angle);
+          const finalPoints = patternRoundedEnds
+            ? roundClippedPatternContour(points, thickness, angle)
+            : points;
+
+          if (finalPoints.length >= 3 && projectedLength >= minLength / 2) {
+            contours.push({
+              points: finalPoints,
+              closed: true,
+              source: 'pattern',
+              fillRule: 'nonzero',
+              layer: 'PATTERN',
+              designId: `pattern-${rowIndex}-${contours.length}`,
+              designName: 'Horizontal line pattern',
+              role: 'outer',
+              area: Math.abs(signedPolygonArea(points)),
+              depth: 0
+            });
+          }
+        });
+
+        placedSlots.push({
+          startProjection: projection,
+          endProjection: projection + length,
+          normal: lineNormal
+        });
+
+        projection += length + getNextGap();
+      }
+      rowIndex++;
+    });
+
+    return contours;
+  };
 
   const buildOutlinePath = () => {
-    const verts = transformPoints(buildVertices());
-    return verts.map((v, i) => `${i === 0 ? 'M' : 'L'} ${v[0] * scale} ${v[1] * scale}`).join(' ') + ' Z';
+    return getPanelVertexSets()
+      .map(vertexSet => {
+        const verts = transformPoints(vertexSet);
+        return verts.map((v, i) => `${i === 0 ? 'M' : 'L'} ${v[0] * scale} ${v[1] * scale}`).join(' ') + ' Z';
+      })
+      .join(' ');
   };
 
   const getBaseViewBox = () => ({
@@ -1111,6 +1864,123 @@ export default function App() {
       addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [outsideX, (p1[1] + p2[1]) / 2]));
     };
 
+    const addHorizontalRangeGap = (id, ranges, y, outsideY) => {
+      if (ranges.length < 2) return;
+      const sorted = [...ranges].sort((a, b) => a.start - b.start);
+      const p1 = [sorted[0].end, y];
+      const p2 = [sorted[1].start, y];
+      addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [(p1[0] + p2[0]) / 2, outsideY]));
+    };
+
+    const addArcRangeGap = (id, arc, ranges) => {
+      if (!arc || ranges.length < 2) return;
+      const sorted = [...ranges].sort((a, b) => a.start - b.start);
+      const p1 = arc.pointAt(sorted[0].end, 0);
+      const p2 = arc.pointAt(sorted[1].start, 0);
+      const outsideY = Math.min(p1[1], p2[1]) - 120;
+      addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [(p1[0] + p2[0]) / 2, outsideY]));
+    };
+
+    const getVerticalEarRangesForSpan = (startY, endY, length, depth, useManual, countValue) => {
+      if (depth <= 0 || length <= 0) return [];
+
+      const minY = Math.min(startY, endY);
+      const maxY = Math.max(startY, endY);
+      const sideLength = maxY - minY;
+      const visibleMargin = Math.max(0, margin - depth);
+      const usable = sideLength - 2 * visibleMargin - length;
+      if (usable < 0) return [];
+
+      const ranges = [];
+      if (useManual) {
+        const count = Math.max(1, n(countValue, 1));
+        if (count === 1) {
+          const start = minY + sideLength / 2 - length / 2;
+          ranges.push({ start, end: start + length });
+          return ranges;
+        }
+
+        const spacing = usable / (count - 1);
+        for (let i = 0; i < count; i++) {
+          const start = minY + visibleMargin + i * spacing;
+          ranges.push({ start, end: start + length });
+        }
+        return ranges;
+      }
+
+      let gaps = 1;
+      while (usable / gaps > MAX_SPACING) gaps++;
+      while (gaps > 1 && usable / gaps < MIN_SPACING) gaps--;
+
+      const spacing = usable / gaps;
+      for (let i = 0; i <= gaps; i++) {
+        const start = minY + visibleMargin + i * spacing;
+        ranges.push({ start, end: start + length });
+      }
+      return ranges;
+    };
+
+    const addVerticalRangeGap = (id, ranges, x, outsideX) => {
+      if (ranges.length < 2) return;
+      const sorted = [...ranges].sort((a, b) => a.start - b.start);
+      const p1 = [x, sorted[0].end];
+      const p2 = [x, sorted[1].start];
+      addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [outsideX, (p1[1] + p2[1]) / 2]));
+    };
+
+    if (hasPanelSplit) {
+      const splitX = safeSplitPosition;
+      const rightSplitX = safeRightSplitPosition;
+      const arc = getActiveTopArcData();
+
+      if (arc) {
+        const splitS = getArcSAtX(arc, splitX);
+        const rightSplitS = getArcSAtX(arc, rightSplitX);
+        addArcRangeGap('auto-gap-left-panel-top', arc, getArcEarRangesForSpan(0, splitS, true, splitLeftTopEars));
+        addArcRangeGap('auto-gap-right-panel-top', arc, getArcEarRangesForSpan(rightSplitS, arc.arcLength, true, splitRightTopEars));
+      } else {
+        addHorizontalRangeGap(
+          'auto-gap-left-panel-top',
+          getHorizontalEarRanges(leftEarDepth, splitX, topEarLengthForLayout, topEarDepth, topEdgeMarginForLayout, true, splitLeftTopEars),
+          topEarDepth,
+          -120
+        );
+        addHorizontalRangeGap(
+          'auto-gap-right-panel-top',
+          getHorizontalEarRanges(rightSplitX, safeWidth - rightEarDepth, topEarLengthForLayout, topEarDepth, topEdgeMarginForLayout, true, splitRightTopEars),
+          topEarDepth,
+          -120
+        );
+      }
+
+      addHorizontalRangeGap(
+        'auto-gap-left-panel-bottom',
+        getHorizontalEarRanges(leftEarDepth, splitX, bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout, true, splitLeftBottomEars),
+        safeHeight - bottomEarDepth,
+        safeHeight + 120
+      );
+      addHorizontalRangeGap(
+        'auto-gap-right-panel-bottom',
+        getHorizontalEarRanges(rightSplitX, safeWidth - rightEarDepth, bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout, true, splitRightBottomEars),
+        safeHeight - bottomEarDepth,
+        safeHeight + 120
+      );
+
+      const splitTop = arc ? arc.pointAt(getArcSAtX(arc, splitX), 0) : [splitX, topEarDepth];
+      const rightSplitTop = arc ? arc.pointAt(getArcSAtX(arc, rightSplitX), 0) : [rightSplitX, topEarDepth];
+      const leftSplitRanges = getVerticalEarRangesForSpan(splitTop[1], bottomBaseY, splitEarLength, splitEarDepth, splitManualMode, splitLeftCutEars);
+      const rightSplitRanges = syncSplitEars
+        ? leftSplitRanges
+        : getVerticalEarRangesForSpan(rightSplitTop[1], bottomBaseY, splitEarLength, splitEarDepth, splitManualMode, splitRightCutEars);
+      addVerticalRangeGap('auto-gap-left-panel-split', leftSplitRanges, splitX, splitX + 120);
+      addVerticalRangeGap('auto-gap-right-panel-split', rightSplitRanges, rightSplitX, rightSplitX - 120);
+
+      addVerticalGap('auto-gap-left-panel-left', grouped.left, leftEarDepth, -120, leftEarLength, leftEarDepth);
+      addVerticalGap('auto-gap-right-panel-right', grouped.right, safeWidth - rightEarDepth, safeWidth + 120, rightEarLength, rightEarDepth);
+
+      return result;
+    }
+
     if (hasArcTop) {
       const arc = getActiveTopArcData();
       const ears = getTopArcEarRanges();
@@ -1212,6 +2082,90 @@ export default function App() {
     return `data:image/svg+xml;base64,${btoa(binary)}`;
   };
 
+  const validateInteriorSvg = (svgText) => {
+    const warnings = [];
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText, 'image/svg+xml');
+    const svg = doc.querySelector('svg');
+
+    if (!svg || doc.querySelector('parsererror')) {
+      return {
+        exportable: false,
+        warnings: ['This file is not a valid SVG.']
+      };
+    }
+
+    const supportedTags = new Set([
+      'svg',
+      'g',
+      'path',
+      'rect',
+      'circle',
+      'ellipse',
+      'line',
+      'polyline',
+      'polygon',
+      'title',
+      'desc',
+      'defs',
+      'symbol',
+      'style',
+      'use',
+      'metadata',
+      'namedview',
+      'sodipodi:namedview',
+      'rdf:rdf',
+      'rdf:RDF',
+      'cc:work',
+      'dc:format',
+      'dc:type',
+      'dc:title',
+      'dc:creator',
+      'dc:description'
+    ]);
+    const unsupportedTags = new Set();
+    const riskyAttributes = new Set();
+
+    Array.from(svg.querySelectorAll('*')).forEach(node => {
+      const tag = node.tagName.toLowerCase();
+      if (!supportedTags.has(tag)) unsupportedTags.add(tag);
+
+      ['clip-path', 'mask', 'filter'].forEach(attr => {
+        if (node.hasAttribute(attr)) riskyAttributes.add(attr);
+      });
+
+      const style = (node.getAttribute('style') || '').toLowerCase();
+      if (style.includes('clip-path')) riskyAttributes.add('clip-path');
+      if (style.includes('mask')) riskyAttributes.add('mask');
+      if (style.includes('filter')) riskyAttributes.add('filter');
+    });
+
+    // Inkscape and CAD-exported SVGs often include metadata, markers, symbols, and
+    // helper definitions that do not participate in the visible cutting geometry.
+    // Those are ignored during DXF conversion instead of blocking a valid import.
+
+    if (riskyAttributes.size) {
+      warnings.push(`Unsupported SVG effects: ${Array.from(riskyAttributes).join(', ')}.`);
+    }
+
+    if (svg.querySelector('text')) {
+      warnings.push('Text must be converted to paths before import.');
+    }
+
+    if (svg.querySelector('image')) {
+      warnings.push('Embedded images/photos cannot be exported as DXF geometry yet.');
+    }
+
+    if (svg.querySelector('linearGradient, radialGradient, pattern')) {
+      warnings.push('Gradient/pattern paint will export as plain vector outlines.');
+    }
+
+    return {
+      exportable: !svg.querySelector('text, image') && !doc.querySelector('parsererror'),
+      warnings
+    };
+  };
+
   const handleInteriorDesignFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1219,12 +2173,15 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = () => {
       const svgText = String(reader.result || '');
+      const validation = validateInteriorSvg(svgText);
       const defaultSize = Math.max(80, Math.min(safeWidth, safeHeight) * 0.25);
       const nextDesign = {
         id: crypto.randomUUID(),
         name: file.name.replace(/\.svg$/i, '') || 'SVG design',
         href: svgTextToDataUrl(svgText),
         svgText,
+        exportable: validation.exportable,
+        warnings: validation.warnings,
         color: 'white',
         x: safeWidth / 2 - defaultSize / 2,
         y: safeHeight / 2 - defaultSize / 2,
@@ -1314,6 +2271,21 @@ export default function App() {
 
     const min = field === 'width' || field === 'height' ? 10 : -Infinity;
     updateInteriorDesign(design.id, { [field]: Math.max(min, n(design[field], fallback)) });
+  };
+
+  const handleInteriorMarginBlur = () => {
+    const panelBounds = getCleanMainBodyPanelVertexSets().map(panel => {
+      const transformed = transformPoints(panel);
+      const xs = transformed.map(point => point[0]);
+      const ys = transformed.map(point => point[1]);
+      return {
+        width: Math.max(...xs) - Math.min(...xs),
+        height: Math.max(...ys) - Math.min(...ys)
+      };
+    });
+    const maxMargin = Math.max(0, Math.min(...panelBounds.map(bounds => Math.min(bounds.width, bounds.height) / 2 - 1)));
+    setInteriorMarginInput(clamp(n(interiorMarginInput, 40), 0, maxMargin));
+    setShowInteriorMarginGuide(false);
   };
 
   const deleteSelectedInteriorDesign = () => {
@@ -1414,7 +2386,131 @@ export default function App() {
   };
 
   const roundDXF = (value) => Math.round(value * 1000000) / 1000000;
-  const dxfLine = (...items) => `${items.join('\n')}\n`;
+  let dxfHandleCounter = 0x100;
+  const nextDxfHandle = () => (dxfHandleCounter++).toString(16).toUpperCase();
+  const resetDxfHandles = () => {
+    dxfHandleCounter = 0x100;
+  };
+  const dxfLine = (...items) => {
+    let line = '';
+    for (let i = 0; i < items.length; i += 2) {
+      const group = String(items[i]).padStart(3, ' ');
+      line += `${group}\n${items[i + 1]}\n`;
+    }
+    return line;
+  };
+  const dxfLwPolylineHeader = (layer, vertexCount, closed = true) => (
+    dxfLine(
+      '0', 'LWPOLYLINE',
+      '5', nextDxfHandle(),
+      '100', 'AcDbEntity',
+      '8', layer,
+      '62', '7',
+      '100', 'AcDbPolyline',
+      '90', vertexCount,
+      '70', closed ? '1' : '0'
+    )
+  );
+
+  const buildDxfTablesSection = (layers) => {
+    const uniqueLayers = Array.from(new Set(['0', ...layers])).filter(Boolean);
+    let section = dxfLine('0', 'SECTION', '2', 'TABLES');
+
+    section += dxfLine('0', 'TABLE', '2', 'LTYPE', '5', nextDxfHandle(), '100', 'AcDbSymbolTable', '70', '3');
+    [
+      ['BYBLOCK', ''],
+      ['BYLAYER', ''],
+      ['CONTINUOUS', 'Solid line']
+    ].forEach(([name, description]) => {
+      section += dxfLine(
+        '0', 'LTYPE',
+        '5', nextDxfHandle(),
+        '100', 'AcDbSymbolTableRecord',
+        '100', 'AcDbLinetypeTableRecord',
+        '2', name,
+        '70', '0',
+        '3', description,
+        '72', '65',
+        '73', '0',
+        '40', '0.0'
+      );
+    });
+    section += dxfLine('0', 'ENDTAB');
+
+    section += dxfLine('0', 'TABLE', '2', 'LAYER', '5', nextDxfHandle(), '100', 'AcDbSymbolTable', '70', uniqueLayers.length);
+    uniqueLayers.forEach(layer => {
+      section += dxfLine(
+        '0', 'LAYER',
+        '5', nextDxfHandle(),
+        '100', 'AcDbSymbolTableRecord',
+        '100', 'AcDbLayerTableRecord',
+        '2', layer,
+        '70', '0',
+        '62', '7',
+        '6', 'CONTINUOUS'
+      );
+    });
+    section += dxfLine('0', 'ENDTAB');
+
+    section += dxfLine('0', 'TABLE', '2', 'STYLE', '5', nextDxfHandle(), '100', 'AcDbSymbolTable', '70', '1');
+    section += dxfLine(
+      '0', 'STYLE',
+      '5', nextDxfHandle(),
+      '100', 'AcDbSymbolTableRecord',
+      '100', 'AcDbTextStyleTableRecord',
+      '2', 'STANDARD',
+      '70', '0',
+      '40', '0.0',
+      '41', '1.0',
+      '50', '0.0',
+      '71', '0',
+      '42', '1.0',
+      '3', 'txt',
+      '4', ''
+    );
+    section += dxfLine('0', 'ENDTAB');
+
+    section += dxfLine('0', 'TABLE', '2', 'APPID', '5', nextDxfHandle(), '100', 'AcDbSymbolTable', '70', '1');
+    section += dxfLine(
+      '0', 'APPID',
+      '5', nextDxfHandle(),
+      '100', 'AcDbSymbolTableRecord',
+      '100', 'AcDbRegAppTableRecord',
+      '2', 'ACAD',
+      '70', '0'
+    );
+    section += dxfLine('0', 'ENDTAB');
+
+    section += dxfLine('0', 'TABLE', '2', 'BLOCK_RECORD', '5', nextDxfHandle(), '100', 'AcDbSymbolTable', '70', '2');
+    ['*MODEL_SPACE', '*PAPER_SPACE'].forEach(name => {
+      section += dxfLine(
+        '0', 'BLOCK_RECORD',
+        '5', nextDxfHandle(),
+        '100', 'AcDbSymbolTableRecord',
+        '100', 'AcDbBlockTableRecord',
+        '2', name
+      );
+    });
+    section += dxfLine('0', 'ENDTAB');
+
+    section += dxfLine('0', 'ENDSEC');
+    return section;
+  };
+
+  const buildDxfBlocksSection = () => (
+    dxfLine('0', 'SECTION', '2', 'BLOCKS') +
+    dxfLine('0', 'BLOCK', '5', nextDxfHandle(), '100', 'AcDbEntity', '8', '0', '100', 'AcDbBlockBegin', '2', '*MODEL_SPACE', '70', '0', '10', '0.0', '20', '0.0', '30', '0.0', '3', '*MODEL_SPACE', '1', '') +
+    dxfLine('0', 'ENDBLK', '5', nextDxfHandle(), '100', 'AcDbEntity', '8', '0', '100', 'AcDbBlockEnd') +
+    dxfLine('0', 'BLOCK', '5', nextDxfHandle(), '100', 'AcDbEntity', '8', '0', '100', 'AcDbBlockBegin', '2', '*PAPER_SPACE', '70', '0', '10', '0.0', '20', '0.0', '30', '0.0', '3', '*PAPER_SPACE', '1', '') +
+    dxfLine('0', 'ENDBLK', '5', nextDxfHandle(), '100', 'AcDbEntity', '8', '0', '100', 'AcDbBlockEnd') +
+    dxfLine('0', 'ENDSEC')
+  );
+
+  const buildDxfObjectsSection = () => (
+    dxfLine('0', 'SECTION', '2', 'OBJECTS') +
+    dxfLine('0', 'DICTIONARY', '5', nextDxfHandle(), '100', 'AcDbDictionary', '281', '1') +
+    dxfLine('0', 'ENDSEC')
+  );
 
   const toDXFPoint = (point) => {
     const [x, y] = transformPoint(point);
@@ -1423,20 +2519,59 @@ export default function App() {
 
   const toRawDXFPoint = ([x, y]) => [roundDXF(x), roundDXF(overallHeight - (y - minShearY))];
 
+  const cleanDxfPoints = (points, closed) => {
+    const cleaned = [];
+
+    points.forEach(point => {
+      const last = cleaned[cleaned.length - 1];
+      if (!last || Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.01) {
+        cleaned.push(point);
+      }
+    });
+
+    if (closed && cleaned.length > 2) {
+      const first = cleaned[0];
+      const last = cleaned[cleaned.length - 1];
+      if (Math.hypot(first[0] - last[0], first[1] - last[1]) <= 0.01) {
+        cleaned.pop();
+      }
+    }
+
+    let changed = true;
+    while (changed && cleaned.length > (closed ? 3 : 2)) {
+      changed = false;
+      for (let i = 0; i < cleaned.length; i++) {
+        if (!closed && (i === 0 || i === cleaned.length - 1)) continue;
+
+        const prev = cleaned[(i - 1 + cleaned.length) % cleaned.length];
+        const current = cleaned[i];
+        const next = cleaned[(i + 1) % cleaned.length];
+        const ax = current[0] - prev[0];
+        const ay = current[1] - prev[1];
+        const bx = next[0] - current[0];
+        const by = next[1] - current[1];
+        const cross = Math.abs(ax * by - ay * bx);
+        const base = Math.hypot(next[0] - prev[0], next[1] - prev[1]) || 1;
+
+        if (cross / base < 0.005) {
+          cleaned.splice(i, 1);
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    return cleaned;
+  };
+
   const dxfPolylineEntity = (points, closed = true, layer = '0') => {
-    const cleaned = points
-      .map(point => toRawDXFPoint(point))
-      .filter((point, index, arr) => {
-        if (index === 0) return true;
-        const prev = arr[index - 1];
-        return Math.hypot(point[0] - prev[0], point[1] - prev[1]) > 0.000001;
-      });
+    const cleaned = cleanDxfPoints(points.map(point => toRawDXFPoint(point)), closed);
 
     if (cleaned.length < 2) return '';
 
-    let entity = dxfLine('0', 'LWPOLYLINE', '8', layer, '90', cleaned.length, '70', closed ? '1' : '0');
+    let entity = dxfLwPolylineHeader(layer, cleaned.length, closed);
     cleaned.forEach(([x, y]) => {
-      entity += dxfLine('10', x, '20', y);
+      entity += dxfLine('10', x, '20', y, '30', '0.0');
     });
     return entity;
   };
@@ -1497,6 +2632,10 @@ export default function App() {
         } else {
           next = rotation;
         }
+      } else if (type === 'skewX') {
+        next = [1, 0, Math.tan((nums[0] || 0) * Math.PI / 180), 1, 0, 0];
+      } else if (type === 'skewY') {
+        next = [1, Math.tan((nums[0] || 0) * Math.PI / 180), 0, 1, 0, 0];
       }
 
       matrix = multiplyMatrix(matrix, next);
@@ -1505,12 +2644,157 @@ export default function App() {
     return matrix;
   };
 
-  const isBlackSvgNode = (node) => {
-    const value = `${node.getAttribute('fill') || ''} ${node.getAttribute('stroke') || ''} ${node.getAttribute('style') || ''}`.toLowerCase();
-    if (value.includes('none')) return value.includes('stroke') && !value.includes('stroke:none');
-    if (!value.trim()) return true;
-    return value.includes('black') || value.includes('#000') || value.includes('rgb(0') || value.includes('currentcolor');
+  const parseStyleDeclaration = (value = '') => (
+    value
+      .split(';')
+      .map(part => part.trim())
+      .filter(Boolean)
+      .reduce((styles, part) => {
+        const separator = part.indexOf(':');
+        if (separator === -1) return styles;
+        const property = part.slice(0, separator).trim().toLowerCase();
+        const propertyValue = part.slice(separator + 1).trim();
+        if (property) styles[property] = propertyValue;
+        return styles;
+      }, {})
+  );
+
+  const parseSvgCssRules = (svg) => {
+    const rules = [];
+    Array.from(svg.querySelectorAll('style')).forEach(styleNode => {
+      const css = (styleNode.textContent || '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/@[^{}]+{[^{}]*}/g, '');
+
+      const pattern = /([^{}]+)\{([^{}]+)\}/g;
+      let match;
+      while ((match = pattern.exec(css))) {
+        const styles = parseStyleDeclaration(match[2]);
+        match[1]
+          .split(',')
+          .map(selector => selector.trim())
+          .filter(Boolean)
+          .forEach(selector => {
+            rules.push({ selector, styles });
+          });
+      }
+    });
+    return rules;
   };
+
+  const getSelectorSpecificity = (selector) => {
+    const idCount = (selector.match(/#/g) || []).length;
+    const classCount = (selector.match(/\./g) || []).length;
+    const tagCount = /^[a-z][\w-]*/i.test(selector.trim()) ? 1 : 0;
+    return idCount * 100 + classCount * 10 + tagCount;
+  };
+
+  const matchesSimpleSvgSelector = (node, selector) => {
+    const clean = selector.trim();
+    if (!clean || /[\s>+~:[\][]/.test(clean)) return false;
+
+    const tag = node.tagName.toLowerCase();
+    const id = node.getAttribute('id') || '';
+    const classes = (node.getAttribute('class') || '').split(/\s+/).filter(Boolean);
+    const tagMatch = clean.match(/^[a-z][\w-]*/i);
+    const idMatch = clean.match(/#([\w-]+)/);
+    const classMatches = Array.from(clean.matchAll(/\.([\w-]+)/g)).map(match => match[1]);
+
+    if (tagMatch && tagMatch[0].toLowerCase() !== tag) return false;
+    if (idMatch && idMatch[1] !== id) return false;
+    return classMatches.every(className => classes.includes(className));
+  };
+
+  const getDefaultSvgStyle = () => ({
+    fill: 'black',
+    stroke: 'none',
+    'stroke-width': '1',
+    'fill-rule': 'nonzero',
+    color: 'black',
+    opacity: '1',
+    'fill-opacity': '1',
+    'stroke-opacity': '1',
+    display: 'inline',
+    visibility: 'visible'
+  });
+
+  const SVG_PRESENTATION_PROPS = [
+    'fill',
+    'stroke',
+    'stroke-width',
+    'fill-rule',
+    'color',
+    'opacity',
+    'fill-opacity',
+    'stroke-opacity',
+    'display',
+    'visibility',
+    'stroke-linecap',
+    'stroke-linejoin',
+    'stroke-miterlimit'
+  ];
+
+  const resolveSvgNodeStyle = (node, parentStyle, cssRules) => {
+    const resolved = { ...parentStyle };
+
+    SVG_PRESENTATION_PROPS.forEach(prop => {
+      if (node.hasAttribute(prop)) resolved[prop] = node.getAttribute(prop);
+    });
+
+    cssRules
+      .filter(rule => matchesSimpleSvgSelector(node, rule.selector))
+      .sort((a, b) => getSelectorSpecificity(a.selector) - getSelectorSpecificity(b.selector))
+      .forEach(rule => {
+        Object.assign(resolved, rule.styles);
+      });
+
+    Object.assign(resolved, parseStyleDeclaration(node.getAttribute('style') || ''));
+
+    if ((resolved.fill || '').trim().toLowerCase() === 'currentcolor') resolved.fill = resolved.color || 'black';
+    if ((resolved.stroke || '').trim().toLowerCase() === 'currentcolor') resolved.stroke = resolved.color || 'black';
+
+    return resolved;
+  };
+
+  const isHiddenSvgStyle = (style) => (
+    (style.display || '').trim().toLowerCase() === 'none'
+    || (style.visibility || '').trim().toLowerCase() === 'hidden'
+    || parseFloat(style.opacity ?? '1') <= 0
+  );
+
+  const hasVisibleFill = (style, tag) => (
+    tag !== 'line'
+    && tag !== 'polyline'
+    && (style.fill || '').trim().toLowerCase() !== 'none'
+    && parseFloat(style['fill-opacity'] ?? '1') > 0
+  );
+
+  const hasBlackFill = (style, tag) => {
+    return hasVisibleFill(style, tag);
+  };
+
+  const hasWhiteKnockoutFill = (style, tag) => (
+    false
+  );
+
+  const hasBlackStroke = (style) => {
+    if (parseFloat(style['stroke-opacity'] ?? '1') <= 0) return false;
+    const stroke = (style.stroke || '').trim().toLowerCase();
+    return Boolean(stroke) && stroke !== 'none';
+  };
+
+  const getStrokeWidth = (style, matrix) => {
+    const width = parseFloat(style['stroke-width'] ?? '1');
+    if (!Number.isFinite(width) || width <= 0) return 0;
+
+    const sx = Math.hypot(matrix[0], matrix[1]) || 1;
+    const sy = Math.hypot(matrix[2], matrix[3]) || 1;
+    return width * ((sx + sy) / 2);
+  };
+
+  const shouldClosePathSubpath = (style, subpathClosed) => (
+    subpathClosed || ((style.fill || '').trim().toLowerCase() !== 'none' && parseFloat(style['fill-opacity'] ?? '1') > 0)
+  );
 
   const getSvgRootBox = (svg) => {
     const viewBox = parseSvgNumberList(svg.getAttribute('viewBox'));
@@ -1520,97 +2804,651 @@ export default function App() {
     return { x: 0, y: 0, width: widthValue, height: heightValue };
   };
 
-  const buildInteriorDesignDXFEntities = () => {
-    const entities = [];
+  const splitSvgPathSubpaths = (d) => {
+    const parsed = new SVGPathData(d).transform(SVGPathDataTransformer.TO_ABS());
+    const subpaths = [];
+    let current = [];
+
+    parsed.commands.forEach(command => {
+      if (command.type === SVGPathData.MOVE_TO && current.length > 0) {
+        subpaths.push(current);
+        current = [command];
+        return;
+      }
+
+      current.push(command);
+    });
+
+    if (current.length > 0) subpaths.push(current);
+
+    return subpaths.map(commands => ({
+      commands,
+      closed: commands.some(command => command.type === SVGPathData.CLOSE_PATH)
+    }));
+  };
+
+  const distancePointToLine = (point, start, end) => {
+    const lineLength = Math.hypot(end[0] - start[0], end[1] - start[1]);
+    if (lineLength <= 0.000001) return Math.hypot(point[0] - start[0], point[1] - start[1]);
+    return Math.abs(
+      (end[0] - start[0]) * (start[1] - point[1])
+      - (start[0] - point[0]) * (end[1] - start[1])
+    ) / lineLength;
+  };
+
+  const addFlattenedCubic = (points, p0, p1, p2, p3, tolerance, depth = 0) => {
+    const flatness = Math.max(distancePointToLine(p1, p0, p3), distancePointToLine(p2, p0, p3));
+    if (flatness <= tolerance || depth >= 14) {
+      points.push(p3);
+      return;
+    }
+
+    const p01 = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+    const p12 = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
+    const p23 = [(p2[0] + p3[0]) / 2, (p2[1] + p3[1]) / 2];
+    const p012 = [(p01[0] + p12[0]) / 2, (p01[1] + p12[1]) / 2];
+    const p123 = [(p12[0] + p23[0]) / 2, (p12[1] + p23[1]) / 2];
+    const p0123 = [(p012[0] + p123[0]) / 2, (p012[1] + p123[1]) / 2];
+
+    addFlattenedCubic(points, p0, p01, p012, p0123, tolerance, depth + 1);
+    addFlattenedCubic(points, p0123, p123, p23, p3, tolerance, depth + 1);
+  };
+
+  const sampleSvgPathCommands = (commands, matrix, tolerance = 0.12) => {
+    const points = [];
+    let current = [0, 0];
+    let subpathStart = [0, 0];
+    let previousCubicControl = null;
+    let previousQuadraticControl = null;
+
+    const pushTransformed = (point) => {
+      const transformed = applyMatrix(matrix, point);
+      const last = points[points.length - 1];
+      if (!last || Math.hypot(transformed[0] - last[0], transformed[1] - last[1]) > 0.0001) {
+        points.push(transformed);
+      }
+    };
+
+    commands.forEach(command => {
+      if (command.type === SVGPathData.MOVE_TO) {
+        current = [command.x, command.y];
+        subpathStart = current;
+        pushTransformed(current);
+        previousCubicControl = null;
+        previousQuadraticControl = null;
+        return;
+      }
+
+      if (command.type === SVGPathData.LINE_TO) {
+        current = [command.x, command.y];
+        pushTransformed(current);
+        previousCubicControl = null;
+        previousQuadraticControl = null;
+        return;
+      }
+
+      if (command.type === SVGPathData.HORIZ_LINE_TO) {
+        current = [command.x, current[1]];
+        pushTransformed(current);
+        previousCubicControl = null;
+        previousQuadraticControl = null;
+        return;
+      }
+
+      if (command.type === SVGPathData.VERT_LINE_TO) {
+        current = [current[0], command.y];
+        pushTransformed(current);
+        previousCubicControl = null;
+        previousQuadraticControl = null;
+        return;
+      }
+
+      if (command.type === SVGPathData.CURVE_TO || command.type === SVGPathData.SMOOTH_CURVE_TO) {
+        const p0 = current;
+        const p1 = command.type === SVGPathData.SMOOTH_CURVE_TO && previousCubicControl
+          ? [2 * current[0] - previousCubicControl[0], 2 * current[1] - previousCubicControl[1]]
+          : [command.x1, command.y1];
+        const p2 = [command.x2, command.y2];
+        const p3 = [command.x, command.y];
+        const curvePoints = [];
+        addFlattenedCubic(curvePoints, p0, p1, p2, p3, tolerance);
+        curvePoints.forEach(pushTransformed);
+        current = p3;
+        previousCubicControl = p2;
+        previousQuadraticControl = null;
+        return;
+      }
+
+      if (command.type === SVGPathData.QUAD_TO || command.type === SVGPathData.SMOOTH_QUAD_TO) {
+        const control = command.type === SVGPathData.SMOOTH_QUAD_TO && previousQuadraticControl
+          ? [2 * current[0] - previousQuadraticControl[0], 2 * current[1] - previousQuadraticControl[1]]
+          : [command.x1, command.y1];
+        const end = [command.x, command.y];
+        const cubic1 = [
+          current[0] + (2 / 3) * (control[0] - current[0]),
+          current[1] + (2 / 3) * (control[1] - current[1])
+        ];
+        const cubic2 = [
+          end[0] + (2 / 3) * (control[0] - end[0]),
+          end[1] + (2 / 3) * (control[1] - end[1])
+        ];
+        const curvePoints = [];
+        addFlattenedCubic(curvePoints, current, cubic1, cubic2, end, tolerance);
+        curvePoints.forEach(pushTransformed);
+        current = end;
+        previousCubicControl = null;
+        previousQuadraticControl = control;
+        return;
+      }
+
+      if (command.type === SVGPathData.ARC) {
+        const arcCommands = [
+          { type: SVGPathData.MOVE_TO, relative: false, x: current[0], y: current[1] },
+          command
+        ];
+        try {
+          const d = encodeSVGPath(arcCommands);
+          const properties = new svgPathProperties(d);
+          const length = properties.getTotalLength();
+          const steps = Math.max(8, Math.ceil(length / Math.max(0.1, tolerance)));
+          for (let i = 1; i <= steps; i++) {
+            const point = properties.getPointAtLength(length * (i / steps));
+            pushTransformed([point.x, point.y]);
+          }
+        } catch {
+          pushTransformed([command.x, command.y]);
+        }
+        current = [command.x, command.y];
+        previousCubicControl = null;
+        previousQuadraticControl = null;
+        return;
+      }
+
+      if (command.type === SVGPathData.CLOSE_PATH) {
+        current = subpathStart;
+        pushTransformed(current);
+        previousCubicControl = null;
+        previousQuadraticControl = null;
+      }
+    });
+
+    return points;
+  };
+
+  const getSvgElementById = (svg, id) => {
+    if (!id) return null;
+    return Array.from(svg.querySelectorAll('[id]')).find(node => node.getAttribute('id') === id) || null;
+  };
+
+  const buildRoundedRectPoints = (x, y, widthValue, heightValue, rxValue, ryValue, matrix) => {
+    const rx = clamp(rxValue || 0, 0, Math.abs(widthValue) / 2);
+    const ry = clamp(ryValue || 0, 0, Math.abs(heightValue) / 2);
+
+    if (rx <= 0 || ry <= 0) {
+      return [[x, y], [x + widthValue, y], [x + widthValue, y + heightValue], [x, y + heightValue]]
+        .map(point => applyMatrix(matrix, point));
+    }
+
+    const points = [];
+    const corners = [
+      { cx: x + widthValue - rx, cy: y + ry, start: -Math.PI / 2, end: 0 },
+      { cx: x + widthValue - rx, cy: y + heightValue - ry, start: 0, end: Math.PI / 2 },
+      { cx: x + rx, cy: y + heightValue - ry, start: Math.PI / 2, end: Math.PI },
+      { cx: x + rx, cy: y + ry, start: Math.PI, end: Math.PI * 1.5 }
+    ];
+
+    corners.forEach(corner => {
+      for (let i = 0; i <= 24; i++) {
+        const t = i / 24;
+        const angle = corner.start + (corner.end - corner.start) * t;
+        points.push(applyMatrix(matrix, [
+          corner.cx + Math.cos(angle) * rx,
+          corner.cy + Math.sin(angle) * ry
+        ]));
+      }
+    });
+
+    return points;
+  };
+
+  const vectorLength = ([x, y]) => Math.hypot(x, y);
+
+  const normalizeVector = ([x, y]) => {
+    const length = vectorLength([x, y]) || 1;
+    return [x / length, y / length];
+  };
+
+  const buildOpenStrokeOutline = (points, strokeWidth, linecap = 'butt') => {
+    const cleaned = cleanDxfPoints(points, false);
+    if (cleaned.length < 2 || strokeWidth <= 0) return [];
+
+    const half = strokeWidth / 2;
+    const cap = (linecap || 'butt').trim().toLowerCase();
+    const startDirection = normalizeVector([cleaned[1][0] - cleaned[0][0], cleaned[1][1] - cleaned[0][1]]);
+    const endDirection = normalizeVector([
+      cleaned[cleaned.length - 1][0] - cleaned[cleaned.length - 2][0],
+      cleaned[cleaned.length - 1][1] - cleaned[cleaned.length - 2][1]
+    ]);
+    const working = cleaned.map(point => [...point]);
+
+    if (cap === 'square') {
+      working[0] = [working[0][0] - startDirection[0] * half, working[0][1] - startDirection[1] * half];
+      const lastIndex = working.length - 1;
+      working[lastIndex] = [working[lastIndex][0] + endDirection[0] * half, working[lastIndex][1] + endDirection[1] * half];
+    }
+
+    const left = [];
+    const right = [];
+
+    working.forEach((point, index) => {
+      const prev = working[Math.max(0, index - 1)];
+      const next = working[Math.min(working.length - 1, index + 1)];
+      const direction = normalizeVector([next[0] - prev[0], next[1] - prev[1]]);
+      const normal = [-direction[1], direction[0]];
+      left.push([point[0] + normal[0] * half, point[1] + normal[1] * half]);
+      right.push([point[0] - normal[0] * half, point[1] - normal[1] * half]);
+    });
+
+    if (cap !== 'round') return [...left, ...right.reverse()];
+
+    const endCap = [];
+    const startCap = [];
+    const makeCap = (center, fromAngle, toAngle) => {
+      const capPoints = [];
+      const span = normalizeAngle(toAngle - fromAngle);
+      const steps = 10;
+      for (let i = 1; i < steps; i++) {
+        const angle = fromAngle + span * (i / steps);
+        capPoints.push([center[0] + Math.cos(angle) * half, center[1] + Math.sin(angle) * half]);
+      }
+      return capPoints;
+    };
+
+    const endCenter = cleaned[cleaned.length - 1];
+    const startCenter = cleaned[0];
+    const endNormal = [-endDirection[1], endDirection[0]];
+    const startNormal = [-startDirection[1], startDirection[0]];
+    endCap.push(...makeCap(
+      endCenter,
+      Math.atan2(endNormal[1], endNormal[0]),
+      Math.atan2(-endNormal[1], -endNormal[0])
+    ));
+    startCap.push(...makeCap(
+      startCenter,
+      Math.atan2(-startNormal[1], -startNormal[0]),
+      Math.atan2(startNormal[1], startNormal[0])
+    ));
+
+    return [...left, ...endCap, ...right.reverse(), ...startCap];
+  };
+
+  const offsetClosedStrokeContours = (points, strokeWidth) => {
+    const cleaned = cleanDxfPoints(points, true);
+    if (cleaned.length < 3 || strokeWidth <= 0) return [];
+
+    const scaleFactor = 1000;
+    const clipperPath = cleaned.map(([x, y]) => ({
+      X: Math.round(x * scaleFactor),
+      Y: Math.round(y * scaleFactor)
+    }));
+
+    const runOffset = (delta) => {
+      const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * scaleFactor);
+      offsetter.AddPath(clipperPath, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+      const solution = [];
+      offsetter.Execute(solution, delta * scaleFactor);
+      return solution.map(path => path.map(point => [point.X / scaleFactor, point.Y / scaleFactor]));
+    };
+
+    const half = strokeWidth / 2;
+    return [
+      ...runOffset(half),
+      ...runOffset(-half)
+    ].filter(path => path.length >= 3);
+  };
+
+  const clipperScale = 1000;
+
+  const toClipperPath = (points) => (
+    cleanDxfPoints(points, true).map(([x, y]) => ({
+      X: Math.round(x * clipperScale),
+      Y: Math.round(y * clipperScale)
+    }))
+  );
+
+  const fromClipperPath = (path) => (
+    cleanDxfPoints(path.map(point => [point.X / clipperScale, point.Y / clipperScale]), true)
+  );
+
+  const cleanClipperPaths = (paths) => (
+    ClipperLib.Clipper.CleanPolygons(paths, 0.05 * clipperScale).filter(path => path.length >= 3)
+  );
+
+  const intersectClosedContourWithMargin = (points) => {
+    if (!interiorClipEnabled || interiorMarginBoundarySets.length === 0 || points.length < 3) return [points];
+
+    const subject = cleanClipperPaths([toClipperPath(points)]);
+    const clips = cleanClipperPaths(interiorMarginBoundarySets.map(toClipperPath));
+    if (!subject.length || !clips.length) return [];
+
+    const clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    clipper.AddPaths(clips, ClipperLib.PolyType.ptClip, true);
+
+    const solution = new ClipperLib.Paths();
+    clipper.Execute(
+      ClipperLib.ClipType.ctIntersection,
+      solution,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+
+    return cleanClipperPaths(solution).map(fromClipperPath);
+  };
+
+  const simplifyClosedContours = (contours) => (
+    contours.map(contour => {
+      if (!contour.closed || contour.points.length < 3) return contour;
+
+      const cleanedPath = cleanClipperPaths([toClipperPath(contour.points)])[0];
+      if (!cleanedPath) return contour;
+
+      return {
+        ...contour,
+        points: fromClipperPath(cleanedPath)
+      };
+    })
+  );
+
+  const signedPolygonArea = (points) => {
+    if (points.length < 3) return 0;
+    let area = 0;
+    for (let i = 0; i < points.length; i++) {
+      const [x1, y1] = points[i];
+      const [x2, y2] = points[(i + 1) % points.length];
+      area += x1 * y2 - x2 * y1;
+    }
+    return area / 2;
+  };
+
+  const pointInPolygon = (point, polygon) => {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i][0];
+      const yi = polygon[i][1];
+      const xj = polygon[j][0];
+      const yj = polygon[j][1];
+      const intersects = ((yi > point[1]) !== (yj > point[1]))
+        && (point[0] < ((xj - xi) * (point[1] - yi)) / ((yj - yi) || 1) + xi);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  };
+
+  const analyzeInteriorContours = (contours) => {
+    const closedContours = contours
+      .map((contour, index) => ({
+        ...contour,
+        contourIndex: index,
+        signedArea: signedPolygonArea(contour.points)
+      }))
+      .filter(contour => contour.closed && contour.points.length >= 3)
+      .map(contour => ({ ...contour, area: Math.abs(contour.signedArea) }));
+
+    return closedContours.map(contour => {
+      const samplePoint = contour.points[0];
+      const parentCount = closedContours.filter(candidate => (
+        candidate !== contour
+        && candidate.area > contour.area
+        && pointInPolygon(samplePoint, candidate.points)
+      )).length;
+
+      return {
+        ...contour,
+        depth: parentCount,
+        role: parentCount % 2 === 0 ? 'outer' : 'hole'
+      };
+    });
+  };
+
+  const collectInteriorDesignContours = () => {
+    const contours = [];
+    const skipped = [];
     const parser = new DOMParser();
 
     interiorDesigns.forEach((design, designIndex) => {
       if (!design.svgText) return;
+      if (design.color !== 'white') return;
+      if (design.exportable === false) {
+        skipped.push(design.name);
+        return;
+      }
 
       const doc = parser.parseFromString(design.svgText, 'image/svg+xml');
       const svg = doc.querySelector('svg');
-      if (!svg || doc.querySelector('parsererror')) return;
+      if (!svg || doc.querySelector('parsererror')) {
+        skipped.push(design.name);
+        return;
+      }
 
       const rootBox = getSvgRootBox(svg);
       const designWidth = Math.max(10, n(design.width, 10));
       const designHeight = Math.max(10, n(design.height, 10));
       const scaleX = designWidth / (rootBox.width || 1);
       const scaleY = designHeight / (rootBox.height || 1);
+      const pathTolerance = Math.max(0.02, 0.08 / Math.max(scaleX, scaleY));
       const placePoint = ([x, y]) => [
         n(design.x, 0) + (x - rootBox.x) * scaleX,
         n(design.y, 0) + (y - rootBox.y) * scaleY
       ];
       const layer = `DESIGN_${designIndex + 1}`;
+      const cssRules = parseSvgCssRules(svg);
 
-      const addPolyline = (points, closed = true) => {
+      const addContour = (points, closed = true, source = 'fill', fillRule = 'nonzero') => {
         if (points.length < 2) return;
-        entities.push(dxfPolylineEntity(points.map(placePoint), closed, layer));
+        const placed = cleanDxfPoints(points.map(placePoint), closed);
+        if (placed.length < (closed ? 3 : 2)) return;
+        const clippedSets = closed
+          ? intersectClosedContourWithMargin(placed)
+          : (interiorClipEnabled ? [] : [placed]);
+
+        clippedSets.forEach(clipped => {
+          if (clipped.length < (closed ? 3 : 2)) return;
+          contours.push({
+            points: clipped,
+            closed,
+            source,
+            fillRule,
+            layer,
+            designId: design.id,
+            designName: design.name
+          });
+        });
       };
 
-      const walk = (node, parentMatrix = [1, 0, 0, 1, 0, 0]) => {
+      const walk = (node, parentMatrix = [1, 0, 0, 1, 0, 0], parentStyle = getDefaultSvgStyle(), visitedUses = new Set()) => {
         if (node.nodeType !== 1) return;
         const matrix = multiplyMatrix(parentMatrix, parseSvgTransform(node.getAttribute('transform')));
         const tag = node.tagName.toLowerCase();
+        const style = resolveSvgNodeStyle(node, parentStyle, cssRules);
 
-        if (tag === 'path' && isBlackSvgNode(node)) {
+        if (isHiddenSvgStyle(style) || tag === 'defs' || tag === 'style' || tag === 'title' || tag === 'desc') return;
+
+        if (tag === 'use') {
+          const rawHref = node.getAttribute('href') || node.getAttribute('xlink:href') || '';
+          const id = rawHref.startsWith('#') ? rawHref.slice(1) : '';
+          const target = getSvgElementById(svg, id);
+          if (target && !visitedUses.has(id)) {
+            const x = parseFloat(node.getAttribute('x')) || 0;
+            const y = parseFloat(node.getAttribute('y')) || 0;
+            const useMatrix = multiplyMatrix(matrix, [1, 0, 0, 1, x, y]);
+            walk(target, useMatrix, style, new Set([...visitedUses, id]));
+          }
+          return;
+        }
+
+        const fillBlack = hasBlackFill(style, tag);
+        const knockoutFill = hasWhiteKnockoutFill(style, tag);
+        const strokeBlack = hasBlackStroke(style);
+        const strokeWidth = getStrokeWidth(style, matrix);
+        const fillRule = (style['fill-rule'] || 'nonzero').trim().toLowerCase() === 'evenodd' ? 'evenodd' : 'nonzero';
+
+        if (tag === 'path' && (fillBlack || knockoutFill || strokeBlack)) {
           const d = node.getAttribute('d');
           if (d) {
-            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            path.setAttribute('d', d);
             try {
-              const length = path.getTotalLength();
-              const steps = Math.max(8, Math.ceil(length / 4));
-              const points = [];
-              for (let i = 0; i <= steps; i++) {
-                const point = path.getPointAtLength(length * (i / steps));
-                points.push(applyMatrix(matrix, [point.x, point.y]));
-              }
-              addPolyline(points, true);
+              splitSvgPathSubpaths(d).forEach(subpath => {
+                const points = sampleSvgPathCommands(subpath.commands, matrix, pathTolerance);
+                if (fillBlack) {
+                  addContour(points, shouldClosePathSubpath(style, subpath.closed), 'fill', fillRule);
+                } else if (knockoutFill) {
+                  addContour(points, shouldClosePathSubpath(style, subpath.closed), 'knockout', fillRule);
+                } else if (strokeBlack && strokeWidth > 0) {
+                  if (subpath.closed) {
+                    offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true, 'stroke'));
+                  } else {
+                    addContour(buildOpenStrokeOutline(points, strokeWidth, style['stroke-linecap']), true, 'stroke');
+                  }
+                }
+              });
             } catch {
               // Unsupported path data is skipped.
             }
           }
-        } else if (tag === 'rect' && isBlackSvgNode(node)) {
+        } else if (tag === 'rect' && (fillBlack || knockoutFill || strokeBlack)) {
           const x = parseFloat(node.getAttribute('x')) || 0;
           const y = parseFloat(node.getAttribute('y')) || 0;
           const w = parseFloat(node.getAttribute('width')) || 0;
           const h = parseFloat(node.getAttribute('height')) || 0;
-          addPolyline([[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(point => applyMatrix(matrix, point)), true);
-        } else if ((tag === 'circle' || tag === 'ellipse') && isBlackSvgNode(node)) {
+          const rawRx = node.hasAttribute('rx') ? parseFloat(node.getAttribute('rx')) : parseFloat(node.getAttribute('ry')) || 0;
+          const rawRy = node.hasAttribute('ry') ? parseFloat(node.getAttribute('ry')) : rawRx;
+          const points = buildRoundedRectPoints(x, y, w, h, rawRx, rawRy, matrix);
+          if (fillBlack) {
+            addContour(points, true, 'fill', fillRule);
+          } else if (knockoutFill) {
+            addContour(points, true, 'knockout', fillRule);
+          } else if (strokeBlack) {
+            offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true, 'stroke'));
+          }
+        } else if ((tag === 'circle' || tag === 'ellipse') && (fillBlack || knockoutFill || strokeBlack)) {
           const cx = parseFloat(node.getAttribute('cx')) || 0;
           const cy = parseFloat(node.getAttribute('cy')) || 0;
           const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
           const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
           const points = [];
-          for (let i = 0; i < 72; i++) {
-            const angle = i * Math.PI * 2 / 72;
+          for (let i = 0; i < 160; i++) {
+            const angle = i * Math.PI * 2 / 160;
             points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
           }
-          addPolyline(points, true);
-        } else if ((tag === 'polygon' || tag === 'polyline') && isBlackSvgNode(node)) {
-          addPolyline(parseSvgPoints(node.getAttribute('points')).map(point => applyMatrix(matrix, point)), tag === 'polygon');
-        } else if (tag === 'line' && isBlackSvgNode(node)) {
+          if (fillBlack) {
+            addContour(points, true, 'fill', fillRule);
+          } else if (knockoutFill) {
+            addContour(points, true, 'knockout', fillRule);
+          } else if (strokeBlack) {
+            offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true, 'stroke'));
+          }
+        } else if ((tag === 'polygon' || tag === 'polyline') && (fillBlack || knockoutFill || strokeBlack)) {
+          const points = parseSvgPoints(node.getAttribute('points')).map(point => applyMatrix(matrix, point));
+          if (tag === 'polyline' && !fillBlack && strokeBlack) {
+            addContour(buildOpenStrokeOutline(points, strokeWidth, style['stroke-linecap']), true, 'stroke');
+          } else if (tag === 'polygon' && !fillBlack && strokeBlack) {
+            offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true, 'stroke'));
+          } else if (knockoutFill) {
+            addContour(points, tag === 'polygon', 'knockout', fillRule);
+          } else {
+            addContour(points, tag === 'polygon', fillBlack ? 'fill' : 'stroke', fillRule);
+          }
+        } else if (tag === 'line' && strokeBlack) {
           const p1 = [parseFloat(node.getAttribute('x1')) || 0, parseFloat(node.getAttribute('y1')) || 0];
           const p2 = [parseFloat(node.getAttribute('x2')) || 0, parseFloat(node.getAttribute('y2')) || 0];
-          addPolyline([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], false);
+          if (strokeBlack) {
+            addContour(buildOpenStrokeOutline([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], strokeWidth, style['stroke-linecap']), true, 'stroke');
+          }
         }
 
-        Array.from(node.children).forEach(child => walk(child, matrix));
+        Array.from(node.children).forEach(child => walk(child, matrix, style, visitedUses));
       };
 
       walk(svg);
     });
 
-    return entities.join('');
+    const normalizedContours = simplifyClosedContours(contours);
+    const analyzed = analyzeInteriorContours(normalizedContours);
+    const byKey = new Map(analyzed.map(contour => [`${contour.designId}-${contour.contourIndex}`, contour]));
+    const withAnalysis = normalizedContours.map((contour, index) => ({
+      ...contour,
+      ...(byKey.get(`${contour.designId}-${index}`) || { area: 0, depth: 0, role: contour.closed ? 'outer' : 'open' })
+    }));
+    const patternContours = getPatternContours();
+
+    return {
+      contours: [...withAnalysis, ...patternContours],
+      skipped
+    };
   };
+
+  const getInteriorExportDiagnostics = (exportData = collectInteriorDesignContours()) => {
+    const { contours, skipped } = exportData;
+    const closed = contours.filter(contour => contour.closed);
+    const open = contours.length - closed.length;
+    const holes = contours.filter(contour => contour.role === 'hole').length;
+    const expandedStrokes = contours.filter(contour => contour.source === 'stroke').length;
+    const centerlineStrokes = contours.filter(contour => contour.source === 'stroke-center').length;
+
+    return {
+      designCount: interiorDesigns.length,
+      contourCount: contours.length,
+      closedCount: closed.length,
+      openCount: open,
+      holeCount: holes,
+      expandedStrokeCount: expandedStrokes,
+      centerlineStrokeCount: centerlineStrokes,
+      skippedCount: skipped.length,
+      skipped
+    };
+  };
+
+  const buildInteriorDesignDXFEntities = () => {
+    const { contours } = collectInteriorDesignContours();
+    return contours
+      .sort((a, b) => (a.depth - b.depth) || (b.area - a.area))
+      .map(contour => dxfPolylineEntity(contour.points, contour.closed, contour.layer))
+      .join('');
+  };
+
+  const getInteriorDesignDXFLayers = () => (
+    collectInteriorDesignContours().contours.map(contour => contour.layer)
+  );
 
   const segmentBulge = (segment, startLocal, endLocal) => {
     const includedAngle = segment.direction * ((endLocal - startLocal) / segment.radius);
     return roundDXF(-Math.tan(includedAngle / 4));
   };
 
+  const dxfPolylineFromRawVertices = (raw, layer = '0') => {
+    const vertices = raw.map(point => {
+      const [x, y] = toDXFPoint(point);
+      return { x, y, bulge: 0 };
+    });
+
+    const cleaned = vertices.filter((p, i, arr) => {
+      if (i === 0) return true;
+      const prev = arr[i - 1];
+      return !(Math.abs(p.x - prev.x) < 0.000001 && Math.abs(p.y - prev.y) < 0.000001);
+    });
+
+    let entity = dxfLwPolylineHeader(layer, cleaned.length, true);
+
+    cleaned.forEach(v => {
+      entity += dxfLine('10', v.x, '20', v.y, '30', '0.0');
+      if (Math.abs(v.bulge) > 0.0000001) entity += dxfLine('42', v.bulge);
+    });
+
+    return entity;
+  };
+
   const buildArcTopDXFLwPolyline = () => {
-    if (isAngledPanel) return buildStraightDXFLwPolyline();
+    if (isAngledPanel || hasPanelSplit) return buildStraightDXFLwPolyline();
 
     const arc = getActiveTopArcData();
     if (!arc) return '';
@@ -1654,7 +3492,6 @@ export default function App() {
 
       const innerStart = arc.pointAt(ear.start, 0);
       const outerStart = arc.pointAt(ear.start, topEarDepth);
-      const outerEnd = arc.pointAt(ear.end, topEarDepth);
       const innerEnd = arc.pointAt(ear.end, 0);
 
       currentPoint = innerStart;
@@ -1697,10 +3534,10 @@ export default function App() {
 
     addLineTo(startPoint);
 
-    let entity = dxfLine('0', 'LWPOLYLINE', '8', '0', '90', vertices.length, '70', '1');
+    let entity = dxfLwPolylineHeader('0', vertices.length, true);
 
     vertices.forEach(v => {
-      entity += dxfLine('10', v.x, '20', v.y);
+      entity += dxfLine('10', v.x, '20', v.y, '30', '0.0');
       if (Math.abs(v.bulge) > 0.0000001) entity += dxfLine('42', v.bulge);
     });
 
@@ -1708,26 +3545,7 @@ export default function App() {
   };
 
   const buildStraightDXFLwPolyline = () => {
-    const raw = buildVertices();
-    const vertices = raw.map(point => {
-      const [x, y] = toDXFPoint(point);
-      return { x, y, bulge: 0 };
-    });
-
-    const cleaned = vertices.filter((p, i, arr) => {
-      if (i === 0) return true;
-      const prev = arr[i - 1];
-      return !(Math.abs(p.x - prev.x) < 0.000001 && Math.abs(p.y - prev.y) < 0.000001);
-    });
-
-    let entity = dxfLine('0', 'LWPOLYLINE', '8', '0', '90', cleaned.length, '70', '1');
-
-    cleaned.forEach(v => {
-      entity += dxfLine('10', v.x, '20', v.y);
-      if (Math.abs(v.bulge) > 0.0000001) entity += dxfLine('42', v.bulge);
-    });
-
-    return entity;
+    return getPanelVertexSets().map(vertexSet => dxfPolylineFromRawVertices(vertexSet)).join('');
   };
 
   const fusionLineEntity = (p1, p2) => {
@@ -1767,22 +3585,23 @@ export default function App() {
   };
 
   const buildFusionStraightEntities = () => {
-    const raw = buildVertices();
     const entities = [];
 
-    for (let i = 0; i < raw.length; i++) {
-      const p1 = raw[i];
-      const p2 = raw[(i + 1) % raw.length];
-      if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) > 0.000001) {
-        entities.push(fusionLineEntity(p1, p2));
+    getPanelVertexSets().forEach(raw => {
+      for (let i = 0; i < raw.length; i++) {
+        const p1 = raw[i];
+        const p2 = raw[(i + 1) % raw.length];
+        if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) > 0.000001) {
+          entities.push(fusionLineEntity(p1, p2));
+        }
       }
-    }
+    });
 
     return entities;
   };
 
   const buildFusionArcTopEntities = () => {
-    if (isAngledPanel) return buildFusionStraightEntities();
+    if (isAngledPanel || hasPanelSplit) return buildFusionStraightEntities();
 
     const arc = getActiveTopArcData();
     if (!arc) return buildFusionStraightEntities();
@@ -1879,15 +3698,32 @@ export default function App() {
   };
 
   const downloadDXF = () => {
+    const blockedDesigns = interiorDesigns.filter(design => design.exportable === false);
+    if (blockedDesigns.length > 0) {
+      const names = blockedDesigns.map(design => design.name).join(', ');
+      window.alert(`Some imported SVG designs cannot be exported cleanly yet: ${names}. Remove them or import SVGs made only from paths/shapes before exporting DXF.`);
+      return;
+    }
+
+    resetDxfHandles();
+
     let dxf = '';
+    const designLayers = getInteriorDesignDXFLayers();
+
     dxf += dxfLine('0', 'SECTION', '2', 'HEADER');
-    dxf += dxfLine('9', '$ACADVER', '1', 'AC1015');
+    dxf += dxfLine('9', '$ACADVER', '1', 'AC1014');
+    dxf += dxfLine('9', '$HANDSEED', '5', 'FFFF');
     dxf += dxfLine('9', '$INSUNITS', '70', '4');
+    dxf += dxfLine('9', '$MEASUREMENT', '70', '1');
     dxf += dxfLine('0', 'ENDSEC');
+    dxf += buildDxfTablesSection(designLayers);
+    dxf += buildDxfBlocksSection();
     dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
     dxf += hasArcTop ? buildArcTopDXFLwPolyline() : buildStraightDXFLwPolyline();
     dxf += buildInteriorDesignDXFEntities();
-    dxf += dxfLine('0', 'ENDSEC', '0', 'EOF');
+    dxf += dxfLine('0', 'ENDSEC');
+    dxf += buildDxfObjectsSection();
+    dxf += dxfLine('0', 'EOF');
 
     const blob = new Blob([dxf], { type: 'application/dxf' });
     const url = URL.createObjectURL(blob);
@@ -2015,6 +3851,14 @@ export default function App() {
 
   const currentViewBox = getCurrentViewBox();
   const selectedInteriorDesign = getSelectedInteriorDesign();
+  const interiorExportData = useMemo(
+    () => collectInteriorDesignContours(),
+    [interiorDesigns]
+  );
+  const interiorExportDiagnostics = useMemo(
+    () => getInteriorExportDiagnostics(interiorExportData),
+    [interiorExportData]
+  );
 
   const openInteriorDesigner = () => {
     clearMeasureTool();
@@ -2071,12 +3915,29 @@ export default function App() {
                 onClick={() => setSelectedInteriorDesignId(null)}
                 style={{ cursor: panState ? 'grabbing' : 'default' }}
               >
+                <defs>
+                  <clipPath id="interior-margin-clip">
+                    <path d={buildInteriorMarginPath()} />
+                  </clipPath>
+                </defs>
+
                 <path
                   d={buildOutlinePath()}
                   fill="#000000"
                   stroke="#0f172a"
                   strokeWidth={2 / viewZoom}
                 />
+
+                {showInteriorMarginGuide && interiorMarginBoundarySets.length > 0 && (
+                  <path
+                    d={buildInteriorMarginPath()}
+                    fill="none"
+                    stroke="#22c55e"
+                    strokeWidth={2 / viewZoom}
+                    strokeDasharray={`${8 / viewZoom} ${5 / viewZoom}`}
+                    pointerEvents="none"
+                  />
+                )}
 
                 {interiorDesigns.map((design) => {
                   const selected = design.id === selectedInteriorDesignId;
@@ -2094,6 +3955,7 @@ export default function App() {
                         width={itemWidth * scale}
                         height={itemHeight * scale}
                         preserveAspectRatio="none"
+                        clipPath={interiorClipEnabled && design.color === 'white' ? 'url(#interior-margin-clip)' : undefined}
                         onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -2138,7 +4000,144 @@ export default function App() {
                     </g>
                   );
                 })}
+
+                {patternEnabled && (
+                  <g pointerEvents="none">
+                    {getPatternContours().map((contour, index) => (
+                      <polygon
+                        key={`pattern-preview-${index}`}
+                        points={polygonPoints(contour.points)}
+                        fill="#ffffff"
+                      />
+                    ))}
+                  </g>
+                )}
+
+                {showInteriorExportPreview && (
+                  <g pointerEvents="none">
+                    {interiorExportData.contours.map((contour, index) => {
+                      const color = contour.role === 'hole'
+                        ? '#f59e0b'
+                        : contour.source === 'stroke'
+                          ? '#22c55e'
+                          : '#38bdf8';
+                      const points = contour.points.map(([px, py]) => `${px * scale},${py * scale}`).join(' ');
+
+                      return (
+                        <polyline
+                          key={`${contour.designId}-${index}`}
+                          points={points}
+                          fill="none"
+                          stroke={color}
+                          strokeWidth={2 / viewZoom}
+                          strokeDasharray={contour.role === 'hole' ? `${7 / viewZoom} ${4 / viewZoom}` : undefined}
+                          opacity="0.95"
+                        />
+                      );
+                    })}
+                  </g>
+                )}
               </svg>
+
+              <details
+                className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                <summary className="cursor-pointer select-none font-semibold text-slate-700">Margin</summary>
+                <div className="mt-2 w-44 space-y-2">
+                  <label className="flex items-center gap-2 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={interiorClipEnabled}
+                      onChange={e => setInteriorClipEnabled(e.target.checked)}
+                    />
+                    Clip white designs
+                  </label>
+                  <div>
+                    <label className="text-[11px] text-slate-500">Distance (mm)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={interiorMarginInput}
+                      onFocus={() => setShowInteriorMarginGuide(true)}
+                      onChange={e => {
+                        setShowInteriorMarginGuide(true);
+                        setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
+                      }}
+                      onBlur={handleInteriorMarginBlur}
+                      className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                    />
+                  </div>
+                </div>
+              </details>
+
+              <details
+                className="absolute left-3 top-24 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+              >
+                <summary className="cursor-pointer select-none font-semibold text-slate-700">Pattern</summary>
+                <div className="mt-2 w-48 space-y-2">
+                  <label className="flex items-center gap-2 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={patternEnabled}
+                      onChange={e => setPatternEnabled(e.target.checked)}
+                    />
+                    Horizontal slots
+                  </label>
+                  {[
+                    ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                    ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
+                    ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
+                    ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
+                    ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
+                    ['Seed', patternSeed, setPatternSeed, 1, null, null]
+                  ].map(([label, value, setter, min, randomEnabled, setRandomEnabled]) => (
+                    <div key={label}>
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] text-slate-500">{label} (mm)</label>
+                        {setRandomEnabled && (
+                          <label className="flex items-center gap-1 text-[10px] text-slate-500">
+                            <input
+                              type="checkbox"
+                              checked={randomEnabled}
+                              onChange={e => setRandomEnabled(e.target.checked)}
+                            />
+                            Random
+                          </label>
+                        )}
+                      </div>
+                      <input
+                        type="number"
+                        min={min}
+                        value={value}
+                        onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
+                        onBlur={() => handleNumberBlur(setter, value, min, Infinity, min)}
+                        className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                      />
+                    </div>
+                  ))}
+                  <label className="flex items-center gap-2 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={patternRoundedEnds}
+                      onChange={e => setPatternRoundedEnds(e.target.checked)}
+                    />
+                    Rounded ends
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
+                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    Regenerate
+                  </button>
+                </div>
+              </details>
 
               <div
                 className="absolute left-3 bottom-3 rounded-lg border border-slate-200 bg-white/95 p-2 shadow-sm"
@@ -2216,12 +4215,73 @@ export default function App() {
                   <Upload size={17} />
                   <span className="flex-1 text-left">Export DXF</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setShowInteriorExportPreview(prev => !prev)}
+                  className={[
+                    'w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border',
+                    showInteriorExportPreview
+                      ? 'bg-blue-50 text-blue-700 border-blue-200'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                  ].join(' ')}
+                >
+                  <MousePointer2 size={17} />
+                  <span className="flex-1 text-left">Preview DXF contours</span>
+                </button>
               </div>
+
+              {interiorExportDiagnostics.designCount > 0 && (
+                <div className="mt-3 rounded-lg bg-white border p-3 text-xs text-slate-600">
+                  <p className="font-semibold text-slate-700 mb-2">DXF Export Check</p>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                    <span>Designs</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.designCount}</span>
+                    <span>Contours</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.contourCount}</span>
+                    <span>Closed</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.closedCount}</span>
+                    <span>Holes</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.holeCount}</span>
+                    <span>Expanded strokes</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.expandedStrokeCount}</span>
+                    <span>Centerline strokes</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.centerlineStrokeCount}</span>
+                    <span>Open lines</span>
+                    <span className="text-right font-medium">{interiorExportDiagnostics.openCount}</span>
+                  </div>
+
+                  {interiorExportDiagnostics.skippedCount > 0 && (
+                    <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800">
+                      {interiorExportDiagnostics.skippedCount} design(s) need cleanup before export.
+                    </p>
+                  )}
+                  {interiorExportDiagnostics.centerlineStrokeCount > 0 && (
+                    <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800">
+                      Some closed strokes are still exported as centerlines. Convert strokes to outlines in the SVG editor for best laser results.
+                    </p>
+                  )}
+                  {showInteriorExportPreview && (
+                    <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-600">
+                      <p><span className="font-semibold text-sky-600">Blue</span>: filled contours</p>
+                      <p><span className="font-semibold text-green-600">Green</span>: expanded strokes</p>
+                      <p><span className="font-semibold text-amber-600">Amber dashed</span>: detected holes</p>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {selectedInteriorDesign && (
                 <div className="mt-3 rounded-lg bg-white border p-3 text-xs text-slate-600">
                   <div className="flex items-center justify-between gap-2 mb-2">
-                    <p className="font-semibold text-slate-700 truncate">{selectedInteriorDesign.name}</p>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-700 truncate">{selectedInteriorDesign.name}</p>
+                      <p className={[
+                        'text-[11px] font-medium',
+                        selectedInteriorDesign.exportable === false ? 'text-amber-700' : 'text-emerald-700'
+                      ].join(' ')}>
+                        {selectedInteriorDesign.exportable === false ? 'Needs cleanup before DXF export' : 'DXF export ready'}
+                      </p>
+                    </div>
                     <button
                       type="button"
                       onClick={deleteSelectedInteriorDesign}
@@ -2230,6 +4290,14 @@ export default function App() {
                       <Trash2 size={14} />
                     </button>
                   </div>
+
+                  {selectedInteriorDesign.warnings?.length > 0 && (
+                    <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] leading-relaxed text-amber-800">
+                      {selectedInteriorDesign.warnings.map((warning, index) => (
+                        <p key={index}>{warning}</p>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-2 gap-2">
                     {[
@@ -2497,6 +4565,154 @@ export default function App() {
                   />
                 </div>
               ))}
+            </div>
+          </details>
+
+          <details className="rounded-lg bg-slate-50 border px-3 py-2">
+            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Split panel</summary>
+            <div className="mt-2 space-y-3">
+              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={splitPanelEnabled}
+                  onChange={e => setSplitPanelEnabled(e.target.checked)}
+                />
+                Enable vertical split
+              </label>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-slate-500">Left panel width (mm)</label>
+                  <input
+                    type="number"
+                    min={minSplitPanelWidth}
+                    max={maxSplitPanelWidth}
+                    value={splitPositionInput}
+                    onFocus={() => setFocusedNumberField('splitPosition')}
+                    onChange={e => setSplitPositionInput(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setSplitPositionInput, splitPositionInput, minSplitPanelWidth, maxSplitPanelWidth, safeWidth / 2)}
+                    className="w-full mt-1 p-2 border rounded-md text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-slate-500">Clear split gap (mm)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={splitGapInput}
+                    onFocus={() => setFocusedNumberField('splitGap')}
+                    onChange={e => setSplitGapInput(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setSplitGapInput, splitGapInput, 0, Infinity, 20)}
+                    className="w-full mt-1 p-2 border rounded-md text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-slate-500">Split ear length</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={splitEarLengthInput}
+                    onFocus={() => setFocusedNumberField('splitEarLength')}
+                    onChange={e => setSplitEarLengthInput(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setSplitEarLengthInput, splitEarLengthInput, 1, Infinity, 30)}
+                    className="w-full mt-1 p-2 border rounded-md text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-slate-500">Split ear depth</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={splitEarDepthInput}
+                    onFocus={() => setFocusedNumberField('splitEarDepth')}
+                    onChange={e => setSplitEarDepthInput(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setSplitEarDepthInput, splitEarDepthInput, 0, Infinity, 10)}
+                    className="w-full mt-1 p-2 border rounded-md text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-md bg-white border p-2">
+                <p className="text-xs font-semibold text-slate-700 mb-2">Panel top/bottom ears</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    ['Left top', splitLeftTopEars, setSplitLeftTopEars],
+                    ['Left bottom', splitLeftBottomEars, setSplitLeftBottomEars],
+                    ['Right top', splitRightTopEars, setSplitRightTopEars],
+                    ['Right bottom', splitRightBottomEars, setSplitRightBottomEars]
+                  ].map(([label, value, setter]) => (
+                    <div key={label}>
+                      <label className="text-[11px] text-slate-500">{label}</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={value}
+                        onFocus={() => setFocusedNumberField(`split${label.replace(' ', '')}`)}
+                        onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
+                        onBlur={() => handleNumberBlur(setter, value, 1, Infinity, 1)}
+                        className="w-full mt-1 p-1.5 border rounded-md text-sm"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={splitManualMode}
+                  onChange={e => setSplitManualMode(e.target.checked)}
+                />
+                Manual split ears count
+              </label>
+
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={syncSplitEars}
+                  onChange={e => setSyncSplitEars(e.target.checked)}
+                />
+                Match split ears across gap
+              </label>
+
+              {splitManualMode && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-500">Left cut ears</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={splitLeftCutEars}
+                      onFocus={() => setFocusedNumberField('splitLeftCutEars')}
+                      onChange={e => setSplitLeftCutEars(e.target.value === '' ? '' : +e.target.value)}
+                      onBlur={() => handleNumberBlur(setSplitLeftCutEars, splitLeftCutEars, 1, Infinity, 1)}
+                      className="w-full mt-1 p-2 border rounded-md text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-500">Right cut ears</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={splitRightCutEars}
+                      onFocus={() => setFocusedNumberField('splitRightCutEars')}
+                      onChange={e => setSplitRightCutEars(e.target.value === '' ? '' : +e.target.value)}
+                      onBlur={() => handleNumberBlur(setSplitRightCutEars, splitRightCutEars, 1, Infinity, 1)}
+                      disabled={syncSplitEars}
+                      className={[
+                        'w-full mt-1 p-2 border rounded-md text-sm',
+                        syncSplitEars ? 'bg-slate-100 text-slate-400' : ''
+                      ].join(' ')}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           </details>
 
