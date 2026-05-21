@@ -14,8 +14,15 @@ import {
   Upload,
   Wrench,
   ArrowLeft,
+  ArrowUp,
+  ArrowDown,
   PenLine,
-  DraftingCompass
+  DraftingCompass,
+  Lock,
+  Unlock,
+  Square,
+  Circle,
+  Minus
 } from 'lucide-react';
 
 export default function App() {
@@ -63,7 +70,13 @@ export default function App() {
   const [workspaceMode, setWorkspaceMode] = useState('frame');
   const [interiorDesigns, setInteriorDesigns] = useState([]);
   const [selectedInteriorDesignId, setSelectedInteriorDesignId] = useState(null);
+  const [selectedInteriorDesignIds, setSelectedInteriorDesignIds] = useState([]);
   const [interiorDrag, setInteriorDrag] = useState(null);
+  const [interiorSelectionBox, setInteriorSelectionBox] = useState(null);
+  const [isInteriorPointerOnBody, setIsInteriorPointerOnBody] = useState(false);
+  const [isInteriorPointerOnWhiteSurface, setIsInteriorPointerOnWhiteSurface] = useState(false);
+  const [activeInteriorShapeTool, setActiveInteriorShapeTool] = useState(null);
+  const [interiorShapeDraft, setInteriorShapeDraft] = useState(null);
   const [showInteriorExportPreview, setShowInteriorExportPreview] = useState(false);
   const [interiorClipEnabled, setInteriorClipEnabled] = useState(false);
   const [interiorMarginInput, setInteriorMarginInput] = useState(40);
@@ -88,6 +101,16 @@ export default function App() {
   const lastMiddleClickRef = useRef(0);
   const previewWheelBlockerRef = useRef(null);
   const designFileInputRef = useRef(null);
+  const interiorDesignsRef = useRef([]);
+  const selectedInteriorDesignIdRef = useRef(null);
+  const selectedInteriorDesignIdsRef = useRef([]);
+  const interiorUndoStackRef = useRef([]);
+  const interiorRedoStackRef = useRef([]);
+  const interiorDragStartSnapshotRef = useRef(null);
+  const interiorClipboardRef = useRef(null);
+  const interiorMousePointRef = useRef(null);
+  const interiorSelectionJustFinishedRef = useRef(false);
+  const interiorSuppressNextObjectClickRef = useRef(false);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -103,6 +126,101 @@ export default function App() {
   };
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+  const cloneInteriorDesigns = (designs) => designs.map(design => ({ ...design }));
+
+  const sameInteriorDesigns = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  const recordInteriorHistory = (snapshot = interiorDesignsRef.current) => {
+    const cloned = cloneInteriorDesigns(snapshot);
+    const stack = interiorUndoStackRef.current;
+    const last = stack[stack.length - 1];
+    if (last && sameInteriorDesigns(last, cloned)) return;
+
+    stack.push(cloned);
+    if (stack.length > 80) stack.shift();
+    interiorRedoStackRef.current = [];
+  };
+
+  const applyInteriorDesigns = (updater, { history = true, selectedId } = {}) => {
+    setInteriorDesigns(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (history && !sameInteriorDesigns(prev, next)) recordInteriorHistory(prev);
+      return next;
+    });
+
+    if (selectedId !== undefined) {
+      setSelectedInteriorDesignId(selectedId);
+      setSelectedInteriorDesignIds(selectedId ? [selectedId] : []);
+    }
+  };
+
+  const restoreInteriorHistorySnapshot = (snapshot) => {
+    const selectedStillExists = snapshot.some(design => design.id === selectedInteriorDesignIdRef.current);
+    const remainingSelection = selectedInteriorDesignIdsRef.current.filter(id => snapshot.some(design => design.id === id));
+    setInteriorDesigns(cloneInteriorDesigns(snapshot));
+    if (!selectedStillExists) setSelectedInteriorDesignId(null);
+    setSelectedInteriorDesignIds(remainingSelection);
+    setInteriorDrag(null);
+    setInteriorShapeDraft(null);
+  };
+
+  const undoInteriorDesignAction = () => {
+    const previous = interiorUndoStackRef.current.pop();
+    if (!previous) return;
+
+    interiorRedoStackRef.current.push(cloneInteriorDesigns(interiorDesignsRef.current));
+    restoreInteriorHistorySnapshot(previous);
+  };
+
+  const redoInteriorDesignAction = () => {
+    const next = interiorRedoStackRef.current.pop();
+    if (!next) return;
+
+    interiorUndoStackRef.current.push(cloneInteriorDesigns(interiorDesignsRef.current));
+    restoreInteriorHistorySnapshot(next);
+  };
+
+  const copySelectedInteriorDesign = () => {
+    const ids = selectedInteriorDesignIdsRef.current.length ? selectedInteriorDesignIdsRef.current : [selectedInteriorDesignIdRef.current].filter(Boolean);
+    const selected = interiorDesignsRef.current.filter(design => ids.includes(design.id));
+    if (!selected.length) return;
+    interiorClipboardRef.current = selected.map(design => ({ ...design }));
+  };
+
+  const pasteInteriorDesign = () => {
+    const copied = interiorClipboardRef.current;
+    if (!copied) return;
+    const copiedItems = Array.isArray(copied) ? copied : [copied];
+
+    const offset = 20;
+    const copiedBounds = getInteriorSelectionBounds(copiedItems);
+    const pastePoint = interiorMousePointRef.current;
+    const dx = pastePoint ? pastePoint.x - (copiedBounds.x + copiedBounds.width / 2) : offset;
+    const dy = pastePoint ? pastePoint.y - (copiedBounds.y + copiedBounds.height / 2) : offset;
+    const nextDesigns = copiedItems.map(copiedItem => ({
+      ...copiedItem,
+      id: crypto.randomUUID(),
+      name: `${copiedItem.name || 'Design'} copy`,
+      x: copiedItem.x !== undefined ? n(copiedItem.x, 0) + dx : copiedItem.x,
+      y: copiedItem.y !== undefined ? n(copiedItem.y, 0) + dy : copiedItem.y,
+      x1: copiedItem.x1 !== undefined ? n(copiedItem.x1, 0) + dx : copiedItem.x1,
+      y1: copiedItem.y1 !== undefined ? n(copiedItem.y1, 0) + dy : copiedItem.y1,
+      x2: copiedItem.x2 !== undefined ? n(copiedItem.x2, 0) + dx : copiedItem.x2,
+      y2: copiedItem.y2 !== undefined ? n(copiedItem.y2, 0) + dy : copiedItem.y2,
+      x3: copiedItem.x3 !== undefined ? n(copiedItem.x3, 0) + dx : copiedItem.x3,
+      y3: copiedItem.y3 !== undefined ? n(copiedItem.y3, 0) + dy : copiedItem.y3
+    }));
+
+    applyInteriorDesigns(prev => [...prev, ...nextDesigns], { selectedId: nextDesigns[nextDesigns.length - 1].id });
+    setSelectedInteriorDesignIds(nextDesigns.map(design => design.id));
+    interiorClipboardRef.current = nextDesigns.map(design => ({ ...design }));
+  };
+
+  const isTextEditingTarget = (target) => {
+    const tagName = target?.tagName?.toLowerCase();
+    return target?.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+  };
 
   const topEarLength = Math.max(1, n(topEarLengthInput, 30));
   const topEarDepth = Math.max(0, n(topEarDepthInput, 10));
@@ -223,6 +341,18 @@ export default function App() {
   };
 
   useEffect(() => {
+    interiorDesignsRef.current = interiorDesigns;
+  }, [interiorDesigns]);
+
+  useEffect(() => {
+    selectedInteriorDesignIdRef.current = selectedInteriorDesignId;
+  }, [selectedInteriorDesignId]);
+
+  useEffect(() => {
+    selectedInteriorDesignIdsRef.current = selectedInteriorDesignIds;
+  }, [selectedInteriorDesignIds]);
+
+  useEffect(() => {
     if (focusedNumberField) return;
     if (!isSplitHeightTop) return;
 
@@ -266,6 +396,32 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !isTextEditingTarget(e.target)) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redoInteriorDesignAction();
+        } else {
+          undoInteriorDesignAction();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && !isTextEditingTarget(e.target)) {
+        if (workspaceMode === 'interior') {
+          e.preventDefault();
+          copySelectedInteriorDesign();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && !isTextEditingTarget(e.target)) {
+        if (workspaceMode === 'interior') {
+          e.preventDefault();
+          pasteInteriorDesign();
+        }
+        return;
+      }
+
       if (e.key.toLowerCase() === 'm') {
         setActiveTool(prev => {
           if (prev === 'measure') {
@@ -291,6 +447,8 @@ export default function App() {
 
       if (e.key === 'Escape') {
         clearMeasureTool();
+        setActiveInteriorShapeTool(null);
+        setInteriorShapeDraft(null);
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -300,9 +458,7 @@ export default function App() {
     };
 
     const handleMouseUp = () => {
-      setDraggingMeasurement(null);
-      setPanState(null);
-      setInteriorDrag(null);
+      finishInteriorInteraction();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -2045,10 +2201,130 @@ export default function App() {
     if (!draggingMeasurement) setHoverSnap(null);
   };
 
-  const updateInteriorDesign = (id, changes) => {
-    setInteriorDesigns(prev => prev.map(item => (
+  const updateInteriorDesign = (id, changes, options = {}) => {
+    applyInteriorDesigns(prev => prev.map(item => (
       item.id === id ? { ...item, ...changes } : item
-    )));
+    )), options);
+  };
+
+  const isImportedInteriorSvg = (design) => !design?.kind || design.kind === 'svg';
+  const isPointEditedInteriorShape = (design) => design?.kind === 'line' || design?.kind === 'arc';
+  const isInteriorGroup = (design) => design?.kind === 'group';
+  const flattenInteriorDesigns = (designs) => (
+    designs.flatMap(design => isInteriorGroup(design) ? flattenInteriorDesigns(design.children || []) : [design])
+  );
+
+  const getInteriorObjectBounds = (design) => {
+    if (!design) return { x: 0, y: 0, width: 10, height: 10 };
+
+    if (isInteriorGroup(design)) return getInteriorSelectionBounds(design.children || []);
+
+    if (design.kind === 'line') {
+      const x1 = n(design.x1, n(design.x, 0));
+      const y1 = n(design.y1, n(design.y, 0));
+      const x2 = n(design.x2, x1 + n(design.width, 10));
+      const y2 = n(design.y2, y1);
+      return {
+        x: Math.min(x1, x2),
+        y: Math.min(y1, y2),
+        width: Math.max(10, Math.abs(x2 - x1)),
+        height: Math.max(10, Math.abs(y2 - y1))
+      };
+    }
+
+    if (design.kind === 'arc') {
+      const points = [
+        [n(design.x1, n(design.x, 0)), n(design.y1, n(design.y, 0))],
+        [n(design.x2, n(design.x, 0) + n(design.width, 10) / 2), n(design.y2, n(design.y, 0) - 60)],
+        [n(design.x3, n(design.x, 0) + n(design.width, 10)), n(design.y3, n(design.y, 0))]
+      ];
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      return {
+        x: Math.min(...xs),
+        y: Math.min(...ys),
+        width: Math.max(10, Math.max(...xs) - Math.min(...xs)),
+        height: Math.max(10, Math.max(...ys) - Math.min(...ys))
+      };
+    }
+
+    return {
+      x: n(design.x, 0),
+      y: n(design.y, 0),
+      width: Math.max(10, n(design.width, 10)),
+      height: Math.max(10, n(design.height, 10))
+    };
+  };
+
+  const getInteriorSelectionBounds = (designs) => {
+    const bounds = designs.map(getInteriorObjectBounds).filter(Boolean);
+    if (!bounds.length) return { x: 0, y: 0, width: 10, height: 10 };
+    const minX = Math.min(...bounds.map(item => item.x));
+    const minY = Math.min(...bounds.map(item => item.y));
+    const maxX = Math.max(...bounds.map(item => item.x + item.width));
+    const maxY = Math.max(...bounds.map(item => item.y + item.height));
+    return { x: minX, y: minY, width: Math.max(10, maxX - minX), height: Math.max(10, maxY - minY) };
+  };
+
+  const applyInteriorObjectBounds = (design, nextBounds) => {
+    const current = getInteriorObjectBounds(design);
+    const next = {
+      x: n(nextBounds.x, current.x),
+      y: n(nextBounds.y, current.y),
+      width: Math.max(10, n(nextBounds.width, current.width)),
+      height: Math.max(10, n(nextBounds.height, current.height))
+    };
+
+    const scaleX = next.width / Math.max(0.0001, current.width);
+    const scaleY = next.height / Math.max(0.0001, current.height);
+    const transformPoint = (px, py) => [
+      next.x + (px - current.x) * scaleX,
+      next.y + (py - current.y) * scaleY
+    ];
+
+    if (isInteriorGroup(design)) {
+      return {
+        ...design,
+        ...next,
+        children: (design.children || []).map(child => {
+          const childBounds = getInteriorObjectBounds(child);
+          return {
+            ...child,
+            ...applyInteriorObjectBounds(child, {
+              x: next.x + (childBounds.x - current.x) * scaleX,
+              y: next.y + (childBounds.y - current.y) * scaleY,
+              width: childBounds.width * scaleX,
+              height: childBounds.height * scaleY
+            })
+          };
+        })
+      };
+    }
+
+    if (!isPointEditedInteriorShape(design)) return next;
+
+    if (design.kind === 'line') {
+      const p1 = transformPoint(n(design.x1, current.x), n(design.y1, current.y));
+      const p2 = transformPoint(n(design.x2, current.x + current.width), n(design.y2, current.y));
+      return { ...next, x1: p1[0], y1: p1[1], x2: p2[0], y2: p2[1] };
+    }
+
+    const p1 = transformPoint(n(design.x1, current.x), n(design.y1, current.y + current.height));
+    const p2 = transformPoint(n(design.x2, current.x + current.width / 2), n(design.y2, current.y));
+    const p3 = transformPoint(n(design.x3, current.x + current.width), n(design.y3, current.y + current.height));
+    return { ...next, x1: p1[0], y1: p1[1], x2: p2[0], y2: p2[1], x3: p3[0], y3: p3[1] };
+  };
+
+  const getInteriorAspectRatio = (design) => (
+    getInteriorObjectBounds(design).width / getInteriorObjectBounds(design).height
+  );
+
+  const toggleInteriorAspectLock = (design) => {
+    const nextLocked = !design.aspectLocked;
+    updateInteriorDesign(design.id, {
+      aspectLocked: nextLocked,
+      aspectRatio: nextLocked ? getInteriorAspectRatio(design) : design.aspectRatio
+    });
   };
 
   const getSelectedInteriorDesign = () => (
@@ -2057,7 +2333,8 @@ export default function App() {
 
   const getInteriorDesignHandles = (design) => {
     if (!design) return [];
-    const { x, y, width: itemWidth, height: itemHeight } = design;
+    if (isPointEditedInteriorShape(design)) return [];
+    const { x, y, width: itemWidth, height: itemHeight } = getInteriorObjectBounds(design);
     const cx = x + itemWidth / 2;
     const cy = y + itemHeight / 2;
 
@@ -2071,6 +2348,503 @@ export default function App() {
       { id: 'sw', x, y: y + itemHeight, cursor: 'nesw-resize' },
       { id: 'w', x, y: cy, cursor: 'ew-resize' }
     ];
+  };
+
+  const getInteriorPointHandles = (design) => {
+    if (design?.kind === 'line') {
+      return [
+        { id: 'p1', x: n(design.x1, 0), y: n(design.y1, 0), cursor: 'move' },
+        { id: 'p2', x: n(design.x2, 0), y: n(design.y2, 0), cursor: 'move' }
+      ];
+    }
+
+    if (design?.kind === 'arc') {
+      return [
+        { id: 'p1', x: n(design.x1, 0), y: n(design.y1, 0), cursor: 'move' },
+        { id: 'p2', x: n(design.x2, 0), y: n(design.y2, 0), cursor: 'move' },
+        { id: 'p3', x: n(design.x3, 0), y: n(design.y3, 0), cursor: 'move' }
+      ];
+    }
+
+    return [];
+  };
+
+  const getInteriorShapeName = (kind) => ({
+    rect: 'Rectangle',
+    ellipse: 'Ellipse',
+    line: 'Line',
+    arc: '3-point arc'
+  }[kind] || 'Shape');
+
+  const createInteriorShapeFromDraft = (draft) => {
+    if (!draft) return null;
+    const base = {
+      id: crypto.randomUUID(),
+      kind: draft.kind,
+      name: getInteriorShapeName(draft.kind),
+      color: 'white',
+      exportable: true,
+      warnings: [],
+      aspectLocked: draft.kind === 'rect' || draft.kind === 'ellipse',
+      aspectRatio: draft.kind === 'rect' || draft.kind === 'ellipse'
+        ? Math.max(10, Math.abs(draft.x2 - draft.x1)) / Math.max(10, Math.abs(draft.y2 - draft.y1))
+        : 1
+    };
+
+    if (draft.kind === 'rect' || draft.kind === 'ellipse') {
+      const x = Math.min(draft.x1, draft.x2);
+      const y = Math.min(draft.y1, draft.y2);
+      const itemWidth = Math.max(10, Math.abs(draft.x2 - draft.x1));
+      const itemHeight = Math.max(10, Math.abs(draft.y2 - draft.y1));
+      return { ...base, x, y, width: itemWidth, height: itemHeight };
+    }
+
+    if (draft.kind === 'line') {
+      const shape = {
+        ...base,
+        x1: draft.x1,
+        y1: draft.y1,
+        x2: draft.x2,
+        y2: draft.y2,
+        thickness: 8,
+        aspectLocked: false
+      };
+      return { ...shape, ...getInteriorObjectBounds(shape) };
+    }
+
+    if (draft.kind === 'arc') {
+      const shape = {
+        ...base,
+        x1: draft.points[0][0],
+        y1: draft.points[0][1],
+        x2: draft.points[2][0],
+        y2: draft.points[2][1],
+        x3: draft.points[1][0],
+        y3: draft.points[1][1],
+        thickness: 8,
+        aspectLocked: false
+      };
+      return { ...shape, ...getInteriorObjectBounds(shape) };
+    }
+
+    return null;
+  };
+
+  const addInteriorShape = (shape) => {
+    if (!shape) return;
+    applyInteriorDesigns(prev => [...prev, shape], { selectedId: shape.id });
+  };
+
+  const setInteriorSelection = (ids) => {
+    const cleanIds = Array.from(new Set(ids.filter(Boolean)));
+    setSelectedInteriorDesignIds(cleanIds);
+    setSelectedInteriorDesignId(cleanIds[cleanIds.length - 1] || null);
+  };
+
+  const toggleInteriorSelection = (id) => {
+    const current = selectedInteriorDesignIdsRef.current;
+    setInteriorSelection(current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
+  };
+
+  const getSvgChildBBox = (svg, child) => {
+    const serializer = new XMLSerializer();
+    const testSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    Array.from(svg.attributes).forEach(attr => testSvg.setAttribute(attr.name, attr.value));
+    testSvg.style.position = 'fixed';
+    testSvg.style.left = '-10000px';
+    testSvg.style.top = '-10000px';
+    testSvg.style.width = '1px';
+    testSvg.style.height = '1px';
+    testSvg.style.opacity = '0';
+    testSvg.style.pointerEvents = 'none';
+    testSvg.setAttribute('aria-hidden', 'true');
+
+    Array.from(svg.children)
+      .filter(node => ['defs', 'style'].includes(node.tagName?.toLowerCase()))
+      .forEach(node => testSvg.appendChild(node.cloneNode(true)));
+    testSvg.appendChild(child.cloneNode(true));
+    document.body.appendChild(testSvg);
+
+    try {
+      const box = testSvg.getBBox();
+      if (box.width > 0.0001 && box.height > 0.0001) {
+        const pad = 0.001;
+        return {
+          x: box.x - pad,
+          y: box.y - pad,
+          width: box.width + pad * 2,
+          height: box.height + pad * 2
+        };
+      }
+    } catch {
+      // Some SVG nodes cannot be measured by the browser; fall back to the root box.
+    } finally {
+      document.body.removeChild(testSvg);
+    }
+
+    return null;
+  };
+
+  const createSvgChildObject = (design, child, childIndex, svg) => {
+    const serializer = new XMLSerializer();
+    const defs = Array.from(svg.children)
+      .filter(node => ['defs', 'style'].includes(node.tagName?.toLowerCase()))
+      .map(node => serializer.serializeToString(node))
+      .join('');
+    const rootBox = getSvgRootBox(svg);
+    const childBox = getSvgChildBBox(svg, child) || rootBox;
+    const designWidth = Math.max(10, n(design.width, 10));
+    const designHeight = Math.max(10, n(design.height, 10));
+    const scaleX = designWidth / (rootBox.width || 1);
+    const scaleY = designHeight / (rootBox.height || 1);
+    const attrs = Array.from(svg.attributes)
+      .filter(attr => !['viewBox', 'width', 'height'].includes(attr.name))
+      .map(attr => `${attr.name}="${attr.value.replace(/"/g, '&quot;')}"`)
+      .join(' ');
+    const fittedAttrs = [
+      attrs,
+      `viewBox="${childBox.x} ${childBox.y} ${childBox.width} ${childBox.height}"`,
+      `width="${childBox.width}"`,
+      `height="${childBox.height}"`
+    ].filter(Boolean).join(' ');
+    const svgText = `<svg ${fittedAttrs}>${defs}${serializer.serializeToString(child)}</svg>`;
+    const validation = validateInteriorSvg(svgText);
+    return {
+      ...design,
+      id: crypto.randomUUID(),
+      name: `${design.name || 'SVG'} part ${childIndex + 1}`,
+      x: n(design.x, 0) + (childBox.x - rootBox.x) * scaleX,
+      y: n(design.y, 0) + (childBox.y - rootBox.y) * scaleY,
+      width: Math.max(1, childBox.width * scaleX),
+      height: Math.max(1, childBox.height * scaleY),
+      svgText,
+      href: svgTextToDataUrl(svgText),
+      exportable: validation.exportable,
+      warnings: validation.warnings,
+      fittedUngroupPart: true
+    };
+  };
+
+  const ignoredSvgUngroupTags = new Set(['defs', 'style', 'title', 'desc', 'metadata', 'namedview', 'sodipodi:namedview']);
+  const drawableSvgUngroupTags = new Set(['path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'image', 'use']);
+
+  const splitUngroupPathElement = (pathElement) => {
+    const d = pathElement.getAttribute('d');
+    if (!d) return [pathElement];
+
+    try {
+      const subpaths = splitSvgPathSubpaths(d);
+      if (subpaths.length <= 1) return [pathElement];
+
+      return subpaths
+        .map(subpath => {
+          const clone = pathElement.cloneNode(false);
+          clone.setAttribute('d', encodeSVGPath(subpath.commands));
+          return clone;
+        })
+        .filter(clone => (clone.getAttribute('d') || '').trim());
+    } catch {
+      return [pathElement];
+    }
+  };
+
+  const collectDrawableSvgUngroupParts = (node) => {
+    const parts = [];
+    const walk = (current, inheritedTransform = '') => {
+      const tag = current.tagName?.toLowerCase();
+      if (!tag || ignoredSvgUngroupTags.has(tag)) return;
+      const ownTransform = current.getAttribute('transform') || '';
+      const combinedTransform = [inheritedTransform, ownTransform].filter(Boolean).join(' ');
+
+      if (drawableSvgUngroupTags.has(tag)) {
+        const clone = current.cloneNode(true);
+        if (combinedTransform) clone.setAttribute('transform', combinedTransform);
+        splitUngroupPathElement(clone).forEach(part => parts.push(part));
+        return;
+      }
+
+      Array.from(current.children || []).forEach(child => walk(child, combinedTransform));
+    };
+
+    walk(node);
+    return parts;
+  };
+
+  const getUngroupedSvgParts = (svg) => {
+    const topLevelChildren = Array.from(svg.children)
+      .filter(child => !ignoredSvgUngroupTags.has(child.tagName.toLowerCase()));
+    const onlyChild = topLevelChildren.length === 1 ? topLevelChildren[0] : null;
+    const onlyChildTag = onlyChild?.tagName?.toLowerCase();
+
+    if (onlyChild && ['g', 'svg', 'symbol'].includes(onlyChildTag)) {
+      const wrappedDrawableParts = collectDrawableSvgUngroupParts(onlyChild);
+      if (wrappedDrawableParts.length > 1) return wrappedDrawableParts;
+    }
+
+    const hasTopLevelGroup = topLevelChildren.some(child => child.tagName.toLowerCase() === 'g');
+
+    if (hasTopLevelGroup) return topLevelChildren;
+
+    const topLevelParts = topLevelChildren.flatMap(child => (
+      child.tagName.toLowerCase() === 'path' ? splitUngroupPathElement(child) : [child]
+    ));
+
+    if (topLevelParts.length > 1) return topLevelParts;
+
+    const leafParts = topLevelChildren.flatMap(collectDrawableSvgUngroupParts);
+    return leafParts.length > 1 ? leafParts : topLevelParts;
+  };
+
+  const ungroupSelectedInteriorDesign = () => {
+    const selected = getSelectedInteriorDesign();
+    if (!selected) return;
+
+    if (isInteriorGroup(selected)) {
+      const children = (selected.children || []).map(child => ({ ...child, id: crypto.randomUUID() }));
+      applyInteriorDesigns(prev => {
+        const index = prev.findIndex(item => item.id === selected.id);
+        if (index < 0) return prev;
+        const next = [...prev];
+        next.splice(index, 1, ...children);
+        return next;
+      }, { selectedId: children[children.length - 1]?.id || null });
+      setSelectedInteriorDesignIds(children.map(child => child.id));
+      return;
+    }
+
+    if (isImportedInteriorSvg(selected) && selected.svgText) {
+      if (selected.fittedUngroupPart) return;
+
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(selected.svgText, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+      if (!svg || doc.querySelector('parsererror')) return;
+
+      const parts = getUngroupedSvgParts(svg);
+      if (parts.length <= 1) return;
+
+      const children = parts.map((child, index) => createSvgChildObject(selected, child, index, svg));
+      if (children.length <= 1) return;
+
+      applyInteriorDesigns(prev => {
+        const index = prev.findIndex(item => item.id === selected.id);
+        if (index < 0) return prev;
+        const next = [...prev];
+        next.splice(index, 1, ...children);
+        return next;
+      }, { selectedId: children[children.length - 1].id });
+      setSelectedInteriorDesignIds(children.map(child => child.id));
+    }
+  };
+
+  const groupSelectedInteriorDesigns = () => {
+    const ids = selectedInteriorDesignIdsRef.current;
+    if (ids.length < 2) return;
+    const selected = interiorDesignsRef.current.filter(design => ids.includes(design.id));
+    if (selected.length < 2) return;
+    const group = {
+      id: crypto.randomUUID(),
+      kind: 'group',
+      name: 'Group',
+      color: 'white',
+      exportable: selected.every(design => design.exportable !== false),
+      warnings: selected.flatMap(design => design.warnings || []),
+      aspectLocked: false,
+      children: selected.map(design => ({ ...design }))
+    };
+
+    applyInteriorDesigns(prev => {
+      const firstIndex = prev.findIndex(design => ids.includes(design.id));
+      const next = prev.filter(design => !ids.includes(design.id));
+      next.splice(Math.max(0, firstIndex), 0, group);
+      return next;
+    }, { selectedId: group.id });
+  };
+
+  const applyInteriorColor = (design, color) => (
+    isInteriorGroup(design)
+      ? { ...design, color, children: (design.children || []).map(child => applyInteriorColor(child, color)) }
+      : { ...design, color }
+  );
+
+  const selectInteriorShapeTool = (kind) => {
+    setActiveInteriorShapeTool(prev => prev === kind ? null : kind);
+    setInteriorShapeDraft(null);
+    setInteriorSelection([]);
+    setInteriorDrag(null);
+  };
+
+  const getInteriorDraftBounds = (draft) => {
+    if (!draft) return null;
+
+    if (draft.kind === 'arc') {
+      const xs = draft.points.map(point => point[0]);
+      const ys = draft.points.map(point => point[1]);
+      return {
+        x: Math.min(...xs),
+        y: Math.min(...ys),
+        width: Math.max(10, Math.max(...xs) - Math.min(...xs)),
+        height: Math.max(10, Math.max(...ys) - Math.min(...ys))
+      };
+    }
+
+    return {
+      x: Math.min(draft.x1, draft.x2),
+      y: Math.min(draft.y1, draft.y2),
+      width: Math.max(0, Math.abs(draft.x2 - draft.x1)),
+      height: Math.max(0, Math.abs(draft.y2 - draft.y1))
+    };
+  };
+
+  const isInteriorPointOnBody = (point) => (
+    getCleanMainBodyPanelVertexSets()
+      .map(panel => transformPoints(panel))
+      .some(panel => pointInPolygon([point.x, point.y], panel))
+  );
+
+  const isInteriorPointOnWhiteDesignSurface = (point) => {
+    const px = point.x;
+    const py = point.y;
+
+    return flattenInteriorDesigns(interiorDesignsRef.current).some(design => {
+      if ((design.color || 'white') !== 'white') return false;
+
+      const bounds = getInteriorObjectBounds(design);
+      const inBounds = px >= bounds.x
+        && px <= bounds.x + bounds.width
+        && py >= bounds.y
+        && py <= bounds.y + bounds.height;
+      if (!inBounds) return false;
+
+      if (design.kind === 'rect' || isImportedInteriorSvg(design)) return true;
+
+      if (design.kind === 'ellipse') {
+        const rx = bounds.width / 2;
+        const ry = bounds.height / 2;
+        const cx = bounds.x + rx;
+        const cy = bounds.y + ry;
+        return (((px - cx) ** 2) / ((rx || 1) ** 2)) + (((py - cy) ** 2) / ((ry || 1) ** 2)) <= 1;
+      }
+
+      if (design.kind === 'line' || design.kind === 'arc') {
+        return getInteriorShapeContours(design).some(contour => pointInPolygon([px, py], contour));
+      }
+
+      return false;
+    });
+  };
+
+  const handleInteriorCanvasMouseDown = (e) => {
+    handleViewportMouseDown(e);
+    if (e.button !== 0 || panState) return;
+
+    const point = getSvgPoint(e);
+    const onBody = isInteriorPointOnBody(point);
+    const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
+    interiorMousePointRef.current = point;
+    setIsInteriorPointerOnBody(onBody);
+    setIsInteriorPointerOnWhiteSurface(onWhiteSurface);
+
+    if (activeInteriorShapeTool && !onBody) {
+      return;
+    }
+
+    if (!activeInteriorShapeTool) {
+      setInteriorSelection([]);
+      setInteriorSelectionBox({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+      return;
+    }
+
+    if (activeInteriorShapeTool === 'arc') return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    setInteriorSelection([]);
+    setInteriorShapeDraft({
+      kind: activeInteriorShapeTool,
+      x1: point.x,
+      y1: point.y,
+      x2: point.x,
+      y2: point.y,
+      drawing: true
+    });
+  };
+
+  const finishInteriorSelectionBox = () => {
+    if (!interiorSelectionBox) return;
+    const box = {
+      x: Math.min(interiorSelectionBox.x1, interiorSelectionBox.x2),
+      y: Math.min(interiorSelectionBox.y1, interiorSelectionBox.y2),
+      width: Math.abs(interiorSelectionBox.x2 - interiorSelectionBox.x1),
+      height: Math.abs(interiorSelectionBox.y2 - interiorSelectionBox.y1)
+    };
+    const leftToRight = interiorSelectionBox.x2 >= interiorSelectionBox.x1;
+    const selectedIds = interiorDesignsRef.current.filter(design => {
+      const bounds = getInteriorObjectBounds(design);
+      const touches = bounds.x <= box.x + box.width
+        && bounds.x + bounds.width >= box.x
+        && bounds.y <= box.y + box.height
+        && bounds.y + bounds.height >= box.y;
+      const inside = bounds.x >= box.x
+        && bounds.y >= box.y
+        && bounds.x + bounds.width <= box.x + box.width
+        && bounds.y + bounds.height <= box.y + box.height;
+      return leftToRight ? inside : touches;
+    }).map(design => design.id);
+
+    setInteriorSelection(selectedIds);
+    interiorSelectionJustFinishedRef.current = true;
+    setInteriorSelectionBox(null);
+  };
+
+  const handleInteriorCanvasClick = (e) => {
+    if (interiorSelectionJustFinishedRef.current) {
+      interiorSelectionJustFinishedRef.current = false;
+      return;
+    }
+
+    if (!activeInteriorShapeTool) {
+      if (!interiorSelectionBox) setInteriorSelection([]);
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (activeInteriorShapeTool !== 'arc') return;
+
+    const point = getSvgPoint(e);
+    interiorMousePointRef.current = point;
+    const onBody = isInteriorPointOnBody(point);
+    const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
+    setIsInteriorPointerOnBody(onBody);
+    setIsInteriorPointerOnWhiteSurface(onWhiteSurface);
+    if (!onBody) return;
+
+    const points = [...(interiorShapeDraft?.points || []), [point.x, point.y]];
+
+    if (points.length === 3) {
+      const shape = createInteriorShapeFromDraft({ kind: 'arc', points });
+      addInteriorShape(shape);
+      setInteriorShapeDraft(null);
+      return;
+    }
+
+    setInteriorSelection([]);
+    setInteriorShapeDraft({ kind: 'arc', points, preview: [point.x, point.y] });
+  };
+
+  const finishInteriorShapeDraft = () => {
+    if (!interiorShapeDraft || interiorShapeDraft.kind === 'arc') return;
+
+    const bounds = getInteriorDraftBounds(interiorShapeDraft);
+    const isLine = interiorShapeDraft.kind === 'line';
+    const length = isLine
+      ? Math.hypot(interiorShapeDraft.x2 - interiorShapeDraft.x1, interiorShapeDraft.y2 - interiorShapeDraft.y1)
+      : Math.min(bounds.width, bounds.height);
+
+    if (length >= 2) addInteriorShape(createInteriorShapeFromDraft(interiorShapeDraft));
+    setInteriorShapeDraft(null);
   };
 
   const svgTextToDataUrl = (text) => {
@@ -2186,56 +2960,182 @@ export default function App() {
         x: safeWidth / 2 - defaultSize / 2,
         y: safeHeight / 2 - defaultSize / 2,
         width: defaultSize,
-        height: defaultSize
+        height: defaultSize,
+        aspectLocked: true,
+        aspectRatio: 1
       };
 
-      setInteriorDesigns(prev => [...prev, nextDesign]);
-      setSelectedInteriorDesignId(nextDesign.id);
+      applyInteriorDesigns(prev => [...prev, nextDesign], { selectedId: nextDesign.id });
     };
     reader.readAsText(file);
     e.target.value = '';
   };
 
   const startInteriorDesignDrag = (e, design, mode, handle = null) => {
+    if (activeInteriorShapeTool) return;
     if (e.button !== 0) return;
+    if (e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
 
     const point = getSvgPoint(e);
-    setSelectedInteriorDesignId(design.id);
+    if (mode === 'move' && (design.color || 'white') === 'white' && !isInteriorPointOnWhiteDesignSurface(point)) {
+      return;
+    }
+
+    const bounds = getInteriorObjectBounds(design);
+    const selectedIds = selectedInteriorDesignIdsRef.current;
+    if (!(selectedIds.includes(design.id) && selectedIds.length > 1)) setInteriorSelection([design.id]);
+    interiorDragStartSnapshotRef.current = cloneInteriorDesigns(interiorDesignsRef.current);
+    if (mode === 'move' && selectedIds.includes(design.id) && selectedIds.length > 1) {
+      setInteriorDrag({
+        id: design.id,
+        ids: selectedIds,
+        mode: 'multi-move',
+        startMouse: [point.x, point.y],
+        startDesigns: interiorDesignsRef.current.filter(item => selectedIds.includes(item.id)).map(item => ({ ...item, ...getInteriorObjectBounds(item) }))
+      });
+      return;
+    }
+
     setInteriorDrag({
       id: design.id,
       mode,
       handle,
       startMouse: [point.x, point.y],
-      startDesign: { x: design.x, y: design.y, width: design.width, height: design.height }
+      startDesign: {
+        ...design,
+        ...bounds,
+        aspectLocked: design.aspectLocked,
+        aspectRatio: design.aspectRatio || (bounds.width / bounds.height)
+      }
     });
   };
 
   const handleInteriorPreviewMouseMove = (e) => {
+    const point = getSvgPoint(e);
+    interiorMousePointRef.current = point;
+    const onBody = isInteriorPointOnBody(point);
+    const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
+    setIsInteriorPointerOnBody(prev => prev === onBody ? prev : onBody);
+    setIsInteriorPointerOnWhiteSurface(prev => prev === onWhiteSurface ? prev : onWhiteSurface);
+
     if (panState) {
       handlePreviewMouseMove(e);
       return;
     }
 
+    if (interiorSelectionBox) {
+      setInteriorSelectionBox(prev => prev ? { ...prev, x2: point.x, y2: point.y } : prev);
+      return;
+    }
+
+    if (interiorShapeDraft) {
+      if (interiorShapeDraft.kind === 'arc') {
+        setInteriorShapeDraft(prev => prev ? { ...prev, preview: [point.x, point.y] } : prev);
+        return;
+      }
+
+      if (interiorShapeDraft.drawing) {
+        setInteriorShapeDraft(prev => prev ? { ...prev, x2: point.x, y2: point.y } : prev);
+        return;
+      }
+    }
+
     if (!interiorDrag) return;
 
-    const point = getSvgPoint(e);
     const dx = point.x - interiorDrag.startMouse[0];
     const dy = point.y - interiorDrag.startMouse[1];
     const start = interiorDrag.startDesign;
     const minSize = 10;
 
+    if (interiorDrag.mode === 'multi-move') {
+      applyInteriorDesigns(prev => prev.map(item => {
+        const startItem = interiorDrag.startDesigns.find(design => design.id === item.id);
+        if (!startItem) return item;
+        return {
+          ...item,
+          ...applyInteriorObjectBounds(startItem, {
+            x: startItem.x + dx,
+            y: startItem.y + dy,
+            width: startItem.width,
+            height: startItem.height
+          })
+        };
+      }), { history: false });
+      return;
+    }
+
+    if (interiorDrag.mode === 'multi-resize') {
+      const group = interiorDrag.startGroup;
+      const nextGroup = { ...group };
+      const handle = interiorDrag.handle;
+
+      if (handle.includes('e')) nextGroup.width = Math.max(minSize, group.width + dx);
+      if (handle.includes('s')) nextGroup.height = Math.max(minSize, group.height + dy);
+      if (handle.includes('w')) {
+        const proposedWidth = Math.max(minSize, group.width - dx);
+        nextGroup.x = group.x + group.width - proposedWidth;
+        nextGroup.width = proposedWidth;
+      }
+      if (handle.includes('n')) {
+        const proposedHeight = Math.max(minSize, group.height - dy);
+        nextGroup.y = group.y + group.height - proposedHeight;
+        nextGroup.height = proposedHeight;
+      }
+
+      const scaleX = nextGroup.width / Math.max(0.0001, group.width);
+      const scaleY = nextGroup.height / Math.max(0.0001, group.height);
+      applyInteriorDesigns(prev => prev.map(item => {
+        const startItem = interiorDrag.startDesigns.find(design => design.id === item.id);
+        if (!startItem) return item;
+        return {
+          ...item,
+          ...applyInteriorObjectBounds(startItem, {
+            x: nextGroup.x + (startItem.x - group.x) * scaleX,
+            y: nextGroup.y + (startItem.y - group.y) * scaleY,
+            width: startItem.width * scaleX,
+            height: startItem.height * scaleY
+          })
+        };
+      }), { history: false });
+      return;
+    }
+
     if (interiorDrag.mode === 'move') {
-      updateInteriorDesign(interiorDrag.id, {
+      updateInteriorDesign(interiorDrag.id, applyInteriorObjectBounds(start, {
         x: start.x + dx,
-        y: start.y + dy
-      });
+        y: start.y + dy,
+        width: start.width,
+        height: start.height
+      }), { history: false });
+      return;
+    }
+
+    if (interiorDrag.mode === 'point') {
+      const next = { ...start };
+      if (interiorDrag.handle === 'p1') {
+        next.x1 = n(start.x1, 0) + dx;
+        next.y1 = n(start.y1, 0) + dy;
+      } else if (interiorDrag.handle === 'p2') {
+        next.x2 = n(start.x2, 0) + dx;
+        next.y2 = n(start.y2, 0) + dy;
+      } else if (interiorDrag.handle === 'p3') {
+        next.x3 = n(start.x3, 0) + dx;
+        next.y3 = n(start.y3, 0) + dy;
+      }
+
+      updateInteriorDesign(interiorDrag.id, { ...next, ...getInteriorObjectBounds(next) }, { history: false });
       return;
     }
 
     const next = { ...start };
     const handle = interiorDrag.handle;
+    const ratio = Math.max(0.0001, n(start.aspectRatio, start.width / start.height || 1));
 
     if (handle.includes('e')) next.width = Math.max(minSize, start.width + dx);
     if (handle.includes('s')) next.height = Math.max(minSize, start.height + dy);
@@ -2250,10 +3150,45 @@ export default function App() {
       next.height = proposedHeight;
     }
 
-    updateInteriorDesign(interiorDrag.id, next);
+    if (start.aspectLocked) {
+      const widthDriven = handle.includes('e') || handle.includes('w');
+      const heightDriven = handle.includes('n') || handle.includes('s');
+
+      if (widthDriven && (!heightDriven || Math.abs(dx) >= Math.abs(dy))) {
+        next.height = Math.max(minSize, next.width / ratio);
+        if (handle.includes('n')) next.y = start.y + start.height - next.height;
+      } else {
+        next.width = Math.max(minSize, next.height * ratio);
+        if (handle.includes('w')) next.x = start.x + start.width - next.width;
+      }
+    }
+
+    updateInteriorDesign(interiorDrag.id, applyInteriorObjectBounds(start, next), { history: false });
   };
 
   const handleInteriorNumberChange = (field, value) => {
+    if (selectedInteriorDesignIds.length > 1 && ['x', 'y', 'width', 'height'].includes(field)) {
+      if (value === '') return;
+      const bounds = getInteriorSelectionBounds(interiorDesigns.filter(item => selectedInteriorDesignIds.includes(item.id)));
+      const nextBounds = { ...bounds, [field]: field === 'width' || field === 'height' ? Math.max(10, Number(value)) : Number(value) };
+      const scaleX = nextBounds.width / Math.max(0.0001, bounds.width);
+      const scaleY = nextBounds.height / Math.max(0.0001, bounds.height);
+      applyInteriorDesigns(prev => prev.map(item => {
+        if (!selectedInteriorDesignIds.includes(item.id)) return item;
+        const itemBounds = getInteriorObjectBounds(item);
+        return {
+          ...item,
+          ...applyInteriorObjectBounds(item, {
+            x: nextBounds.x + (itemBounds.x - bounds.x) * scaleX,
+            y: nextBounds.y + (itemBounds.y - bounds.y) * scaleY,
+            width: itemBounds.width * scaleX,
+            height: itemBounds.height * scaleY
+          })
+        };
+      }));
+      return;
+    }
+
     const design = getSelectedInteriorDesign();
     if (!design) return;
     if (value === '') {
@@ -2262,7 +3197,27 @@ export default function App() {
     }
 
     const min = field === 'width' || field === 'height' ? 10 : -Infinity;
-    updateInteriorDesign(design.id, { [field]: Math.max(min, Number(value)) });
+    const numericValue = Math.max(min, Number(value));
+    const ratio = Math.max(0.0001, n(design.aspectRatio, getInteriorAspectRatio(design)));
+    const bounds = getInteriorObjectBounds(design);
+    const isBoundsField = ['x', 'y', 'width', 'height'].includes(field);
+
+    if (design.aspectLocked && field === 'width') {
+      updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, width: numericValue, height: Math.max(10, numericValue / ratio) }));
+      return;
+    }
+
+    if (design.aspectLocked && field === 'height') {
+      updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, height: numericValue, width: Math.max(10, numericValue * ratio) }));
+      return;
+    }
+
+    if (isBoundsField) {
+      updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, [field]: numericValue }));
+      return;
+    }
+
+    updateInteriorDesign(design.id, { [field]: numericValue });
   };
 
   const handleInteriorNumberBlur = (field, fallback) => {
@@ -2270,7 +3225,27 @@ export default function App() {
     if (!design) return;
 
     const min = field === 'width' || field === 'height' ? 10 : -Infinity;
-    updateInteriorDesign(design.id, { [field]: Math.max(min, n(design[field], fallback)) });
+    const numericValue = Math.max(min, n(design[field], fallback));
+    const ratio = Math.max(0.0001, n(design.aspectRatio, getInteriorAspectRatio(design)));
+    const bounds = getInteriorObjectBounds(design);
+    const isBoundsField = ['x', 'y', 'width', 'height'].includes(field);
+
+    if (design.aspectLocked && field === 'width') {
+      updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, width: numericValue, height: Math.max(10, numericValue / ratio) }));
+      return;
+    }
+
+    if (design.aspectLocked && field === 'height') {
+      updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, height: numericValue, width: Math.max(10, numericValue * ratio) }));
+      return;
+    }
+
+    if (isBoundsField) {
+      updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, [field]: numericValue }));
+      return;
+    }
+
+    updateInteriorDesign(design.id, { [field]: numericValue });
   };
 
   const handleInteriorMarginBlur = () => {
@@ -2289,9 +3264,84 @@ export default function App() {
   };
 
   const deleteSelectedInteriorDesign = () => {
+    const ids = selectedInteriorDesignIds.length ? selectedInteriorDesignIds : [selectedInteriorDesignId].filter(Boolean);
+    if (!ids.length) return;
+    applyInteriorDesigns(prev => prev.filter(item => !ids.includes(item.id)), { selectedId: null });
+    setInteriorDrag(null);
+  };
+
+  const startInteriorSelectionTransform = (e, mode, handle = null) => {
+    if (e.button !== 0 || selectedInteriorDesignIdsRef.current.length < 2) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = getSvgPoint(e);
+    const selected = interiorDesignsRef.current.filter(item => selectedInteriorDesignIdsRef.current.includes(item.id));
+    const bounds = getInteriorSelectionBounds(selected);
+    interiorDragStartSnapshotRef.current = cloneInteriorDesigns(interiorDesignsRef.current);
+    setInteriorDrag({
+      mode,
+      handle,
+      ids: selectedInteriorDesignIdsRef.current,
+      startMouse: [point.x, point.y],
+      startGroup: bounds,
+      startDesigns: selected.map(item => ({ ...item, ...getInteriorObjectBounds(item) }))
+    });
+  };
+
+  const moveSelectedInteriorDesignLayer = (mode) => {
     if (!selectedInteriorDesignId) return;
-    setInteriorDesigns(prev => prev.filter(item => item.id !== selectedInteriorDesignId));
-    setSelectedInteriorDesignId(null);
+
+    applyInteriorDesigns(prev => {
+      const index = prev.findIndex(item => item.id === selectedInteriorDesignId);
+      if (index < 0) return prev;
+
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+
+      if (mode === 'front') {
+        next.push(item);
+      } else if (mode === 'back') {
+        next.unshift(item);
+      } else if (mode === 'up') {
+        next.splice(Math.min(next.length, index + 1), 0, item);
+      } else if (mode === 'down') {
+        next.splice(Math.max(0, index - 1), 0, item);
+      }
+
+      return next;
+    }, { selectedId: selectedInteriorDesignId });
+  };
+
+  const selectInteriorDesignFromCanvas = (e, designId) => {
+    e.stopPropagation();
+    if (interiorSuppressNextObjectClickRef.current) {
+      interiorSuppressNextObjectClickRef.current = false;
+      return;
+    }
+    if (activeInteriorShapeTool) return;
+    if (e.shiftKey) {
+      toggleInteriorSelection(designId);
+    } else {
+      setInteriorSelection([designId]);
+    }
+  };
+
+  const cancelInteriorShapeTool = () => {
+    setActiveInteriorShapeTool(null);
+    setInteriorShapeDraft(null);
+  };
+
+  const finishInteriorInteraction = () => {
+    if (interiorDrag?.mode === 'multi-move' || interiorDrag?.mode === 'multi-resize') {
+      interiorSuppressNextObjectClickRef.current = true;
+    }
+
+    if (interiorDragStartSnapshotRef.current && !sameInteriorDesigns(interiorDragStartSnapshotRef.current, interiorDesignsRef.current)) {
+      recordInteriorHistory(interiorDragStartSnapshotRef.current);
+    }
+    interiorDragStartSnapshotRef.current = null;
+    setDraggingMeasurement(null);
+    setPanState(null);
     setInteriorDrag(null);
   };
 
@@ -3120,9 +4170,35 @@ export default function App() {
     cleanDxfPoints(path.map(point => [point.X / clipperScale, point.Y / clipperScale]), true)
   );
 
-  const cleanClipperPaths = (paths) => (
-    ClipperLib.Clipper.CleanPolygons(paths, 0.05 * clipperScale).filter(path => path.length >= 3)
+  const cleanClipperPaths = (paths, tolerance = 0.05) => (
+    ClipperLib.Clipper.CleanPolygons(paths, tolerance * clipperScale).filter(path => path.length >= 3)
   );
+
+  const orientClipperPaths = (paths) => (
+    paths.map(path => (ClipperLib.Clipper.Orientation(path) ? path : [...path].reverse()))
+  );
+
+  const offsetOpenStrokeContours = (points, strokeWidth, linecap = 'butt') => {
+    const cleaned = cleanDxfPoints(points, false);
+    if (cleaned.length < 2 || strokeWidth <= 0) return [];
+
+    const endType = {
+      round: ClipperLib.EndType.etOpenRound,
+      square: ClipperLib.EndType.etOpenSquare,
+      butt: ClipperLib.EndType.etOpenButt
+    }[(linecap || 'butt').trim().toLowerCase()] || ClipperLib.EndType.etOpenButt;
+
+    const clipperPath = cleaned.map(([x, y]) => ({
+      X: Math.round(x * clipperScale),
+      Y: Math.round(y * clipperScale)
+    }));
+    const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * clipperScale);
+    offsetter.AddPath(clipperPath, ClipperLib.JoinType.jtRound, endType);
+    const solution = [];
+    offsetter.Execute(solution, (strokeWidth / 2) * clipperScale);
+
+    return cleanClipperPaths(solution).map(fromClipperPath);
+  };
 
   const intersectClosedContourWithMargin = (points) => {
     if (!interiorClipEnabled || interiorMarginBoundarySets.length === 0 || points.length < 3) return [points];
@@ -3211,18 +4287,201 @@ export default function App() {
     });
   };
 
+  const unionClipperPaths = (paths) => {
+    const subject = cleanClipperPaths(paths);
+    if (!subject.length) return [];
+    const clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    const solution = new ClipperLib.Paths();
+    clipper.Execute(
+      ClipperLib.ClipType.ctUnion,
+      solution,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+    return cleanClipperPaths(solution);
+  };
+
+  const differenceClipperPaths = (subjectPaths, clipPaths) => {
+    const subject = cleanClipperPaths(subjectPaths);
+    const clips = cleanClipperPaths(clipPaths);
+    if (!subject.length) return [];
+    if (!clips.length) return subject;
+
+    const clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    clipper.AddPaths(clips, ClipperLib.PolyType.ptClip, true);
+    const solution = new ClipperLib.Paths();
+    clipper.Execute(
+      ClipperLib.ClipType.ctDifference,
+      solution,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+    return cleanClipperPaths(solution);
+  };
+
+  const buildBooleanInteriorContours = (contours) => {
+    const passthrough = contours.filter(contour => !contour.closed || contour.points.length < 3);
+    const orderedClosed = contours
+      .filter(contour => contour.closed && contour.points.length >= 3)
+      .sort((a, b) => (
+        (a.zIndex ?? 0) - (b.zIndex ?? 0)
+        || (a.contourOrder ?? 0) - (b.contourOrder ?? 0)
+      ));
+
+    let accumulatedWhite = [];
+    orderedClosed.forEach(contour => {
+      const paths = unionClipperPaths(orientClipperPaths([toClipperPath(contour.points)]));
+      if (!paths.length) return;
+
+      if (contour.materialColor === 'black' || contour.source === 'knockout') {
+        accumulatedWhite = differenceClipperPaths(accumulatedWhite, paths);
+        return;
+      }
+
+      accumulatedWhite = unionClipperPaths([...accumulatedWhite, ...paths]);
+    });
+
+    const resultContours = accumulatedWhite
+      .map((path, index) => ({ path, points: fromClipperPath(path), index }))
+      .filter(({ points }) => points.length >= 3)
+      .map(({ path, points, index }) => ({
+        points,
+        closed: true,
+        source: 'boolean',
+        fillRule: 'nonzero',
+        layer: `WHITE_RESULT_${index + 1}`,
+        designId: `white-result-${index + 1}`,
+        designName: 'Boolean white result',
+        materialColor: 'white',
+        role: ClipperLib.Clipper.Orientation(path) ? 'outer' : 'hole',
+        depth: ClipperLib.Clipper.Orientation(path) ? 0 : 1,
+        area: Math.abs(signedPolygonArea(points))
+      }));
+
+    return [...resultContours, ...passthrough];
+  };
+
+  const sampleInteriorThreePointArc = (design, segments = 72) => {
+    const p1 = [n(design.x1, 0), n(design.y1, 0)];
+    const pm = [n(design.x2, 0), n(design.y2, 0)];
+    const p2 = [n(design.x3, 0), n(design.y3, 0)];
+    const d = 2 * (
+      p1[0] * (pm[1] - p2[1])
+      + pm[0] * (p2[1] - p1[1])
+      + p2[0] * (p1[1] - pm[1])
+    );
+
+    if (Math.abs(d) < 0.000001) return [p1, p2];
+
+    const p1Sq = p1[0] * p1[0] + p1[1] * p1[1];
+    const pmSq = pm[0] * pm[0] + pm[1] * pm[1];
+    const p2Sq = p2[0] * p2[0] + p2[1] * p2[1];
+    const cx = (
+      p1Sq * (pm[1] - p2[1])
+      + pmSq * (p2[1] - p1[1])
+      + p2Sq * (p1[1] - pm[1])
+    ) / d;
+    const cy = (
+      p1Sq * (p2[0] - pm[0])
+      + pmSq * (p1[0] - p2[0])
+      + p2Sq * (pm[0] - p1[0])
+    ) / d;
+    const radius = Math.hypot(p1[0] - cx, p1[1] - cy);
+    const a1 = Math.atan2(p1[1] - cy, p1[0] - cx);
+    const am = Math.atan2(pm[1] - cy, pm[0] - cx);
+    const a2 = Math.atan2(p2[1] - cy, p2[0] - cx);
+    const twoPi = Math.PI * 2;
+    const ccwEnd = (a2 - a1 + twoPi) % twoPi;
+    const ccwMid = (am - a1 + twoPi) % twoPi;
+    const useCcw = ccwMid <= ccwEnd;
+    const span = useCcw ? ccwEnd : -((a1 - a2 + twoPi) % twoPi);
+    const pointCount = Math.max(8, segments);
+
+    return Array.from({ length: pointCount + 1 }, (_, index) => {
+      const angle = a1 + span * (index / pointCount);
+      return [cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius];
+    });
+  };
+
+  const getInteriorShapeContours = (design) => {
+    const bounds = getInteriorObjectBounds(design);
+    const thickness = Math.max(0.5, n(design.thickness, 8));
+
+    if (design.kind === 'rect') {
+      return [[
+        [bounds.x, bounds.y],
+        [bounds.x + bounds.width, bounds.y],
+        [bounds.x + bounds.width, bounds.y + bounds.height],
+        [bounds.x, bounds.y + bounds.height]
+      ]];
+    }
+
+    if (design.kind === 'ellipse') {
+      return [Array.from({ length: 160 }, (_, index) => {
+        const angle = index * Math.PI * 2 / 160;
+        return [
+          bounds.x + bounds.width / 2 + Math.cos(angle) * bounds.width / 2,
+          bounds.y + bounds.height / 2 + Math.sin(angle) * bounds.height / 2
+        ];
+      })];
+    }
+
+    if (design.kind === 'line') {
+      return offsetOpenStrokeContours(
+        [[n(design.x1, 0), n(design.y1, 0)], [n(design.x2, 0), n(design.y2, 0)]],
+        thickness,
+        'butt'
+      );
+    }
+
+    if (design.kind === 'arc') {
+      return offsetOpenStrokeContours(sampleInteriorThreePointArc(design), thickness, 'butt');
+    }
+
+    return [];
+  };
+
   const collectInteriorDesignContours = () => {
     const contours = [];
     const skipped = [];
     const parser = new DOMParser();
 
-    interiorDesigns.forEach((design, designIndex) => {
-      if (!design.svgText) return;
-      if (design.color !== 'white') return;
+    flattenInteriorDesigns(interiorDesigns).forEach((design, designIndex) => {
       if (design.exportable === false) {
         skipped.push(design.name);
         return;
       }
+
+      if (!isImportedInteriorSvg(design)) {
+        const layer = `SHAPE_${designIndex + 1}`;
+        getInteriorShapeContours(design).forEach(points => {
+          const cleaned = cleanDxfPoints(points, true);
+          if (cleaned.length < 3) return;
+          const contourSets = design.color === 'white'
+            ? intersectClosedContourWithMargin(cleaned)
+            : [cleaned];
+          contourSets.forEach(clipped => {
+            if (clipped.length < 3) return;
+            contours.push({
+              points: clipped,
+              closed: true,
+              source: design.kind === 'line' || design.kind === 'arc' ? 'stroke' : 'fill',
+              fillRule: 'nonzero',
+              layer,
+              designId: design.id,
+              designName: design.name,
+              materialColor: design.color || 'white',
+              zIndex: designIndex,
+              contourOrder: contours.length
+            });
+          });
+        });
+        return;
+      }
+
+      if (!design.svgText) return;
 
       const doc = parser.parseFromString(design.svgText, 'image/svg+xml');
       const svg = doc.querySelector('svg');
@@ -3249,7 +4508,7 @@ export default function App() {
         const placed = cleanDxfPoints(points.map(placePoint), closed);
         if (placed.length < (closed ? 3 : 2)) return;
         const clippedSets = closed
-          ? intersectClosedContourWithMargin(placed)
+          ? (design.color === 'white' ? intersectClosedContourWithMargin(placed) : [placed])
           : (interiorClipEnabled ? [] : [placed]);
 
         clippedSets.forEach(clipped => {
@@ -3261,7 +4520,10 @@ export default function App() {
             fillRule,
             layer,
             designId: design.id,
-            designName: design.name
+            designName: design.name,
+            materialColor: design.color || 'white',
+            zIndex: designIndex,
+            contourOrder: contours.length
           });
         });
       };
@@ -3307,7 +4569,7 @@ export default function App() {
                   if (subpath.closed) {
                     offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true, 'stroke'));
                   } else {
-                    addContour(buildOpenStrokeOutline(points, strokeWidth, style['stroke-linecap']), true, 'stroke');
+                    offsetOpenStrokeContours(points, strokeWidth, style['stroke-linecap']).forEach(outline => addContour(outline, true, 'stroke'));
                   }
                 }
               });
@@ -3350,7 +4612,7 @@ export default function App() {
         } else if ((tag === 'polygon' || tag === 'polyline') && (fillBlack || knockoutFill || strokeBlack)) {
           const points = parseSvgPoints(node.getAttribute('points')).map(point => applyMatrix(matrix, point));
           if (tag === 'polyline' && !fillBlack && strokeBlack) {
-            addContour(buildOpenStrokeOutline(points, strokeWidth, style['stroke-linecap']), true, 'stroke');
+            offsetOpenStrokeContours(points, strokeWidth, style['stroke-linecap']).forEach(outline => addContour(outline, true, 'stroke'));
           } else if (tag === 'polygon' && !fillBlack && strokeBlack) {
             offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true, 'stroke'));
           } else if (knockoutFill) {
@@ -3362,7 +4624,7 @@ export default function App() {
           const p1 = [parseFloat(node.getAttribute('x1')) || 0, parseFloat(node.getAttribute('y1')) || 0];
           const p2 = [parseFloat(node.getAttribute('x2')) || 0, parseFloat(node.getAttribute('y2')) || 0];
           if (strokeBlack) {
-            addContour(buildOpenStrokeOutline([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], strokeWidth, style['stroke-linecap']), true, 'stroke');
+            offsetOpenStrokeContours([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], strokeWidth, style['stroke-linecap']).forEach(outline => addContour(outline, true, 'stroke'));
           }
         }
 
@@ -3379,15 +4641,36 @@ export default function App() {
       ...contour,
       ...(byKey.get(`${contour.designId}-${index}`) || { area: 0, depth: 0, role: contour.closed ? 'outer' : 'open' })
     }));
-    const patternContours = getPatternContours();
+    const patternContours = getPatternContours().map((contour, index) => ({
+      ...contour,
+      materialColor: 'white',
+      zIndex: interiorDesigns.length,
+      contourOrder: contours.length + index
+    }));
+
+    const booleanContours = buildBooleanInteriorContours([...withAnalysis, ...patternContours]);
 
     return {
-      contours: [...withAnalysis, ...patternContours],
+      contours: booleanContours,
       skipped
     };
   };
 
-  const getInteriorExportDiagnostics = (exportData = collectInteriorDesignContours()) => {
+  const getInteriorExportDiagnostics = (exportData = null) => {
+    if (!exportData) {
+      return {
+        designCount: interiorDesigns.length,
+        contourCount: 0,
+        closedCount: 0,
+        openCount: 0,
+        holeCount: 0,
+        expandedStrokeCount: 0,
+        centerlineStrokeCount: 0,
+        skippedCount: interiorDesigns.filter(design => design.exportable === false).length,
+        skipped: []
+      };
+    }
+
     const { contours, skipped } = exportData;
     const closed = contours.filter(contour => contour.closed);
     const open = contours.length - closed.length;
@@ -3408,16 +4691,16 @@ export default function App() {
     };
   };
 
-  const buildInteriorDesignDXFEntities = () => {
-    const { contours } = collectInteriorDesignContours();
+  const buildInteriorDesignDXFEntities = (exportData = collectInteriorDesignContours()) => {
+    const { contours } = exportData;
     return contours
       .sort((a, b) => (a.depth - b.depth) || (b.area - a.area))
       .map(contour => dxfPolylineEntity(contour.points, contour.closed, contour.layer))
       .join('');
   };
 
-  const getInteriorDesignDXFLayers = () => (
-    collectInteriorDesignContours().contours.map(contour => contour.layer)
+  const getInteriorDesignDXFLayers = (exportData = collectInteriorDesignContours()) => (
+    exportData.contours.map(contour => contour.layer)
   );
 
   const segmentBulge = (segment, startLocal, endLocal) => {
@@ -3708,7 +4991,8 @@ export default function App() {
     resetDxfHandles();
 
     let dxf = '';
-    const designLayers = getInteriorDesignDXFLayers();
+    const interiorExportForDownload = collectInteriorDesignContours();
+    const designLayers = getInteriorDesignDXFLayers(interiorExportForDownload);
 
     dxf += dxfLine('0', 'SECTION', '2', 'HEADER');
     dxf += dxfLine('9', '$ACADVER', '1', 'AC1014');
@@ -3720,7 +5004,7 @@ export default function App() {
     dxf += buildDxfBlocksSection();
     dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
     dxf += hasArcTop ? buildArcTopDXFLwPolyline() : buildStraightDXFLwPolyline();
-    dxf += buildInteriorDesignDXFEntities();
+    dxf += buildInteriorDesignDXFEntities(interiorExportForDownload);
     dxf += dxfLine('0', 'ENDSEC');
     dxf += buildDxfObjectsSection();
     dxf += dxfLine('0', 'EOF');
@@ -3851,13 +5135,18 @@ export default function App() {
 
   const currentViewBox = getCurrentViewBox();
   const selectedInteriorDesign = getSelectedInteriorDesign();
+  const selectedInteriorDesignItems = interiorDesigns.filter(design => selectedInteriorDesignIds.includes(design.id));
+  const selectedInteriorBounds = selectedInteriorDesignItems.length > 1
+    ? getInteriorSelectionBounds(selectedInteriorDesignItems)
+    : selectedInteriorDesign ? getInteriorObjectBounds(selectedInteriorDesign) : null;
+  const interiorDraftBounds = getInteriorDraftBounds(interiorShapeDraft);
   const interiorExportData = useMemo(
-    () => collectInteriorDesignContours(),
-    [interiorDesigns]
+    () => (showInteriorExportPreview ? collectInteriorDesignContours() : null),
+    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, interiorClipEnabled, interiorMarginInput]
   );
   const interiorExportDiagnostics = useMemo(
     () => getInteriorExportDiagnostics(interiorExportData),
-    [interiorExportData]
+    [interiorExportData, interiorDesigns]
   );
 
   const openInteriorDesigner = () => {
@@ -3866,15 +5155,117 @@ export default function App() {
     setWorkspaceMode('interior');
   };
 
+  const getInlineSvgRenderData = (svgText) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText || '', 'image/svg+xml');
+    const svg = doc.querySelector('svg');
+    if (!svg || doc.querySelector('parsererror')) return null;
+
+    const serializer = new XMLSerializer();
+    return {
+      rootBox: getSvgRootBox(svg),
+      markup: Array.from(svg.children).map(child => serializer.serializeToString(child)).join('')
+    };
+  };
+
+  const renderInteriorDesignBody = (design, interactiveDesign = null) => {
+    if (isInteriorGroup(design)) {
+      return (design.children || []).map(child => (
+        <g key={child.id} pointerEvents={interactiveDesign ? 'auto' : 'none'}>
+          {renderInteriorDesignBody(child, interactiveDesign)}
+        </g>
+      ));
+    }
+
+    const bounds = getInteriorObjectBounds(design);
+    const x = bounds.x;
+    const y = bounds.y;
+    const itemWidth = bounds.width;
+    const itemHeight = bounds.height;
+    const commonClipPath = interiorClipEnabled && design.color === 'white' ? 'url(#interior-margin-clip)' : undefined;
+    const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
+    const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
+    const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
+    const arcPath = arcPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ');
+    const eventProps = interactiveDesign ? {
+      onMouseDown: (e) => startInteriorDesignDrag(e, interactiveDesign, 'move'),
+      onClick: (e) => selectInteriorDesignFromCanvas(e, interactiveDesign.id)
+    } : {};
+    const cursorStyle = interactiveDesign ? { cursor: interiorDrag?.id === interactiveDesign.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' } : undefined;
+
+    if (isImportedInteriorSvg(design)) {
+      const svgRenderData = getInlineSvgRenderData(design.svgText);
+      if (svgRenderData) {
+        const rootBox = svgRenderData.rootBox;
+        const sx = itemWidth / (rootBox.width || 1);
+        const sy = itemHeight / (rootBox.height || 1);
+        const tx = (x - rootBox.x * sx) * scale;
+        const ty = (y - rootBox.y * sy) * scale;
+
+        return (
+          <g
+            transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
+            clipPath={commonClipPath}
+            pointerEvents="visiblePainted"
+            {...eventProps}
+            style={{
+              ...(cursorStyle || {}),
+              filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
+            }}
+            dangerouslySetInnerHTML={{ __html: svgRenderData.markup }}
+          />
+        );
+      }
+
+      return (
+        <image
+          href={design.href}
+          x={x * scale}
+          y={y * scale}
+          width={itemWidth * scale}
+          height={itemHeight * scale}
+          preserveAspectRatio="none"
+          clipPath={commonClipPath}
+          {...eventProps}
+          style={{
+            ...(cursorStyle || {}),
+            filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
+          }}
+        />
+      );
+    }
+
+    if (design.kind === 'rect') {
+      return <rect x={x * scale} y={y * scale} width={itemWidth * scale} height={itemHeight * scale} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+    }
+
+    if (design.kind === 'ellipse') {
+      return <ellipse cx={(x + itemWidth / 2) * scale} cy={(y + itemHeight / 2) * scale} rx={(itemWidth / 2) * scale} ry={(itemHeight / 2) * scale} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+    }
+
+    if (design.kind === 'line') {
+      return <line x1={n(design.x1, 0) * scale} y1={n(design.y1, 0) * scale} x2={n(design.x2, 0) * scale} y2={n(design.y2, 0) * scale} stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+    }
+
+    if (design.kind === 'arc') {
+      return <path d={arcPath} fill="none" stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" strokeLinejoin="round" clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+    }
+
+    return null;
+  };
+
   if (workspaceMode === 'interior') {
     return (
       <div className="h-screen overflow-hidden bg-slate-100 p-3">
         <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
-          <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center gap-3">
+          <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               <button
                 type="button"
-                onClick={() => setWorkspaceMode('frame')}
+                onClick={() => {
+                  cancelInteriorShapeTool();
+                  setWorkspaceMode('frame');
+                }}
                 className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
               >
                 <ArrowLeft size={16} />
@@ -3882,9 +5273,140 @@ export default function App() {
               </button>
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Interior Designer</h1>
-                <p className="text-xs text-slate-500">{safeWidth} x {safeHeight} mm frame</p>
+                <p className="text-xs text-slate-500">
+                  {activeInteriorShapeTool
+                    ? `${getInteriorShapeName(activeInteriorShapeTool)} tool active`
+                    : `${safeWidth} x ${safeHeight} mm frame`}
+                </p>
               </div>
             </div>
+
+            {selectedInteriorDesign && (
+              <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+                <div className="min-w-0 max-w-40">
+                  <p className="truncate text-xs font-semibold text-slate-700">
+                    {selectedInteriorDesignIds.length > 1 ? `${selectedInteriorDesignIds.length} selected` : selectedInteriorDesign.name}
+                  </p>
+                  <p className={[
+                    'truncate text-[10px] font-medium',
+                    selectedInteriorDesign.exportable === false ? 'text-amber-700' : 'text-emerald-700'
+                  ].join(' ')}>
+                    {selectedInteriorDesign.exportable === false ? 'Needs cleanup' : 'DXF ready'}
+                  </p>
+                </div>
+
+                {[
+                  ['X', 'x'],
+                  ['Y', 'y'],
+                  ['W', 'width'],
+                  ['H', 'height']
+                ].map(([label, field]) => (
+                  <label key={field} className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    {label}
+                    <input
+                      type="number"
+                      value={selectedInteriorBounds?.[field] ?? selectedInteriorDesign[field] ?? ''}
+                      onChange={e => handleInteriorNumberChange(field, e.target.value)}
+                      onBlur={() => handleInteriorNumberBlur(field, field === 'width' || field === 'height' ? 100 : 0)}
+                      className="w-20 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                    />
+                  </label>
+                ))}
+
+                {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc') && (
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    T
+                    <input
+                      type="number"
+                      min="0.5"
+                      value={selectedInteriorDesign.thickness ?? 8}
+                      onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { thickness: e.target.value === '' ? '' : Math.max(0.5, Number(e.target.value)) })}
+                      onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { thickness: Math.max(0.5, n(selectedInteriorDesign.thickness, 8)) })}
+                      className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                    />
+                  </label>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => toggleInteriorAspectLock(selectedInteriorDesign)}
+                  className={[
+                    'inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition',
+                    selectedInteriorDesign.aspectLocked
+                      ? 'border-blue-200 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  ].join(' ')}
+                  title={selectedInteriorDesign.aspectLocked ? 'Unlock proportions' : 'Lock proportions'}
+                >
+                  {selectedInteriorDesign.aspectLocked ? <Lock size={14} /> : <Unlock size={14} />}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={selectedInteriorDesignIds.length < 2}
+                  onClick={groupSelectedInteriorDesigns}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  title="Group selected"
+                >
+                  Group
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedInteriorDesign || (!isInteriorGroup(selectedInteriorDesign) && !isImportedInteriorSvg(selectedInteriorDesign))}
+                  onClick={ungroupSelectedInteriorDesign}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  title="Ungroup selected"
+                >
+                  Ungroup
+                </button>
+
+                <div className="flex items-center rounded-md border border-slate-200 bg-white">
+                  <button
+                    type="button"
+                    onClick={() => moveSelectedInteriorDesignLayer('back')}
+                    className="inline-flex items-center justify-center border-r border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title="Send to back"
+                  >
+                    <ArrowDown size={14} />
+                    <ArrowDown size={10} className="-ml-2 mt-1" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveSelectedInteriorDesignLayer('down')}
+                    className="inline-flex items-center justify-center border-r border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title="Move down one layer"
+                  >
+                    <ArrowDown size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveSelectedInteriorDesignLayer('up')}
+                    className="inline-flex items-center justify-center border-r border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title="Move up one layer"
+                  >
+                    <ArrowUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveSelectedInteriorDesignLayer('front')}
+                    className="inline-flex items-center justify-center px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title="Bring to front"
+                  >
+                    <ArrowUp size={14} />
+                    <ArrowUp size={10} className="-ml-2 -mt-1" />
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={deleteSelectedInteriorDesign}
+                  className="inline-flex items-center justify-center rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 hover:bg-red-100"
+                  title="Delete selected SVG"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="flex-1 min-h-0 p-3 flex gap-3">
@@ -3902,18 +5424,31 @@ export default function App() {
                 viewBox={`${currentViewBox.x} ${currentViewBox.y} ${currentViewBox.width} ${currentViewBox.height}`}
                 className="h-full w-full"
               onWheel={handleViewportWheel}
-              onMouseDown={handleViewportMouseDown}
+              onMouseDown={handleInteriorCanvasMouseDown}
                 onMouseMove={handleInteriorPreviewMouseMove}
                 onMouseUp={() => {
-                  setPanState(null);
-                  setInteriorDrag(null);
+                  finishInteriorInteraction();
+                  finishInteriorSelectionBox();
+                  finishInteriorShapeDraft();
                 }}
                 onMouseLeave={() => {
                   setPanState(null);
                   setInteriorDrag(null);
+                  setInteriorSelectionBox(null);
+                  setIsInteriorPointerOnBody(false);
+                  setIsInteriorPointerOnWhiteSurface(false);
+                  if (interiorShapeDraft?.kind !== 'arc') setInteriorShapeDraft(null);
                 }}
-                onClick={() => setSelectedInteriorDesignId(null)}
-                style={{ cursor: panState ? 'grabbing' : 'default' }}
+                onClick={handleInteriorCanvasClick}
+                style={{
+                  cursor: panState
+                    ? 'grabbing'
+                    : activeInteriorShapeTool
+                      ? isInteriorPointerOnBody ? 'crosshair' : 'default'
+                      : (interiorSelectionBox || isInteriorPointerOnWhiteSurface)
+                      ? 'crosshair'
+                      : 'default'
+                }}
               >
                 <defs>
                   <clipPath id="interior-margin-clip">
@@ -3940,34 +5475,90 @@ export default function App() {
                 )}
 
                 {interiorDesigns.map((design) => {
-                  const selected = design.id === selectedInteriorDesignId;
-                  const x = n(design.x, 0);
-                  const y = n(design.y, 0);
-                  const itemWidth = Math.max(10, n(design.width, 10));
-                  const itemHeight = Math.max(10, n(design.height, 10));
+                  const selected = selectedInteriorDesignIds.includes(design.id) || design.id === selectedInteriorDesignId;
+                  const bounds = getInteriorObjectBounds(design);
+                  const x = bounds.x;
+                  const y = bounds.y;
+                  const itemWidth = bounds.width;
+                  const itemHeight = bounds.height;
+                  const commonClipPath = interiorClipEnabled && design.color === 'white' ? 'url(#interior-margin-clip)' : undefined;
+                  const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
+                  const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
+                  const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
+                  const arcPath = arcPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ');
 
                   return (
-                    <g key={design.id}>
-                      <image
-                        href={design.href}
-                        x={x * scale}
-                        y={y * scale}
-                        width={itemWidth * scale}
-                        height={itemHeight * scale}
-                        preserveAspectRatio="none"
-                        clipPath={interiorClipEnabled && design.color === 'white' ? 'url(#interior-margin-clip)' : undefined}
-                        onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedInteriorDesignId(design.id);
-                        }}
-                        style={{
-                          cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move',
-                          filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
-                        }}
-                      />
+                    <g key={design.id} pointerEvents={activeInteriorShapeTool ? 'none' : 'auto'}>
+                      {isInteriorGroup(design) && (
+                        <g>
+                          {renderInteriorDesignBody(design, design)}
+                        </g>
+                      )}
 
-                      {selected && (
+                      {isImportedInteriorSvg(design) && (
+                        renderInteriorDesignBody(design, design)
+                      )}
+
+                      {design.kind === 'rect' && (
+                        <rect
+                          x={x * scale}
+                          y={y * scale}
+                          width={itemWidth * scale}
+                          height={itemHeight * scale}
+                          fill={shapeFill}
+                          clipPath={commonClipPath}
+                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                        />
+                      )}
+
+                      {design.kind === 'ellipse' && (
+                        <ellipse
+                          cx={(x + itemWidth / 2) * scale}
+                          cy={(y + itemHeight / 2) * scale}
+                          rx={(itemWidth / 2) * scale}
+                          ry={(itemHeight / 2) * scale}
+                          fill={shapeFill}
+                          clipPath={commonClipPath}
+                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                        />
+                      )}
+
+                      {design.kind === 'line' && (
+                        <line
+                          x1={n(design.x1, 0) * scale}
+                          y1={n(design.y1, 0) * scale}
+                          x2={n(design.x2, 0) * scale}
+                          y2={n(design.y2, 0) * scale}
+                          stroke={shapeFill}
+                          strokeWidth={strokeWidth}
+                          strokeLinecap="butt"
+                          clipPath={commonClipPath}
+                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                        />
+                      )}
+
+                      {design.kind === 'arc' && (
+                        <path
+                          d={arcPath}
+                          fill="none"
+                          stroke={shapeFill}
+                          strokeWidth={strokeWidth}
+                          strokeLinecap="butt"
+                          strokeLinejoin="round"
+                          clipPath={commonClipPath}
+                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                        />
+                      )}
+
+                      {selected && selectedInteriorDesignIds.length <= 1 && (
                         <g>
                           <rect
                             x={x * scale}
@@ -3991,7 +5582,27 @@ export default function App() {
                               stroke="white"
                               strokeWidth={1 / viewZoom}
                               onMouseDown={(e) => startInteriorDesignDrag(e, design, 'resize', handle.id)}
-                              onClick={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (activeInteriorShapeTool) return;
+                              }}
+                              style={{ cursor: handle.cursor }}
+                            />
+                          ))}
+                          {getInteriorPointHandles(design).map(handle => (
+                            <circle
+                              key={handle.id}
+                              cx={handle.x * scale}
+                              cy={handle.y * scale}
+                              r={6 / viewZoom}
+                              fill="#2563eb"
+                              stroke="white"
+                              strokeWidth={1.5 / viewZoom}
+                              onMouseDown={(e) => startInteriorDesignDrag(e, design, 'point', handle.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (activeInteriorShapeTool) return;
+                              }}
                               style={{ cursor: handle.cursor }}
                             />
                           ))}
@@ -4000,6 +5611,140 @@ export default function App() {
                     </g>
                   );
                 })}
+
+                {selectedInteriorDesignItems.length > 1 && selectedInteriorBounds && (
+                  <g>
+                    <rect
+                      x={selectedInteriorBounds.x * scale}
+                      y={selectedInteriorBounds.y * scale}
+                      width={selectedInteriorBounds.width * scale}
+                      height={selectedInteriorBounds.height * scale}
+                      fill="none"
+                      stroke="#2563eb"
+                      strokeWidth={1.5 / viewZoom}
+                      strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
+                      pointerEvents="none"
+                    />
+                    {getInteriorDesignHandles(selectedInteriorBounds).map(handle => (
+                      <rect
+                        key={`multi-${handle.id}`}
+                        x={handle.x * scale - 5 / viewZoom}
+                        y={handle.y * scale - 5 / viewZoom}
+                        width={10 / viewZoom}
+                        height={10 / viewZoom}
+                        fill="#2563eb"
+                        stroke="white"
+                        strokeWidth={1 / viewZoom}
+                        onMouseDown={(e) => startInteriorSelectionTransform(e, 'multi-resize', handle.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ cursor: handle.cursor }}
+                      />
+                    ))}
+                  </g>
+                )}
+
+                {interiorShapeDraft && interiorDraftBounds && (
+                  <g pointerEvents="none">
+                    {interiorShapeDraft.kind === 'rect' && (
+                      <rect
+                        x={interiorDraftBounds.x * scale}
+                        y={interiorDraftBounds.y * scale}
+                        width={interiorDraftBounds.width * scale}
+                        height={interiorDraftBounds.height * scale}
+                        fill="#ffffff"
+                        opacity="0.75"
+                        stroke="#2563eb"
+                        strokeWidth={1.5 / viewZoom}
+                        strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
+                      />
+                    )}
+
+                    {interiorShapeDraft.kind === 'ellipse' && (
+                      <ellipse
+                        cx={(interiorDraftBounds.x + interiorDraftBounds.width / 2) * scale}
+                        cy={(interiorDraftBounds.y + interiorDraftBounds.height / 2) * scale}
+                        rx={(interiorDraftBounds.width / 2) * scale}
+                        ry={(interiorDraftBounds.height / 2) * scale}
+                        fill="#ffffff"
+                        opacity="0.75"
+                        stroke="#2563eb"
+                        strokeWidth={1.5 / viewZoom}
+                        strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
+                      />
+                    )}
+
+                    {interiorShapeDraft.kind === 'line' && (
+                      <line
+                        x1={interiorShapeDraft.x1 * scale}
+                        y1={interiorShapeDraft.y1 * scale}
+                        x2={interiorShapeDraft.x2 * scale}
+                        y2={interiorShapeDraft.y2 * scale}
+                        stroke="#ffffff"
+                        strokeWidth={8 * scale}
+                        strokeLinecap="butt"
+                        opacity="0.8"
+                      />
+                    )}
+
+                    {interiorShapeDraft.kind === 'arc' && interiorShapeDraft.points.length > 0 && (
+                      <>
+                        {(() => {
+                          const previewPoints = interiorShapeDraft.preview
+                            ? [...interiorShapeDraft.points, interiorShapeDraft.preview]
+                            : interiorShapeDraft.points;
+                          const arcPreview = previewPoints.length >= 3
+                            ? sampleInteriorThreePointArc({
+                              x1: previewPoints[0][0],
+                              y1: previewPoints[0][1],
+                              x2: previewPoints[2][0],
+                              y2: previewPoints[2][1],
+                              x3: previewPoints[1][0],
+                              y3: previewPoints[1][1]
+                            })
+                            : previewPoints;
+                          const path = arcPreview.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ');
+                          return (
+                            <path
+                              d={path}
+                              fill="none"
+                              stroke="#ffffff"
+                              strokeWidth={8 * scale}
+                              strokeLinecap="butt"
+                              strokeLinejoin="round"
+                              opacity="0.8"
+                            />
+                          );
+                        })()}
+                        {interiorShapeDraft.points.map((point, index) => (
+                          <circle
+                            key={`draft-arc-point-${index}`}
+                            cx={point[0] * scale}
+                            cy={point[1] * scale}
+                            r={5 / viewZoom}
+                            fill="#2563eb"
+                            stroke="white"
+                            strokeWidth={1 / viewZoom}
+                          />
+                        ))}
+                      </>
+                    )}
+                  </g>
+                )}
+
+                {interiorSelectionBox && (
+                  <rect
+                    x={Math.min(interiorSelectionBox.x1, interiorSelectionBox.x2) * scale}
+                    y={Math.min(interiorSelectionBox.y1, interiorSelectionBox.y2) * scale}
+                    width={Math.abs(interiorSelectionBox.x2 - interiorSelectionBox.x1) * scale}
+                    height={Math.abs(interiorSelectionBox.y2 - interiorSelectionBox.y1) * scale}
+                    fill="#2563eb"
+                    fillOpacity="0.08"
+                    stroke="#2563eb"
+                    strokeWidth={1.5 / viewZoom}
+                    strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
+                    pointerEvents="none"
+                  />
+                )}
 
                 {patternEnabled && (
                   <g pointerEvents="none">
@@ -4015,7 +5760,7 @@ export default function App() {
 
                 {showInteriorExportPreview && (
                   <g pointerEvents="none">
-                    {interiorExportData.contours.map((contour, index) => {
+                    {(interiorExportData?.contours || []).map((contour, index) => {
                       const color = contour.role === 'hole'
                         ? '#f59e0b'
                         : contour.source === 'stroke'
@@ -4040,7 +5785,7 @@ export default function App() {
               </svg>
 
               <details
-                className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
+                className="absolute left-3 top-3 z-20 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
                 onWheel={(e) => e.stopPropagation()}
@@ -4074,7 +5819,7 @@ export default function App() {
               </details>
 
               <details
-                className="absolute left-3 top-24 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
+                className="absolute left-32 top-3 z-20 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
                 onWheel={(e) => e.stopPropagation()}
@@ -4156,7 +5901,11 @@ export default function App() {
                         key={value}
                         type="button"
                         disabled={!selectedInteriorDesign}
-                        onClick={() => selectedInteriorDesign && updateInteriorDesign(selectedInteriorDesign.id, { color: value })}
+                        onClick={() => {
+                          const ids = selectedInteriorDesignIds.length ? selectedInteriorDesignIds : [selectedInteriorDesign?.id].filter(Boolean);
+                          if (!ids.length) return;
+                          applyInteriorDesigns(prev => prev.map(item => ids.includes(item.id) ? applyInteriorColor(item, value) : item));
+                        }}
                         className={[
                           'flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs font-medium transition',
                           selected
@@ -4179,7 +5928,9 @@ export default function App() {
                 <Wrench size={18} className="text-slate-700" />
                 <div>
                   <h2 className="text-sm font-semibold text-slate-800">Design Tools</h2>
-                  <p className="text-[11px] text-slate-500">No tool selected</p>
+                  <p className="text-[11px] text-slate-500">
+                    {activeInteriorShapeTool ? `${getInteriorShapeName(activeInteriorShapeTool)} active` : 'No tool selected'}
+                  </p>
                 </div>
               </div>
 
@@ -4191,6 +5942,41 @@ export default function App() {
                   onChange={handleInteriorDesignFileChange}
                   className="hidden"
                 />
+                <div className="rounded-lg border border-slate-200 bg-white p-2">
+                  <p className="mb-2 text-xs font-semibold text-slate-700">Draw shapes</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      ['rect', Square, 'Rectangle'],
+                      ['ellipse', Circle, 'Ellipse'],
+                      ['line', Minus, 'Line'],
+                      ['arc', DraftingCompass, '3-point arc']
+                    ].map(([kind, Icon, label]) => (
+                      <button
+                        key={kind}
+                        type="button"
+                        onClick={() => selectInteriorShapeTool(kind)}
+                        className={[
+                          'flex items-center gap-2 rounded-md border px-2 py-2 text-xs font-medium transition',
+                          activeInteriorShapeTool === kind
+                            ? 'border-blue-400 bg-blue-50 text-blue-700'
+                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-white'
+                        ].join(' ')}
+                      >
+                        <Icon size={15} />
+                        <span className="truncate">{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {activeInteriorShapeTool && (
+                    <button
+                      type="button"
+                      onClick={cancelInteriorShapeTool}
+                      className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                    >
+                      Cancel drawing
+                    </button>
+                  )}
+                </div>
                 <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
                   <Type size={17} />
                   <span className="flex-1 text-left">Text</span>
@@ -4267,59 +6053,14 @@ export default function App() {
                       <p><span className="font-semibold text-amber-600">Amber dashed</span>: detected holes</p>
                     </div>
                   )}
-                </div>
-              )}
-
-              {selectedInteriorDesign && (
-                <div className="mt-3 rounded-lg bg-white border p-3 text-xs text-slate-600">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="min-w-0">
-                      <p className="font-semibold text-slate-700 truncate">{selectedInteriorDesign.name}</p>
-                      <p className={[
-                        'text-[11px] font-medium',
-                        selectedInteriorDesign.exportable === false ? 'text-amber-700' : 'text-emerald-700'
-                      ].join(' ')}>
-                        {selectedInteriorDesign.exportable === false ? 'Needs cleanup before DXF export' : 'DXF export ready'}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={deleteSelectedInteriorDesign}
-                      className="inline-flex items-center justify-center rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 hover:bg-red-100"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-
-                  {selectedInteriorDesign.warnings?.length > 0 && (
-                    <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] leading-relaxed text-amber-800">
-                      {selectedInteriorDesign.warnings.map((warning, index) => (
-                        <p key={index}>{warning}</p>
-                      ))}
-                    </div>
+                  {!showInteriorExportPreview && interiorExportDiagnostics.designCount > 0 && (
+                    <p className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
+                      Contour details are calculated when previewing or exporting.
+                    </p>
                   )}
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      ['X', 'x'],
-                      ['Y', 'y'],
-                      ['Width', 'width'],
-                      ['Height', 'height']
-                    ].map(([label, field]) => (
-                      <div key={field}>
-                        <label className="text-[11px] text-slate-500">{label}</label>
-                        <input
-                          type="number"
-                          value={selectedInteriorDesign[field]}
-                          onChange={e => handleInteriorNumberChange(field, e.target.value)}
-                          onBlur={() => handleInteriorNumberBlur(field, field === 'width' || field === 'height' ? 100 : 0)}
-                          className="w-full mt-1 p-1.5 border rounded-md"
-                        />
-                      </div>
-                    ))}
-                  </div>
                 </div>
               )}
+
             </div>
           </div>
         </div>
