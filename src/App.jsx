@@ -71,12 +71,15 @@ export default function App() {
   const [interiorDesigns, setInteriorDesigns] = useState([]);
   const [selectedInteriorDesignId, setSelectedInteriorDesignId] = useState(null);
   const [selectedInteriorDesignIds, setSelectedInteriorDesignIds] = useState([]);
+  const [selectedInteriorPanelIds, setSelectedInteriorPanelIds] = useState([]);
   const [interiorDrag, setInteriorDrag] = useState(null);
   const [interiorSelectionBox, setInteriorSelectionBox] = useState(null);
   const [isInteriorPointerOnBody, setIsInteriorPointerOnBody] = useState(false);
   const [isInteriorPointerOnWhiteSurface, setIsInteriorPointerOnWhiteSurface] = useState(false);
   const [activeInteriorShapeTool, setActiveInteriorShapeTool] = useState(null);
   const [interiorShapeDraft, setInteriorShapeDraft] = useState(null);
+  const [positionDistanceInputs, setPositionDistanceInputs] = useState({ left: '', right: '', top: '', bottom: '' });
+  const [interiorPositionMessage, setInteriorPositionMessage] = useState('');
   const [showInteriorExportPreview, setShowInteriorExportPreview] = useState(false);
   const [interiorClipEnabled, setInteriorClipEnabled] = useState(false);
   const [interiorMarginInput, setInteriorMarginInput] = useState(40);
@@ -111,6 +114,7 @@ export default function App() {
   const interiorMousePointRef = useRef(null);
   const interiorSelectionJustFinishedRef = useRef(false);
   const interiorSuppressNextObjectClickRef = useRef(false);
+  const positionMessageTimeoutRef = useRef(null);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -126,6 +130,15 @@ export default function App() {
   };
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+  const interiorFontOptions = [
+    { label: 'Arial', value: 'Arial, sans-serif' },
+    { label: 'Impact', value: 'Impact, Haettenschweiler, sans-serif' },
+    { label: 'Times New Roman', value: '"Times New Roman", Times, serif' },
+    { label: 'Georgia', value: 'Georgia, serif' },
+    { label: 'Verdana', value: 'Verdana, Geneva, sans-serif' },
+    { label: 'Courier New', value: '"Courier New", Courier, monospace' }
+  ];
 
   const cloneInteriorDesigns = (designs) => designs.map(design => ({ ...design }));
 
@@ -215,6 +228,14 @@ export default function App() {
     applyInteriorDesigns(prev => [...prev, ...nextDesigns], { selectedId: nextDesigns[nextDesigns.length - 1].id });
     setSelectedInteriorDesignIds(nextDesigns.map(design => design.id));
     interiorClipboardRef.current = nextDesigns.map(design => ({ ...design }));
+  };
+
+  const showInteriorPositionMessage = (message) => {
+    setInteriorPositionMessage(message);
+    window.clearTimeout(positionMessageTimeoutRef.current);
+    positionMessageTimeoutRef.current = window.setTimeout(() => {
+      setInteriorPositionMessage('');
+    }, 2400);
   };
 
   const isTextEditingTarget = (target) => {
@@ -422,7 +443,7 @@ export default function App() {
         return;
       }
 
-      if (e.key.toLowerCase() === 'm') {
+      if (!isTextEditingTarget(e.target) && e.key.toLowerCase() === 'm') {
         setActiveTool(prev => {
           if (prev === 'measure') {
             setMeasurePoints([]);
@@ -436,7 +457,7 @@ export default function App() {
         });
       }
 
-      if (e.key.toLowerCase() === 'a') {
+      if (!isTextEditingTarget(e.target) && e.key.toLowerCase() === 'a') {
         setActiveTool(prev => {
           setMeasurePoints([]);
           setHoverSnap(null);
@@ -451,7 +472,7 @@ export default function App() {
         setInteriorShapeDraft(null);
       }
 
-      if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (!isTextEditingTarget(e.target) && (e.key === 'Delete' || e.key === 'Backspace')) {
         setMeasurements(prev => prev.filter(m => !m.selected));
         setDraggingMeasurement(null);
       }
@@ -476,6 +497,7 @@ export default function App() {
     setMeasurements([]);
     setHoverSnap(null);
     setDraggingMeasurement(null);
+    setSelectedInteriorPanelIds([]);
   }, [
     width,
     height,
@@ -1830,7 +1852,7 @@ export default function App() {
   useEffect(() => {
     const handleInteriorKeyDown = (e) => {
       if (workspaceMode !== 'interior') return;
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedInteriorDesignId) {
+      if (!isTextEditingTarget(e.target) && (e.key === 'Delete' || e.key === 'Backspace') && selectedInteriorDesignId) {
         e.preventDefault();
         deleteSelectedInteriorDesign();
       }
@@ -2373,7 +2395,8 @@ export default function App() {
     rect: 'Rectangle',
     ellipse: 'Ellipse',
     line: 'Line',
-    arc: '3-point arc'
+    arc: '3-point arc',
+    text: 'Text'
   }[kind] || 'Shape');
 
   const createInteriorShapeFromDraft = (draft) => {
@@ -2385,11 +2408,32 @@ export default function App() {
       color: 'white',
       exportable: true,
       warnings: [],
-      aspectLocked: draft.kind === 'rect' || draft.kind === 'ellipse',
-      aspectRatio: draft.kind === 'rect' || draft.kind === 'ellipse'
+      aspectLocked: draft.kind === 'rect' || draft.kind === 'ellipse' || draft.kind === 'text',
+      aspectRatio: draft.kind === 'rect' || draft.kind === 'ellipse' || draft.kind === 'text'
         ? Math.max(10, Math.abs(draft.x2 - draft.x1)) / Math.max(10, Math.abs(draft.y2 - draft.y1))
         : 1
     };
+
+    if (draft.kind === 'text') {
+      const x = Math.min(draft.x1, draft.x2);
+      const y = Math.min(draft.y1, draft.y2);
+      const itemWidth = Math.max(10, Math.abs(draft.x2 - draft.x1));
+      const itemHeight = Math.max(10, Math.abs(draft.y2 - draft.y1));
+      return {
+        ...base,
+        x,
+        y,
+        width: itemWidth,
+        height: itemHeight,
+        text: 'Text',
+        fontSize: itemHeight,
+        fontFamily: 'Arial, sans-serif',
+        letterSpacing: 0,
+        exportable: false,
+        warnings: ['Text is visual only for now. Convert text to paths before DXF export.'],
+        aspectRatio: itemWidth / itemHeight
+      };
+    }
 
     if (draft.kind === 'rect' || draft.kind === 'ellipse') {
       const x = Math.min(draft.x1, draft.x2);
@@ -2435,15 +2479,16 @@ export default function App() {
     applyInteriorDesigns(prev => [...prev, shape], { selectedId: shape.id });
   };
 
-  const setInteriorSelection = (ids) => {
+  const setInteriorSelection = (ids, { preservePanels = false } = {}) => {
     const cleanIds = Array.from(new Set(ids.filter(Boolean)));
     setSelectedInteriorDesignIds(cleanIds);
     setSelectedInteriorDesignId(cleanIds[cleanIds.length - 1] || null);
+    if (!preservePanels) setSelectedInteriorPanelIds([]);
   };
 
   const toggleInteriorSelection = (id) => {
     const current = selectedInteriorDesignIdsRef.current;
-    setInteriorSelection(current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
+    setInteriorSelection(current.includes(id) ? current.filter(item => item !== id) : [...current, id], { preservePanels: true });
   };
 
   const getSvgChildBBox = (svg, child) => {
@@ -2716,7 +2761,7 @@ export default function App() {
         && py <= bounds.y + bounds.height;
       if (!inBounds) return false;
 
-      if (design.kind === 'rect' || isImportedInteriorSvg(design)) return true;
+      if (design.kind === 'rect' || design.kind === 'text' || isImportedInteriorSvg(design)) return true;
 
       if (design.kind === 'ellipse') {
         const rx = bounds.width / 2;
@@ -2732,6 +2777,196 @@ export default function App() {
 
       return false;
     });
+  };
+
+  const getInteriorPanelReferences = () => (
+    getCleanMainBodyPanelVertexSets().map((panel, index) => {
+      const points = transformPoints(panel);
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      return {
+        id: `panel-${index}`,
+        name: hasPanelSplit ? `${index === 0 ? 'Left' : 'Right'} panel` : 'Panel',
+        points,
+        bounds: {
+          x: Math.min(...xs),
+          y: Math.min(...ys),
+          width: Math.max(0, Math.max(...xs) - Math.min(...xs)),
+          height: Math.max(0, Math.max(...ys) - Math.min(...ys))
+        }
+      };
+    })
+  );
+
+  const getInteriorPanelSelectionBounds = (panelIds = selectedInteriorPanelIds) => {
+    const panels = getInteriorPanelReferences();
+    const activePanels = panelIds.length
+      ? panels.filter(panel => panelIds.includes(panel.id))
+      : (!hasPanelSplit && panels.length === 1 ? panels : []);
+
+    if (!activePanels.length) return null;
+
+    const minX = Math.min(...activePanels.map(panel => panel.bounds.x));
+    const minY = Math.min(...activePanels.map(panel => panel.bounds.y));
+    const maxX = Math.max(...activePanels.map(panel => panel.bounds.x + panel.bounds.width));
+    const maxY = Math.max(...activePanels.map(panel => panel.bounds.y + panel.bounds.height));
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  };
+
+  const selectInteriorPanelFromCanvas = (e, panelId) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (activeInteriorShapeTool) return;
+
+    setInteriorSelectionBox(null);
+
+    if (e.shiftKey) {
+      setSelectedInteriorPanelIds(prev => (
+        prev.includes(panelId) ? prev.filter(id => id !== panelId) : [...prev, panelId]
+      ));
+      return;
+    }
+
+    setSelectedInteriorPanelIds([panelId]);
+    setInteriorSelection([], { preservePanels: true });
+  };
+
+  const getSelectedInteriorMovableDesigns = () => (
+    interiorDesignsRef.current.filter(design => selectedInteriorDesignIdsRef.current.includes(design.id))
+  );
+
+  const moveSelectedInteriorDesignsBy = (dx, dy) => {
+    const selected = getSelectedInteriorMovableDesigns();
+    if (!selected.length) {
+      showInteriorPositionMessage('Select a design first.');
+      return false;
+    }
+
+    applyInteriorDesigns(prev => prev.map(item => {
+      if (!selectedInteriorDesignIdsRef.current.includes(item.id)) return item;
+      const bounds = getInteriorObjectBounds(item);
+      return {
+        ...item,
+        ...applyInteriorObjectBounds(item, {
+          x: bounds.x + dx,
+          y: bounds.y + dy,
+          width: bounds.width,
+          height: bounds.height
+        })
+      };
+    }), { history: true });
+    return true;
+  };
+
+  const getInteriorPositionReferenceBounds = () => {
+    const referenceBounds = getInteriorPanelSelectionBounds();
+    if (referenceBounds) return referenceBounds;
+    showInteriorPositionMessage(hasPanelSplit ? 'Select a panel reference.' : 'Select a design first.');
+    return null;
+  };
+
+  const formatPositionDistance = (value) => {
+    const rounded = Math.round(value * 1000) / 1000;
+    return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, '').replace(/\.$/, '');
+  };
+
+  useEffect(() => {
+    const selected = interiorDesigns.filter(design => selectedInteriorDesignIds.includes(design.id));
+    const reference = getInteriorPanelSelectionBounds(selectedInteriorPanelIds);
+
+    if (!selected.length || !reference) {
+      setPositionDistanceInputs(prev => (
+        prev.left === '' && prev.right === '' && prev.top === '' && prev.bottom === ''
+          ? prev
+          : { left: '', right: '', top: '', bottom: '' }
+      ));
+      return;
+    }
+
+    const bounds = getInteriorSelectionBounds(selected);
+    const next = {
+      left: formatPositionDistance(bounds.x - reference.x),
+      right: formatPositionDistance(reference.x + reference.width - (bounds.x + bounds.width)),
+      top: formatPositionDistance(bounds.y - reference.y),
+      bottom: formatPositionDistance(reference.y + reference.height - (bounds.y + bounds.height))
+    };
+
+    setPositionDistanceInputs(prev => (
+      prev.left === next.left && prev.right === next.right && prev.top === next.top && prev.bottom === next.bottom
+        ? prev
+        : next
+    ));
+  }, [
+    interiorDesigns,
+    selectedInteriorDesignIds,
+    selectedInteriorPanelIds,
+    width,
+    height,
+    leftHeight,
+    middlePosition,
+    middleHeight,
+    topShape,
+    arcRise,
+    transitionHeight,
+    crownWidth,
+    removeSideHorizontalConstraint,
+    cornerAngle,
+    splitPanelEnabled,
+    splitPositionInput,
+    splitGapInput,
+    topEarDepthInput,
+    rightEarDepthInput,
+    bottomEarDepthInput,
+    leftEarDepthInput
+  ]);
+
+  const alignInteriorSelectionToPanel = (mode) => {
+    const selected = getSelectedInteriorMovableDesigns();
+    if (!selected.length) {
+      showInteriorPositionMessage('Select a design first.');
+      return;
+    }
+
+    const reference = getInteriorPositionReferenceBounds();
+    if (!reference) return;
+
+    const selectedBounds = getInteriorSelectionBounds(selected);
+    let dx = 0;
+    let dy = 0;
+
+    if (mode === 'center-x') dx = reference.x + reference.width / 2 - (selectedBounds.x + selectedBounds.width / 2);
+    if (mode === 'center-y') dy = reference.y + reference.height / 2 - (selectedBounds.y + selectedBounds.height / 2);
+    if (mode === 'left') dx = reference.x - selectedBounds.x;
+    if (mode === 'right') dx = reference.x + reference.width - (selectedBounds.x + selectedBounds.width);
+    if (mode === 'top') dy = reference.y - selectedBounds.y;
+    if (mode === 'bottom') dy = reference.y + reference.height - (selectedBounds.y + selectedBounds.height);
+
+    moveSelectedInteriorDesignsBy(dx, dy);
+  };
+
+  const applyInteriorDistanceToPanel = (side, rawValue) => {
+    const value = n(rawValue, NaN);
+    if (!Number.isFinite(value)) return;
+
+    const selected = getSelectedInteriorMovableDesigns();
+    if (!selected.length) {
+      showInteriorPositionMessage('Select a design first.');
+      return;
+    }
+
+    const reference = getInteriorPositionReferenceBounds();
+    if (!reference) return;
+
+    const selectedBounds = getInteriorSelectionBounds(selected);
+    let dx = 0;
+    let dy = 0;
+
+    if (side === 'left') dx = reference.x + value - selectedBounds.x;
+    if (side === 'right') dx = reference.x + reference.width - value - (selectedBounds.x + selectedBounds.width);
+    if (side === 'top') dy = reference.y + value - selectedBounds.y;
+    if (side === 'bottom') dy = reference.y + reference.height - value - (selectedBounds.y + selectedBounds.height);
+
+    moveSelectedInteriorDesignsBy(dx, dy);
   };
 
   const handleInteriorCanvasMouseDown = (e) => {
@@ -4984,7 +5219,7 @@ export default function App() {
     const blockedDesigns = interiorDesigns.filter(design => design.exportable === false);
     if (blockedDesigns.length > 0) {
       const names = blockedDesigns.map(design => design.name).join(', ');
-      window.alert(`Some imported SVG designs cannot be exported cleanly yet: ${names}. Remove them or import SVGs made only from paths/shapes before exporting DXF.`);
+      window.alert(`Some designs cannot be exported cleanly yet: ${names}. Remove or convert them before exporting DXF.`);
       return;
     }
 
@@ -5139,6 +5374,7 @@ export default function App() {
   const selectedInteriorBounds = selectedInteriorDesignItems.length > 1
     ? getInteriorSelectionBounds(selectedInteriorDesignItems)
     : selectedInteriorDesign ? getInteriorObjectBounds(selectedInteriorDesign) : null;
+  const interiorPanelReferences = getInteriorPanelReferences();
   const interiorDraftBounds = getInteriorDraftBounds(interiorShapeDraft);
   const interiorExportData = useMemo(
     () => (showInteriorExportPreview ? collectInteriorDesignContours() : null),
@@ -5166,6 +5402,41 @@ export default function App() {
       rootBox: getSvgRootBox(svg),
       markup: Array.from(svg.children).map(child => serializer.serializeToString(child)).join('')
     };
+  };
+
+  const getMeasuredTextBox = (text, fontFamily = 'Arial, sans-serif', letterSpacing = 0) => {
+    const safeText = text || 'Text';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const textNode = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    svg.style.position = 'fixed';
+    svg.style.left = '-10000px';
+    svg.style.top = '-10000px';
+    svg.style.width = '1px';
+    svg.style.height = '1px';
+    svg.style.opacity = '0';
+    svg.style.pointerEvents = 'none';
+    svg.setAttribute('aria-hidden', 'true');
+    textNode.setAttribute('x', '0');
+    textNode.setAttribute('y', '0');
+    textNode.setAttribute('font-size', '100');
+    textNode.setAttribute('font-family', fontFamily);
+    textNode.setAttribute('letter-spacing', String(letterSpacing));
+    textNode.textContent = safeText;
+    svg.appendChild(textNode);
+    document.body.appendChild(svg);
+
+    try {
+      const box = textNode.getBBox();
+      if (box.width > 0.001 && box.height > 0.001) {
+        return { x: box.x, y: box.y, width: box.width, height: box.height };
+      }
+    } catch {
+      // Fall through to a conservative font box if the browser cannot measure.
+    } finally {
+      document.body.removeChild(svg);
+    }
+
+    return { x: 0, y: -80, width: Math.max(60, safeText.length * 55), height: 100 };
   };
 
   const renderInteriorDesignBody = (design, interactiveDesign = null) => {
@@ -5203,17 +5474,18 @@ export default function App() {
         const ty = (y - rootBox.y * sy) * scale;
 
         return (
-          <g
-            transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
-            clipPath={commonClipPath}
-            pointerEvents="visiblePainted"
-            {...eventProps}
-            style={{
-              ...(cursorStyle || {}),
-              filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
-            }}
-            dangerouslySetInnerHTML={{ __html: svgRenderData.markup }}
-          />
+          <g clipPath={commonClipPath}>
+            <g
+              transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
+              pointerEvents="visiblePainted"
+              {...eventProps}
+              style={{
+                ...(cursorStyle || {}),
+                filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
+              }}
+              dangerouslySetInnerHTML={{ __html: svgRenderData.markup }}
+            />
+          </g>
         );
       }
 
@@ -5251,6 +5523,42 @@ export default function App() {
       return <path d={arcPath} fill="none" stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" strokeLinejoin="round" clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
     }
 
+    if (design.kind === 'text') {
+      const textValue = design.text ?? '';
+      const rawLetterSpacing = n(design.letterSpacing, 0);
+      const measurementLetterSpacing = rawLetterSpacing * (100 / Math.max(1, itemHeight));
+      const textBox = getMeasuredTextBox(textValue, design.fontFamily || 'Arial, sans-serif', measurementLetterSpacing);
+      const textScaleX = itemWidth / Math.max(0.001, textBox.width);
+      const textScaleY = itemHeight / Math.max(0.001, textBox.height);
+      const textTranslateX = (x - textBox.x * textScaleX) * scale;
+      const textTranslateY = (y - textBox.y * textScaleY) * scale;
+      return (
+        <g clipPath={commonClipPath} {...eventProps} style={cursorStyle}>
+          <rect
+            x={x * scale}
+            y={y * scale}
+            width={itemWidth * scale}
+            height={itemHeight * scale}
+            fill="transparent"
+          />
+          {textValue && (
+            <text
+              x="0"
+              y="0"
+              fill={shapeFill}
+              fontSize="100"
+              fontFamily={design.fontFamily || 'Arial, sans-serif'}
+              letterSpacing={measurementLetterSpacing}
+              transform={`translate(${textTranslateX} ${textTranslateY}) scale(${textScaleX * scale} ${textScaleY * scale})`}
+              pointerEvents="none"
+            >
+              {textValue}
+            </text>
+          )}
+        </g>
+      );
+    }
+
     return null;
   };
 
@@ -5264,6 +5572,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   cancelInteriorShapeTool();
+                  setSelectedInteriorPanelIds([]);
                   setWorkspaceMode('frame');
                 }}
                 className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
@@ -5281,8 +5590,82 @@ export default function App() {
               </div>
             </div>
 
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+              <details
+                className="relative"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <summary className="list-none rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer">
+                  Position
+                </summary>
+                <div className="absolute right-0 top-10 z-30 w-72 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600 shadow-lg">
+                  <div className="mb-2">
+                    <p className="font-semibold text-slate-700">Reference</p>
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      {selectedInteriorPanelIds.length
+                        ? `${selectedInteriorPanelIds.length} panel${selectedInteriorPanelIds.length === 1 ? '' : 's'} selected`
+                        : hasPanelSplit ? 'Shift-click panel bodies to select reference' : 'Single panel auto reference'}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      ['Center H', 'center-x'],
+                      ['Center V', 'center-y'],
+                      ['Align Left', 'left'],
+                      ['Align Right', 'right'],
+                      ['Align Top', 'top'],
+                      ['Align Bottom', 'bottom']
+                    ].map(([label, mode]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => alignInteriorSelectionToPanel(mode)}
+                        className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-medium text-slate-700 hover:bg-white"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {[
+                      ['Left', 'left'],
+                      ['Right', 'right'],
+                      ['Top', 'top'],
+                      ['Bottom', 'bottom']
+                    ].map(([label, side]) => (
+                      <label key={side} className="text-[11px] font-medium text-slate-500">
+                        {label} mm
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={positionDistanceInputs[side]}
+                          onChange={e => setPositionDistanceInputs(prev => ({ ...prev, [side]: e.target.value }))}
+                          onBlur={e => applyInteriorDistanceToPanel(side, e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') {
+                              e.currentTarget.blur();
+                            }
+                          }}
+                          className="mt-1 w-full rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                        />
+                      </label>
+                    ))}
+                  </div>
+
+                  {interiorPositionMessage && (
+                    <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] font-medium text-amber-800">
+                      {interiorPositionMessage}
+                    </p>
+                  )}
+                </div>
+              </details>
+            </div>
+
             {selectedInteriorDesign && (
-              <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+              <div className="flex min-w-0 items-center justify-end gap-2">
                 <div className="min-w-0 max-w-40">
                   <p className="truncate text-xs font-semibold text-slate-700">
                     {selectedInteriorDesignIds.length > 1 ? `${selectedInteriorDesignIds.length} selected` : selectedInteriorDesign.name}
@@ -5325,6 +5708,45 @@ export default function App() {
                       className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
                     />
                   </label>
+                )}
+
+                {selectedInteriorDesign.kind === 'text' && (
+                  <>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Text
+                      <input
+                        type="text"
+                        value={selectedInteriorDesign.text ?? ''}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { text: e.target.value })}
+                        className="w-44 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Font
+                      <select
+                        value={selectedInteriorDesign.fontFamily || interiorFontOptions[0].value}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { fontFamily: e.target.value })}
+                        className="w-36 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      >
+                        {interiorFontOptions.map(font => (
+                          <option key={font.value} value={font.value}>
+                            {font.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Spacing
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={selectedInteriorDesign.letterSpacing ?? 0}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { letterSpacing: e.target.value === '' ? '' : Number(e.target.value) })}
+                        onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { letterSpacing: n(selectedInteriorDesign.letterSpacing, 0) })}
+                        className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                  </>
                 )}
 
                 <button
@@ -5451,7 +5873,7 @@ export default function App() {
                 }}
               >
                 <defs>
-                  <clipPath id="interior-margin-clip">
+                  <clipPath id="interior-margin-clip" clipPathUnits="userSpaceOnUse">
                     <path d={buildInteriorMarginPath()} />
                   </clipPath>
                 </defs>
@@ -5462,6 +5884,36 @@ export default function App() {
                   stroke="#0f172a"
                   strokeWidth={2 / viewZoom}
                 />
+
+                {interiorPanelReferences.map(panel => {
+                  const panelPath = panel.points
+                    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`)
+                    .join(' ') + ' Z';
+                  const selectedPanel = hasPanelSplit && selectedInteriorPanelIds.includes(panel.id);
+
+                  return (
+                    <g key={panel.id}>
+                      <path
+                        d={panelPath}
+                        fill="transparent"
+                        stroke="none"
+                        pointerEvents={activeInteriorShapeTool || !hasPanelSplit ? 'none' : 'all'}
+                        onMouseDown={(e) => selectInteriorPanelFromCanvas(e, panel.id)}
+                        style={{ cursor: activeInteriorShapeTool || !hasPanelSplit ? 'default' : 'pointer' }}
+                      />
+                      {selectedPanel && (
+                        <path
+                          d={panelPath}
+                          fill="none"
+                          stroke="#2563eb"
+                          strokeWidth={1.5 / viewZoom}
+                          strokeDasharray={`${8 / viewZoom} ${5 / viewZoom}`}
+                          pointerEvents="none"
+                        />
+                      )}
+                    </g>
+                  );
+                })}
 
                 {showInteriorMarginGuide && interiorMarginBoundarySets.length > 0 && (
                   <path
@@ -5558,7 +6010,11 @@ export default function App() {
                         />
                       )}
 
-                      {selected && selectedInteriorDesignIds.length <= 1 && (
+                      {design.kind === 'text' && (
+                        renderInteriorDesignBody(design, design)
+                      )}
+
+                      {selected && selectedInteriorDesignIds.length <= 1 && !showInteriorExportPreview && (
                         <g>
                           <rect
                             x={x * scale}
@@ -5612,7 +6068,7 @@ export default function App() {
                   );
                 })}
 
-                {selectedInteriorDesignItems.length > 1 && selectedInteriorBounds && (
+                {selectedInteriorDesignItems.length > 1 && selectedInteriorBounds && !showInteriorExportPreview && (
                   <g>
                     <rect
                       x={selectedInteriorBounds.x * scale}
@@ -5645,7 +6101,7 @@ export default function App() {
 
                 {interiorShapeDraft && interiorDraftBounds && (
                   <g pointerEvents="none">
-                    {interiorShapeDraft.kind === 'rect' && (
+                    {(interiorShapeDraft.kind === 'rect' || interiorShapeDraft.kind === 'text') && (
                       <rect
                         x={interiorDraftBounds.x * scale}
                         y={interiorDraftBounds.y * scale}
@@ -5657,6 +6113,28 @@ export default function App() {
                         strokeWidth={1.5 / viewZoom}
                         strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
                       />
+                    )}
+
+                    {interiorShapeDraft.kind === 'text' && (
+                      (() => {
+                        const textBox = getMeasuredTextBox('Text');
+                        const textScaleX = interiorDraftBounds.width / Math.max(0.001, textBox.width);
+                        const textScaleY = interiorDraftBounds.height / Math.max(0.001, textBox.height);
+                        const textTranslateX = (interiorDraftBounds.x - textBox.x * textScaleX) * scale;
+                        const textTranslateY = (interiorDraftBounds.y - textBox.y * textScaleY) * scale;
+                        return (
+                          <text
+                            x="0"
+                            y="0"
+                            fill="#0f172a"
+                            fontSize="100"
+                            opacity="0.65"
+                            transform={`translate(${textTranslateX} ${textTranslateY}) scale(${textScaleX * scale} ${textScaleY * scale})`}
+                          >
+                            Text
+                          </text>
+                        );
+                      })()
                     )}
 
                     {interiorShapeDraft.kind === 'ellipse' && (
@@ -5731,7 +6209,7 @@ export default function App() {
                   </g>
                 )}
 
-                {interiorSelectionBox && (
+                {interiorSelectionBox && !showInteriorExportPreview && (
                   <rect
                     x={Math.min(interiorSelectionBox.x1, interiorSelectionBox.x2) * scale}
                     y={Math.min(interiorSelectionBox.y1, interiorSelectionBox.y2) * scale}
@@ -5967,6 +6445,19 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => selectInteriorShapeTool('text')}
+                    className={[
+                      'mt-1.5 flex w-full items-center gap-2 rounded-md border px-2 py-2 text-xs font-medium transition',
+                      activeInteriorShapeTool === 'text'
+                        ? 'border-blue-400 bg-blue-50 text-blue-700'
+                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-white'
+                    ].join(' ')}
+                  >
+                    <Type size={15} />
+                    <span className="truncate">Text</span>
+                  </button>
                   {activeInteriorShapeTool && (
                     <button
                       type="button"
@@ -5977,10 +6468,6 @@ export default function App() {
                     </button>
                   )}
                 </div>
-                <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
-                  <Type size={17} />
-                  <span className="flex-1 text-left">Text</span>
-                </button>
                 <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
                   <Grid3X3 size={17} />
                   <span className="flex-1 text-left">Patterns</span>
