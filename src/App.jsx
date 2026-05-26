@@ -22,7 +22,8 @@ import {
   Unlock,
   Square,
   Circle,
-  Minus
+  Minus,
+  Eraser
 } from 'lucide-react';
 
 export default function App() {
@@ -59,6 +60,9 @@ export default function App() {
   const [splitLeftBottomEars, setSplitLeftBottomEars] = useState(2);
   const [splitRightTopEars, setSplitRightTopEars] = useState(2);
   const [splitRightBottomEars, setSplitRightBottomEars] = useState(2);
+  const [bottomPanelEnabled, setBottomPanelEnabled] = useState(false);
+  const [bottomPanelHeightInput, setBottomPanelHeightInput] = useState(400);
+  const [bottomPanelVEars, setBottomPanelVEars] = useState(1);
 
   // straight | symmetric | asymmetric | double
   const [topShape, setTopShape] = useState('straight');
@@ -71,20 +75,21 @@ export default function App() {
   const [interiorDesigns, setInteriorDesigns] = useState([]);
   const [selectedInteriorDesignId, setSelectedInteriorDesignId] = useState(null);
   const [selectedInteriorDesignIds, setSelectedInteriorDesignIds] = useState([]);
-  const [selectedInteriorPanelIds, setSelectedInteriorPanelIds] = useState([]);
   const [interiorDrag, setInteriorDrag] = useState(null);
   const [interiorSelectionBox, setInteriorSelectionBox] = useState(null);
   const [isInteriorPointerOnBody, setIsInteriorPointerOnBody] = useState(false);
   const [isInteriorPointerOnWhiteSurface, setIsInteriorPointerOnWhiteSurface] = useState(false);
   const [activeInteriorShapeTool, setActiveInteriorShapeTool] = useState(null);
   const [interiorShapeDraft, setInteriorShapeDraft] = useState(null);
+  const [eraserSizeInput, setEraserSizeInput] = useState(20);
   const [positionDistanceInputs, setPositionDistanceInputs] = useState({ left: '', right: '', top: '', bottom: '' });
   const [interiorPositionMessage, setInteriorPositionMessage] = useState('');
   const [showInteriorExportPreview, setShowInteriorExportPreview] = useState(false);
   const [interiorClipEnabled, setInteriorClipEnabled] = useState(false);
-  const [interiorMarginInput, setInteriorMarginInput] = useState(40);
+  const [interiorMarginInput, setInteriorMarginInput] = useState(30);
   const [showInteriorMarginGuide, setShowInteriorMarginGuide] = useState(false);
   const [patternEnabled, setPatternEnabled] = useState(false);
+  const [patternMode, setPatternMode] = useState('random');
   const [patternThickness, setPatternThickness] = useState(15);
   const [patternMinLength, setPatternMinLength] = useState(80);
   const [patternMaxLength, setPatternMaxLength] = useState(260);
@@ -94,6 +99,15 @@ export default function App() {
   const [patternRoundedEnds, setPatternRoundedEnds] = useState(false);
   const [patternRandomRowSpacing, setPatternRandomRowSpacing] = useState(false);
   const [patternRandomGap, setPatternRandomGap] = useState(false);
+  const [alignedSlotRows, setAlignedSlotRows] = useState(6);
+  const [alignedSlotBottomRows, setAlignedSlotBottomRows] = useState(2);
+  const [alignedSlotBreakWidth, setAlignedSlotBreakWidth] = useState(30);
+  const [alignedSlotLeftInset, setAlignedSlotLeftInset] = useState(30);
+  const [alignedSlotRightInset, setAlignedSlotRightInset] = useState(30);
+  const [alignedSlotMinLength, setAlignedSlotMinLength] = useState(150);
+  const [alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing] = useState(false);
+  const [alignedSlotRowSpacing, setAlignedSlotRowSpacing] = useState(80);
+  const [alignedSlotStaggerBreaks, setAlignedSlotStaggerBreaks] = useState(false);
 
   const [activeTool, setActiveTool] = useState(null);
 
@@ -255,6 +269,8 @@ export default function App() {
   const splitEarLength = Math.max(1, n(splitEarLengthInput, 30));
   const splitEarDepth = Math.max(0, n(splitEarDepthInput, 10));
   const minPanelSize = 1;
+  const bottomPanelGap = 40;
+  const bottomPanelHeight = Math.max(minPanelSize, n(bottomPanelHeightInput, 400));
   const margin = 90;
   const scale = 0.35;
   const viewportPadding = 160;
@@ -308,6 +324,8 @@ export default function App() {
   const bottomBaseY = safeHeight - bottomEarDepth;
 
   const extraTopSpace = (isSymmetricTop || isSymmetricThreeArcTop) ? n(arcRise, 0) + topEarDepth : 0;
+  const drawingMinY = minShearY - extraTopSpace;
+  const drawingMaxY = Math.max(safeHeight + maxShearY, bottomPanelEnabled ? safeHeight + bottomPanelGap + bottomPanelHeight : safeHeight + maxShearY);
 
   const leftWallLimit = Math.max(leftEarDepth, 0);
   const rightWallLimit = safeWidth - Math.max(rightEarDepth, 0);
@@ -322,6 +340,10 @@ export default function App() {
   const bottomEdgeNormal = [-shearOffset / angledEdgeLength, angledRun / angledEdgeLength];
 
   const transformPoint = ([x, y]) => {
+    if (bottomPanelEnabled && y >= safeHeight + bottomPanelGap - 0.001) {
+      return [x, y];
+    }
+
     const onLeftWall = x <= leftWallLimit + 0.001;
     const onRightWall = x >= rightWallLimit - 0.001;
 
@@ -347,7 +369,8 @@ export default function App() {
   };
 
   const transformPoints = (pointsArray) => pointsArray.map(transformPoint);
-  const interiorMargin = Math.max(0, n(interiorMarginInput, 40));
+  const interiorMargin = Math.max(0, n(interiorMarginInput, 30));
+  const eraserSize = Math.max(1, n(eraserSizeInput, 20));
 
   const angleFromOffset = (offset) => clamp(90 + Math.atan(offset / safeWidth) * 180 / Math.PI, 30, 150);
 
@@ -444,6 +467,10 @@ export default function App() {
       }
 
       if (!isTextEditingTarget(e.target) && e.key.toLowerCase() === 'm') {
+        if (workspaceMode === 'interior') {
+          setActiveInteriorShapeTool(null);
+          setInteriorShapeDraft(null);
+        }
         setActiveTool(prev => {
           if (prev === 'measure') {
             setMeasurePoints([]);
@@ -497,7 +524,6 @@ export default function App() {
     setMeasurements([]);
     setHoverSnap(null);
     setDraggingMeasurement(null);
-    setSelectedInteriorPanelIds([]);
   }, [
     width,
     height,
@@ -535,7 +561,10 @@ export default function App() {
     splitLeftTopEars,
     splitLeftBottomEars,
     splitRightTopEars,
-    splitRightBottomEars
+    splitRightBottomEars,
+    bottomPanelEnabled,
+    bottomPanelHeightInput,
+    bottomPanelVEars
   ]);
 
   const makeSegment = (cx, cy, p0, p1) => {
@@ -1367,6 +1396,53 @@ export default function App() {
     return [leftVerts, rightVerts];
   };
 
+  const buildBottomPanelVertices = () => {
+    const yOffset = safeHeight + bottomPanelGap;
+    const topY = yOffset + topEarDepth;
+    const bottomY = yOffset + bottomPanelHeight - bottomEarDepth;
+    const verts = [[leftEarDepth, topY]];
+    const topRanges = getHorizontalEarRanges(leftEarDepth, safeWidth - rightEarDepth, topEarLength, topEarDepth, topVisibleCornerMargin, manualMode, hEars);
+    const bottomRanges = getHorizontalEarRanges(leftEarDepth, safeWidth - rightEarDepth, bottomEarLength, bottomEarDepth, Math.max(0, margin - bottomEarDepth), manualMode, hEars);
+    const leftRanges = getVerticalEarRanges(topY, bottomY, leftEarLength, leftEarDepth, manualMode, bottomPanelVEars);
+    const rightRanges = getVerticalEarRanges(topY, bottomY, rightEarLength, rightEarDepth, manualMode, bottomPanelVEars);
+
+    topRanges.forEach(ear => {
+      pushPoint(verts, [ear.start, topY]);
+      pushPoint(verts, [ear.start, yOffset]);
+      pushPoint(verts, [ear.end, yOffset]);
+      pushPoint(verts, [ear.end, topY]);
+    });
+
+    pushPoint(verts, [safeWidth - rightEarDepth, topY]);
+
+    rightRanges.forEach(ear => {
+      pushPoint(verts, [safeWidth - rightEarDepth, ear.start]);
+      pushPoint(verts, [safeWidth, ear.start]);
+      pushPoint(verts, [safeWidth, ear.end]);
+      pushPoint(verts, [safeWidth - rightEarDepth, ear.end]);
+    });
+
+    pushPoint(verts, [safeWidth - rightEarDepth, bottomY]);
+
+    [...bottomRanges].reverse().forEach(ear => {
+      pushPoint(verts, [ear.end, bottomY]);
+      pushPoint(verts, [ear.end, yOffset + bottomPanelHeight]);
+      pushPoint(verts, [ear.start, yOffset + bottomPanelHeight]);
+      pushPoint(verts, [ear.start, bottomY]);
+    });
+
+    pushPoint(verts, [leftEarDepth, bottomY]);
+
+    [...leftRanges].reverse().forEach(ear => {
+      pushPoint(verts, [leftEarDepth, ear.end]);
+      pushPoint(verts, [0, ear.end]);
+      pushPoint(verts, [0, ear.start]);
+      pushPoint(verts, [leftEarDepth, ear.start]);
+    });
+
+    return verts;
+  };
+
   const buildVertices = () => {
     const verts = [getStartPoint()];
 
@@ -1455,9 +1531,14 @@ export default function App() {
     return verts;
   };
 
-  const getPanelVertexSets = () => (hasPanelSplit ? getSplitPanelVertexSets() : [buildVertices()]);
+  const getPrimaryPanelVertexSets = () => (hasPanelSplit ? getSplitPanelVertexSets() : [buildVertices()]);
 
-  const snapPoints = hasPanelSplit
+  const getPanelVertexSets = () => {
+    const panels = getPrimaryPanelVertexSets();
+    return bottomPanelEnabled ? [...panels, buildBottomPanelVertices()] : panels;
+  };
+
+  const snapPoints = hasPanelSplit || bottomPanelEnabled
     ? transformPoints(getPanelVertexSets().flat())
     : transformPoints(buildSnapVertices());
 
@@ -1490,32 +1571,47 @@ export default function App() {
   };
 
   const getCleanMainBodyPanelVertexSets = () => {
-    if (!hasPanelSplit) {
-      const top = getCleanTopSpanVertices(leftEarDepth, safeWidth - rightEarDepth);
-      return [[
-        ...top,
-        [safeWidth - rightEarDepth, bottomBaseY],
-        [leftEarDepth, bottomBaseY]
-      ]];
-    }
+    const primaryPanels = (() => {
+      if (!hasPanelSplit) {
+        const top = getCleanTopSpanVertices(leftEarDepth, safeWidth - rightEarDepth);
+        return [[
+          ...top,
+          [safeWidth - rightEarDepth, bottomBaseY],
+          [leftEarDepth, bottomBaseY]
+        ]];
+      }
 
-    const splitX = safeSplitPosition;
-    const rightSplitX = safeRightSplitPosition;
-    const leftTop = getCleanTopSpanVertices(leftEarDepth, splitX);
-    const rightTop = getCleanTopSpanVertices(rightSplitX, safeWidth - rightEarDepth);
+      const splitX = safeSplitPosition;
+      const rightSplitX = safeRightSplitPosition;
+      const leftTop = getCleanTopSpanVertices(leftEarDepth, splitX);
+      const rightTop = getCleanTopSpanVertices(rightSplitX, safeWidth - rightEarDepth);
 
+      return [
+        [
+          ...leftTop,
+          [splitX, bottomBaseY],
+          [leftEarDepth, bottomBaseY]
+        ],
+        [
+          ...rightTop,
+          [safeWidth - rightEarDepth, bottomBaseY],
+          [rightSplitX, bottomBaseY]
+        ].filter((point, index, arr) => index === 0 || Math.hypot(point[0] - arr[index - 1][0], point[1] - arr[index - 1][1]) > 0.001)
+      ].map(panel => panel.filter(Boolean));
+    })();
+
+    if (!bottomPanelEnabled) return primaryPanels;
+
+    const yOffset = safeHeight + bottomPanelGap;
     return [
+      ...primaryPanels,
       [
-        ...leftTop,
-        [splitX, bottomBaseY],
-        [leftEarDepth, bottomBaseY]
-      ],
-      [
-        ...rightTop,
-        [safeWidth - rightEarDepth, bottomBaseY],
-        [rightSplitX, bottomBaseY]
-      ].filter((point, index, arr) => index === 0 || Math.hypot(point[0] - arr[index - 1][0], point[1] - arr[index - 1][1]) > 0.001)
-    ].map(panel => panel.filter(Boolean));
+        [leftEarDepth, yOffset + topEarDepth],
+        [safeWidth - rightEarDepth, yOffset + topEarDepth],
+        [safeWidth - rightEarDepth, yOffset + bottomPanelHeight - bottomEarDepth],
+        [leftEarDepth, yOffset + bottomPanelHeight - bottomEarDepth]
+      ]
+    ];
   };
 
   const polygonArea = (pointsArray) => {
@@ -1561,6 +1657,13 @@ export default function App() {
 
   const interiorMarginBoundarySets = getCleanMainBodyPanelVertexSets()
     .flatMap(panel => offsetPolygonInward(transformPoints(panel), interiorMargin));
+
+  const getActivePatternCleanPanelVertexSets = () => getCleanMainBodyPanelVertexSets();
+
+  const getActivePatternMarginBoundarySets = () => (
+    getActivePatternCleanPanelVertexSets()
+      .flatMap(panel => offsetPolygonInward(transformPoints(panel), interiorMargin))
+  );
 
   const buildInteriorMarginPath = () => (
     interiorMarginBoundarySets
@@ -1616,10 +1719,11 @@ export default function App() {
   };
 
   const clipPatternSlotToMargin = (points) => {
-    if (!interiorMarginBoundarySets.length) return [];
+    const patternMarginBoundarySets = getActivePatternMarginBoundarySets();
+    if (!patternMarginBoundarySets.length) return [];
 
     const subject = cleanClipperPaths([toClipperPath(points)]);
-    const clips = cleanClipperPaths(interiorMarginBoundarySets.map(toClipperPath));
+    const clips = cleanClipperPaths(patternMarginBoundarySets.map(toClipperPath));
     if (!subject.length || !clips.length) return [];
 
     const clipper = new ClipperLib.Clipper();
@@ -1672,8 +1776,318 @@ export default function App() {
     );
   };
 
-  const getPatternContours = () => {
-    if (!patternEnabled || interiorMarginBoundarySets.length === 0) return [];
+  const getCleanPanelProjectionBounds = (panel, angle) => {
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const nx = -uy;
+    const ny = ux;
+    const points = transformPoints(panel);
+    const projections = points.map(point => point[0] * ux + point[1] * uy);
+    const normals = points.map(point => point[0] * nx + point[1] * ny);
+
+    return {
+      minProjection: Math.min(...projections),
+      maxProjection: Math.max(...projections),
+      minNormal: Math.min(...normals),
+      maxNormal: Math.max(...normals)
+    };
+  };
+
+  const makeAlignedSlotPanelReferences = () => {
+    const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
+    return getCleanMainBodyPanelVertexSets().map((panel, index) => ({
+      panel,
+      index,
+      bounds: getCleanPanelProjectionBounds(panel, angle)
+    }));
+  };
+
+  const getAlignedSlotBreakProjectionsForPanel = (panelIndex, angle, staggered) => {
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    let ranges = [];
+    const isBottomExtraPanel = bottomPanelEnabled && panelIndex === getCleanMainBodyPanelVertexSets().length - 1;
+
+    if (isBottomExtraPanel) {
+      ranges = getHorizontalEarRanges(leftEarDepth, safeWidth - rightEarDepth, bottomEarLength, bottomEarDepth, Math.max(0, margin - bottomEarDepth), manualMode, hEars);
+    } else if (hasPanelSplit) {
+      ranges = panelIndex === 0
+        ? getHorizontalEarRanges(leftEarDepth, safeSplitPosition, bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout, true, splitLeftBottomEars)
+        : getHorizontalEarRanges(safeRightSplitPosition, safeWidth - rightEarDepth, bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout, true, splitRightBottomEars);
+    } else {
+      ranges = [...grouped.bottom]
+        .sort((a, b) => a.pos - b.pos)
+        .map(ear => ({ start: ear.pos, end: ear.pos + bottomEarLengthForLayout }));
+    }
+
+    const breakY = isBottomExtraPanel
+      ? safeHeight + bottomPanelGap + bottomPanelHeight - bottomEarDepth
+      : safeHeight - bottomEarDepth;
+    const earCenterProjections = ranges
+      .sort((a, b) => a.start - b.start)
+      .map(range => {
+      const centerX = (range.start + range.end) / 2;
+      const transformed = transformPoint([centerX, breakY]);
+      return transformed[0] * ux + transformed[1] * uy;
+    });
+
+    if (!staggered) return earCenterProjections.slice(1, -1);
+
+    return earCenterProjections
+      .slice(0, -1)
+      .map((projection, index) => (projection + earCenterProjections[index + 1]) / 2);
+  };
+
+  const buildAlignedSlotSegments = (startProjection, endProjection, breakProjections, breakWidth, minLength) => {
+    if (endProjection - startProjection < minLength) return [];
+
+    const halfBreak = breakWidth / 2;
+    const safeBreaks = [...new Set(
+      breakProjections
+        .filter(projection => projection - halfBreak > startProjection && projection + halfBreak < endProjection)
+        .map(projection => Math.round(projection * 1000) / 1000)
+    )].sort((a, b) => a - b);
+
+    const acceptedBreaks = [];
+    let cursor = startProjection;
+
+    safeBreaks.forEach(projection => {
+      const segmentEnd = projection - halfBreak;
+      const nextStart = projection + halfBreak;
+      if (segmentEnd - cursor < minLength) return;
+      if (endProjection - nextStart < minLength) return;
+      acceptedBreaks.push(projection);
+      cursor = nextStart;
+    });
+
+    const segments = [];
+    cursor = startProjection;
+    acceptedBreaks.forEach(projection => {
+      const segmentEnd = projection - halfBreak;
+      if (segmentEnd - cursor >= minLength) segments.push([cursor, segmentEnd]);
+      cursor = projection + halfBreak;
+    });
+
+    if (endProjection - cursor >= minLength) segments.push([cursor, endProjection]);
+    return segments;
+  };
+
+  const pointFromProjectionNormal = (projection, normal, angle) => {
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const nx = -uy;
+    const ny = ux;
+    return [
+      ux * projection + nx * normal,
+      uy * projection + ny * normal
+    ];
+  };
+
+  const getAlignedSlotLayoutData = () => {
+    const panelRefs = makeAlignedSlotPanelReferences();
+    if (!panelRefs.length) return null;
+
+    const thickness = Math.max(1, n(patternThickness, 15));
+    const breakWidth = Math.max(0, n(alignedSlotBreakWidth, 30));
+    const leftInset = Math.max(0, n(alignedSlotLeftInset, 30));
+    const rightInset = Math.max(0, n(alignedSlotRightInset, 30));
+    const fixedRowSpacing = Math.max(0, n(alignedSlotRowSpacing, 80));
+    const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
+    const bottomPanelIndex = bottomPanelEnabled ? getCleanMainBodyPanelVertexSets().length - 1 : -1;
+    const topPanelRefs = panelRefs.filter(ref => ref.index !== bottomPanelIndex);
+    const bottomPanelRefs = panelRefs.filter(ref => ref.index === bottomPanelIndex);
+    const makeGroup = (refs, rowCountValue) => {
+      if (!refs.length) return null;
+
+      const rowCount = Math.max(1, Math.floor(n(rowCountValue, 1)));
+      const minNormal = Math.min(...refs.map(ref => ref.bounds.minNormal));
+      const maxNormal = Math.max(...refs.map(ref => ref.bounds.maxNormal));
+      const usableNormal = maxNormal - minNormal;
+      const emptySpace = usableNormal - rowCount * thickness;
+      if (emptySpace < 0) return null;
+
+      const rowSpace = alignedSlotUseRowSpacing
+        ? fixedRowSpacing
+        : emptySpace / (rowCount + 1);
+      const rowNormals = [];
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+        rowNormals.push(alignedSlotUseRowSpacing
+          ? minNormal + rowSpace + thickness / 2 + rowIndex * (thickness + fixedRowSpacing)
+          : minNormal + rowSpace * (rowIndex + 1) + thickness * (rowIndex + 0.5));
+      }
+
+      return {
+        panelRefs: refs,
+        rowCount,
+        minNormal,
+        maxNormal,
+        rowSpace,
+        firstRowTop: minNormal + rowSpace,
+        lastRowBottom: alignedSlotUseRowSpacing
+          ? minNormal + fixedRowSpacing + rowCount * thickness + Math.max(0, rowCount - 1) * fixedRowSpacing
+          : maxNormal - rowSpace,
+        rowNormals
+      };
+    };
+
+    const groups = [
+      makeGroup(topPanelRefs, alignedSlotRows),
+      makeGroup(bottomPanelRefs, alignedSlotBottomRows)
+    ].filter(Boolean);
+
+    if (!groups.length) return null;
+
+    return {
+      panelRefs,
+      thickness,
+      breakWidth,
+      leftInset,
+      rightInset,
+      fixedRowSpacing,
+      angle,
+      groups
+    };
+  };
+
+  const clipPolygonToPanel = (points, panel) => {
+    const subject = cleanClipperPaths([toClipperPath(points)]);
+    const clips = cleanClipperPaths([toClipperPath(transformPoints(panel))]);
+    if (!subject.length || !clips.length) return [];
+
+    const clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    clipper.AddPaths(clips, ClipperLib.PolyType.ptClip, true);
+
+    const solution = new ClipperLib.Paths();
+    clipper.Execute(
+      ClipperLib.ClipType.ctIntersection,
+      solution,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+
+    return cleanClipperPaths(solution).map(fromClipperPath);
+  };
+
+  const getAlignedSlotClearanceContours = () => {
+    if (!patternEnabled || patternMode !== 'alignedSlots') return [];
+
+    const layout = getAlignedSlotLayoutData();
+    if (!layout || layout.breakWidth <= 0) return [];
+
+    const contours = [];
+    layout.groups.forEach(group => {
+      group.panelRefs.forEach(ref => {
+        const startProjection = ref.bounds.minProjection + layout.leftInset;
+        const endProjection = ref.bounds.maxProjection - layout.rightInset;
+        const stripRanges = [
+          [startProjection - layout.breakWidth, startProjection],
+          [endProjection, endProjection + layout.breakWidth]
+        ];
+
+        stripRanges.forEach(([a, b], stripIndex) => {
+          const rawStrip = [
+            pointFromProjectionNormal(a, group.minNormal, layout.angle),
+            pointFromProjectionNormal(b, group.minNormal, layout.angle),
+            pointFromProjectionNormal(b, group.maxNormal, layout.angle),
+            pointFromProjectionNormal(a, group.maxNormal, layout.angle)
+          ];
+
+          clipPolygonToPanel(rawStrip, ref.panel).forEach(points => {
+            if (points.length < 3) return;
+            contours.push({
+              points,
+              closed: true,
+              source: 'knockout',
+              fillRule: 'nonzero',
+              layer: 'PATTERN_CLEARANCE',
+              designId: `aligned-clearance-${ref.index}-${stripIndex}`,
+              designName: 'Aligned slot clearance',
+              materialColor: 'black',
+              role: 'outer',
+              area: Math.abs(signedPolygonArea(points)),
+              depth: 0
+            });
+          });
+        });
+      });
+    });
+
+    return contours;
+  };
+
+  const getAlignedSlotPatternContours = () => {
+    if (!patternEnabled) return [];
+
+    const layout = getAlignedSlotLayoutData();
+    if (!layout) return [];
+
+    const { thickness, breakWidth, leftInset, rightInset, angle } = layout;
+    const minLength = Math.max(1, n(alignedSlotMinLength, 150));
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const nx = -uy;
+    const ny = ux;
+    const contours = [];
+
+    layout.groups.forEach(group => {
+      group.rowNormals.forEach((centerNormal, rowIndex) => {
+        const shiftedRow = alignedSlotStaggerBreaks && rowIndex % 2 === 0;
+
+        group.panelRefs.forEach(ref => {
+          const startProjection = ref.bounds.minProjection + leftInset;
+          const endProjection = ref.bounds.maxProjection - rightInset;
+          const breaks = getAlignedSlotBreakProjectionsForPanel(ref.index, angle, shiftedRow);
+          const segments = buildAlignedSlotSegments(startProjection, endProjection, breaks, breakWidth, minLength);
+
+          segments.forEach(([segmentStart, segmentEnd]) => {
+            const length = segmentEnd - segmentStart;
+            const centerProjection = (segmentStart + segmentEnd) / 2;
+            const cx = ux * centerProjection + nx * centerNormal;
+            const cy = uy * centerProjection + ny * centerNormal;
+            const rawSlot = patternRoundedEnds
+              ? makeRoundedSlotPolygon(cx, cy, length, thickness, angle)
+              : makeSlotPolygon(cx, cy, length, thickness, angle);
+
+            clipPolygonToPanel(rawSlot, ref.panel).forEach(points => {
+              const projectedLength = getPatternContourProjectedLength(points, angle);
+              const finalPoints = patternRoundedEnds
+                ? roundClippedPatternContour(points, thickness, angle)
+                : points;
+
+              if (finalPoints.length >= 3 && projectedLength >= minLength / 2) {
+                contours.push({
+                  points: finalPoints,
+                  closed: true,
+                  source: 'pattern',
+                  fillRule: 'nonzero',
+                  layer: 'PATTERN',
+                  designId: `aligned-pattern-${ref.index}-${rowIndex}-${contours.length}`,
+                  designName: 'Aligned slots',
+                  role: 'outer',
+                  area: Math.abs(signedPolygonArea(points)),
+                  depth: 0
+                });
+              }
+            });
+          });
+        });
+      });
+    });
+
+    return contours;
+  };
+
+  const getAlignedSlotEqualRowSpacing = () => {
+    const layout = getAlignedSlotLayoutData();
+    if (!layout?.groups?.length) return 0;
+
+    return Math.max(0, layout.groups[0].rowSpace);
+  };
+
+  const getRandomSlotPatternContours = () => {
+    const patternMarginBoundarySets = getActivePatternMarginBoundarySets();
+    if (!patternEnabled || patternMarginBoundarySets.length === 0) return [];
 
     const thickness = Math.max(1, n(patternThickness, 15));
     const minLength = Math.max(1, n(patternMinLength, 80));
@@ -1686,7 +2100,7 @@ export default function App() {
     const uy = Math.sin(angle);
     const nx = -uy;
     const ny = ux;
-    const allPoints = interiorMarginBoundarySets.flat();
+    const allPoints = patternMarginBoundarySets.flat();
     const projections = allPoints.map(point => point[0] * ux + point[1] * uy);
     const normals = allPoints.map(point => point[0] * nx + point[1] * ny);
     const minProjection = Math.min(...projections) - maxLength;
@@ -1780,6 +2194,11 @@ export default function App() {
     return contours;
   };
 
+  const getPatternContours = () => {
+    if (patternMode === 'alignedSlots') return getAlignedSlotPatternContours();
+    return getRandomSlotPatternContours();
+  };
+
   const buildOutlinePath = () => {
     return getPanelVertexSets()
       .map(vertexSet => {
@@ -1791,9 +2210,9 @@ export default function App() {
 
   const getBaseViewBox = () => ({
     x: -viewportPadding,
-    y: (minShearY - extraTopSpace) * scale - viewportPadding,
+    y: drawingMinY * scale - viewportPadding,
     width: safeWidth * scale + viewportPadding * 2,
-    height: (safeHeight + extraTopSpace + maxShearY - minShearY) * scale + viewportPadding * 2
+    height: (drawingMaxY - drawingMinY) * scale + viewportPadding * 2
   });
 
   const getCurrentViewBox = () => {
@@ -1907,6 +2326,50 @@ export default function App() {
     let bestDist = Infinity;
 
     snapPoints.forEach(([px, py]) => {
+      const dist = Math.hypot(px - x, py - y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = [px, py];
+      }
+    });
+
+    const snapTolerancePx = 14;
+    const snapToleranceMm = snapTolerancePx / (scale * viewZoom);
+    return bestDist <= snapToleranceMm ? best : null;
+  };
+
+  const getInteriorMeasureSnapPoints = () => {
+    const points = [];
+    const addPoint = (point) => {
+      if (!point || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) return;
+      points.push(point);
+    };
+
+    getCleanMainBodyPanelVertexSets().forEach(panel => {
+      transformPoints(panel).forEach(addPoint);
+    });
+
+    interiorDesigns.forEach(design => {
+      const bounds = getInteriorObjectBounds(design);
+      [
+        [bounds.x, bounds.y],
+        [bounds.x + bounds.width, bounds.y],
+        [bounds.x + bounds.width, bounds.y + bounds.height],
+        [bounds.x, bounds.y + bounds.height],
+        [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2]
+      ].forEach(addPoint);
+
+      getInteriorPointHandles(design).forEach(handle => addPoint([handle.x, handle.y]));
+    });
+
+    return points;
+  };
+
+  const findNearestInteriorSnapPoint = (x, y) => {
+    let best = null;
+    let bestDist = Infinity;
+
+    getInteriorMeasureSnapPoints().forEach(([px, py]) => {
       const dist = Math.hypot(px - x, py - y);
       if (dist < bestDist) {
         bestDist = dist;
@@ -2270,6 +2733,26 @@ export default function App() {
       };
     }
 
+    if (design.kind === 'eraser') {
+      const points = (design.points || []).filter(point => Array.isArray(point) && point.length >= 2);
+      if (!points.length) return { x: 0, y: 0, width: 10, height: 10 };
+
+      const half = Math.max(0.5, n(design.thickness, eraserSize)) / 2;
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      const minX = Math.min(...xs) - half;
+      const minY = Math.min(...ys) - half;
+      const maxX = Math.max(...xs) + half;
+      const maxY = Math.max(...ys) + half;
+
+      return {
+        x: minX,
+        y: minY,
+        width: Math.max(10, maxX - minX),
+        height: Math.max(10, maxY - minY)
+      };
+    }
+
     return {
       x: n(design.x, 0),
       y: n(design.y, 0),
@@ -2320,6 +2803,13 @@ export default function App() {
             })
           };
         })
+      };
+    }
+
+    if (design.kind === 'eraser') {
+      return {
+        ...next,
+        points: (design.points || []).map(point => transformPoint(point[0], point[1]))
       };
     }
 
@@ -2396,7 +2886,8 @@ export default function App() {
     ellipse: 'Ellipse',
     line: 'Line',
     arc: '3-point arc',
-    text: 'Text'
+    text: 'Text',
+    eraser: 'Eraser'
   }[kind] || 'Shape');
 
   const createInteriorShapeFromDraft = (draft) => {
@@ -2471,6 +2962,21 @@ export default function App() {
       return { ...shape, ...getInteriorObjectBounds(shape) };
     }
 
+    if (draft.kind === 'eraser') {
+      const points = (draft.points || []).filter(point => Array.isArray(point) && point.length >= 2);
+      if (points.length < 2) return null;
+
+      const shape = {
+        ...base,
+        name: 'Eraser stroke',
+        color: 'black',
+        points,
+        thickness: eraserSize,
+        aspectLocked: false
+      };
+      return { ...shape, ...getInteriorObjectBounds(shape) };
+    }
+
     return null;
   };
 
@@ -2479,16 +2985,15 @@ export default function App() {
     applyInteriorDesigns(prev => [...prev, shape], { selectedId: shape.id });
   };
 
-  const setInteriorSelection = (ids, { preservePanels = false } = {}) => {
+  const setInteriorSelection = (ids) => {
     const cleanIds = Array.from(new Set(ids.filter(Boolean)));
     setSelectedInteriorDesignIds(cleanIds);
     setSelectedInteriorDesignId(cleanIds[cleanIds.length - 1] || null);
-    if (!preservePanels) setSelectedInteriorPanelIds([]);
   };
 
   const toggleInteriorSelection = (id) => {
     const current = selectedInteriorDesignIdsRef.current;
-    setInteriorSelection(current.includes(id) ? current.filter(item => item !== id) : [...current, id], { preservePanels: true });
+    setInteriorSelection(current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
   };
 
   const getSvgChildBBox = (svg, child) => {
@@ -2713,6 +3218,7 @@ export default function App() {
   );
 
   const selectInteriorShapeTool = (kind) => {
+    clearMeasureTool();
     setActiveInteriorShapeTool(prev => prev === kind ? null : kind);
     setInteriorShapeDraft(null);
     setInteriorSelection([]);
@@ -2721,6 +3227,24 @@ export default function App() {
 
   const getInteriorDraftBounds = (draft) => {
     if (!draft) return null;
+
+    if (draft.kind === 'eraser') {
+      const points = draft.points || [];
+      if (!points.length) return null;
+      const half = eraserSize / 2;
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      const minX = Math.min(...xs) - half;
+      const minY = Math.min(...ys) - half;
+      const maxX = Math.max(...xs) + half;
+      const maxY = Math.max(...ys) + half;
+      return {
+        x: minX,
+        y: minY,
+        width: Math.max(10, maxX - minX),
+        height: Math.max(10, maxY - minY)
+      };
+    }
 
     if (draft.kind === 'arc') {
       const xs = draft.points.map(point => point[0]);
@@ -2784,9 +3308,10 @@ export default function App() {
       const points = transformPoints(panel);
       const xs = points.map(point => point[0]);
       const ys = points.map(point => point[1]);
+      const isBottomPanel = bottomPanelEnabled && index === getCleanMainBodyPanelVertexSets().length - 1;
       return {
         id: `panel-${index}`,
-        name: hasPanelSplit ? `${index === 0 ? 'Left' : 'Right'} panel` : 'Panel',
+        name: isBottomPanel ? 'Bottom panel' : hasPanelSplit ? `${index === 0 ? 'Left' : 'Right'} panel` : 'Main panel',
         points,
         bounds: {
           x: Math.min(...xs),
@@ -2798,37 +3323,15 @@ export default function App() {
     })
   );
 
-  const getInteriorPanelSelectionBounds = (panelIds = selectedInteriorPanelIds) => {
+  const getInteriorPanelSelectionBounds = () => {
     const panels = getInteriorPanelReferences();
-    const activePanels = panelIds.length
-      ? panels.filter(panel => panelIds.includes(panel.id))
-      : (!hasPanelSplit && panels.length === 1 ? panels : []);
+    if (!panels.length) return null;
 
-    if (!activePanels.length) return null;
-
-    const minX = Math.min(...activePanels.map(panel => panel.bounds.x));
-    const minY = Math.min(...activePanels.map(panel => panel.bounds.y));
-    const maxX = Math.max(...activePanels.map(panel => panel.bounds.x + panel.bounds.width));
-    const maxY = Math.max(...activePanels.map(panel => panel.bounds.y + panel.bounds.height));
+    const minX = Math.min(...panels.map(panel => panel.bounds.x));
+    const minY = Math.min(...panels.map(panel => panel.bounds.y));
+    const maxX = Math.max(...panels.map(panel => panel.bounds.x + panel.bounds.width));
+    const maxY = Math.max(...panels.map(panel => panel.bounds.y + panel.bounds.height));
     return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-  };
-
-  const selectInteriorPanelFromCanvas = (e, panelId) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (activeInteriorShapeTool) return;
-
-    setInteriorSelectionBox(null);
-
-    if (e.shiftKey) {
-      setSelectedInteriorPanelIds(prev => (
-        prev.includes(panelId) ? prev.filter(id => id !== panelId) : [...prev, panelId]
-      ));
-      return;
-    }
-
-    setSelectedInteriorPanelIds([panelId]);
-    setInteriorSelection([], { preservePanels: true });
   };
 
   const getSelectedInteriorMovableDesigns = () => (
@@ -2861,7 +3364,7 @@ export default function App() {
   const getInteriorPositionReferenceBounds = () => {
     const referenceBounds = getInteriorPanelSelectionBounds();
     if (referenceBounds) return referenceBounds;
-    showInteriorPositionMessage(hasPanelSplit ? 'Select a panel reference.' : 'Select a design first.');
+    showInteriorPositionMessage('Select a design first.');
     return null;
   };
 
@@ -2872,7 +3375,7 @@ export default function App() {
 
   useEffect(() => {
     const selected = interiorDesigns.filter(design => selectedInteriorDesignIds.includes(design.id));
-    const reference = getInteriorPanelSelectionBounds(selectedInteriorPanelIds);
+    const reference = getInteriorPanelSelectionBounds();
 
     if (!selected.length || !reference) {
       setPositionDistanceInputs(prev => (
@@ -2899,7 +3402,6 @@ export default function App() {
   }, [
     interiorDesigns,
     selectedInteriorDesignIds,
-    selectedInteriorPanelIds,
     width,
     height,
     leftHeight,
@@ -2973,6 +3475,12 @@ export default function App() {
     handleViewportMouseDown(e);
     if (e.button !== 0 || panState) return;
 
+    if (activeTool === 'measure') {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     const point = getSvgPoint(e);
     const onBody = isInteriorPointOnBody(point);
     const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
@@ -2995,6 +3503,15 @@ export default function App() {
     e.preventDefault();
     e.stopPropagation();
     setInteriorSelection([]);
+    if (activeInteriorShapeTool === 'eraser') {
+      setInteriorShapeDraft({
+        kind: 'eraser',
+        points: [[point.x, point.y]],
+        drawing: true
+      });
+      return;
+    }
+
     setInteriorShapeDraft({
       kind: activeInteriorShapeTool,
       x1: point.x,
@@ -3033,6 +3550,11 @@ export default function App() {
   };
 
   const handleInteriorCanvasClick = (e) => {
+    if (activeTool === 'measure') {
+      handleInteriorMeasureClick(e);
+      return;
+    }
+
     if (interiorSelectionJustFinishedRef.current) {
       interiorSelectionJustFinishedRef.current = false;
       return;
@@ -3071,6 +3593,13 @@ export default function App() {
 
   const finishInteriorShapeDraft = () => {
     if (!interiorShapeDraft || interiorShapeDraft.kind === 'arc') return;
+
+    if (interiorShapeDraft.kind === 'eraser') {
+      const points = interiorShapeDraft.points || [];
+      if (points.length >= 2) addInteriorShape(createInteriorShapeFromDraft(interiorShapeDraft));
+      setInteriorShapeDraft(null);
+      return;
+    }
 
     const bounds = getInteriorDraftBounds(interiorShapeDraft);
     const isLine = interiorShapeDraft.kind === 'line';
@@ -3264,6 +3793,25 @@ export default function App() {
       return;
     }
 
+    if (activeTool === 'measure') {
+      if (draggingMeasurement) {
+        const measurement = measurements.find(m => m.id === draggingMeasurement.id);
+        if (!measurement) return;
+
+        const { nx, ny } = getMeasurementBaseData(measurement);
+        const dx = point.x - draggingMeasurement.startMouse[0];
+        const dy = point.y - draggingMeasurement.startMouse[1];
+        const projectedOffsetChange = dx * nx + dy * ny;
+        const newOffset = draggingMeasurement.startOffset + projectedOffsetChange;
+
+        setMeasurements(prev => prev.map(m => m.id === draggingMeasurement.id ? { ...m, offset: newOffset, selected: true } : m));
+        return;
+      }
+
+      setHoverSnap(findNearestInteriorSnapPoint(point.x, point.y));
+      return;
+    }
+
     if (interiorSelectionBox) {
       setInteriorSelectionBox(prev => prev ? { ...prev, x2: point.x, y2: point.y } : prev);
       return;
@@ -3272,6 +3820,17 @@ export default function App() {
     if (interiorShapeDraft) {
       if (interiorShapeDraft.kind === 'arc') {
         setInteriorShapeDraft(prev => prev ? { ...prev, preview: [point.x, point.y] } : prev);
+        return;
+      }
+
+      if (interiorShapeDraft.kind === 'eraser') {
+        setInteriorShapeDraft(prev => {
+          if (!prev) return prev;
+          const points = prev.points || [];
+          const last = points[points.length - 1];
+          if (last && Math.hypot(point.x - last[0], point.y - last[1]) < 2) return prev;
+          return { ...prev, points: [...points, [point.x, point.y]] };
+        });
         return;
       }
 
@@ -3494,7 +4053,7 @@ export default function App() {
       };
     });
     const maxMargin = Math.max(0, Math.min(...panelBounds.map(bounds => Math.min(bounds.width, bounds.height) / 2 - 1)));
-    setInteriorMarginInput(clamp(n(interiorMarginInput, 40), 0, maxMargin));
+    setInteriorMarginInput(clamp(n(interiorMarginInput, 30), 0, maxMargin));
     setShowInteriorMarginGuide(false);
   };
 
@@ -3655,6 +4214,32 @@ export default function App() {
     }
   };
 
+  const handleInteriorMeasureClick = (e) => {
+    if (activeTool !== 'measure') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (draggingMeasurement) return;
+
+    const { x, y } = getSvgPoint(e);
+    const snapped = findNearestInteriorSnapPoint(x, y);
+    const point = snapped || [x, y];
+    const nextPoints = [...measurePoints, point];
+
+    if (nextPoints.length === 2) {
+      const [p1, p2] = nextPoints;
+      if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) === 0) {
+        setMeasurePoints([]);
+        return;
+      }
+
+      setMeasurements(prev => [...prev.map(m => ({ ...m, selected: false })), createMeasurement(p1, p2)]);
+      setMeasurePoints([]);
+    } else {
+      setMeasurements(prev => prev.map(m => ({ ...m, selected: false })));
+      setMeasurePoints(nextPoints);
+    }
+  };
+
   const handleMeasurementMouseDown = (e, measurement) => {
     if (activeTool !== 'measure') return;
     e.stopPropagation();
@@ -3799,10 +4384,10 @@ export default function App() {
 
   const toDXFPoint = (point) => {
     const [x, y] = transformPoint(point);
-    return [roundDXF(x), roundDXF(overallHeight - (y - minShearY))];
+    return [roundDXF(x), roundDXF(drawingMaxY - y)];
   };
 
-  const toRawDXFPoint = ([x, y]) => [roundDXF(x), roundDXF(overallHeight - (y - minShearY))];
+  const toRawDXFPoint = ([x, y]) => [roundDXF(x), roundDXF(drawingMaxY - y)];
 
   const cleanDxfPoints = (points, closed) => {
     const cleaned = [];
@@ -4675,6 +5260,10 @@ export default function App() {
       return offsetOpenStrokeContours(sampleInteriorThreePointArc(design), thickness, 'butt');
     }
 
+    if (design.kind === 'eraser') {
+      return offsetOpenStrokeContours(design.points || [], thickness, 'round');
+    }
+
     return [];
   };
 
@@ -4876,14 +5465,19 @@ export default function App() {
       ...contour,
       ...(byKey.get(`${contour.designId}-${index}`) || { area: 0, depth: 0, role: contour.closed ? 'outer' : 'open' })
     }));
+    const clearanceContours = getAlignedSlotClearanceContours().map((contour, index) => ({
+      ...contour,
+      zIndex: interiorDesigns.length + 0.25,
+      contourOrder: contours.length + index
+    }));
     const patternContours = getPatternContours().map((contour, index) => ({
       ...contour,
       materialColor: 'white',
-      zIndex: interiorDesigns.length,
-      contourOrder: contours.length + index
+      zIndex: interiorDesigns.length + 0.5,
+      contourOrder: contours.length + clearanceContours.length + index
     }));
 
-    const booleanContours = buildBooleanInteriorContours([...withAnalysis, ...patternContours]);
+    const booleanContours = buildBooleanInteriorContours([...withAnalysis, ...clearanceContours, ...patternContours]);
 
     return {
       contours: booleanContours,
@@ -4966,7 +5560,7 @@ export default function App() {
   };
 
   const buildArcTopDXFLwPolyline = () => {
-    if (isAngledPanel || hasPanelSplit) return buildStraightDXFLwPolyline();
+    if (isAngledPanel || hasPanelSplit || bottomPanelEnabled) return buildStraightDXFLwPolyline();
 
     const arc = getActiveTopArcData();
     if (!arc) return '';
@@ -5119,7 +5713,7 @@ export default function App() {
   };
 
   const buildFusionArcTopEntities = () => {
-    if (isAngledPanel || hasPanelSplit) return buildFusionStraightEntities();
+    if (isAngledPanel || hasPanelSplit || bottomPanelEnabled) return buildFusionStraightEntities();
 
     const arc = getActiveTopArcData();
     if (!arc) return buildFusionStraightEntities();
@@ -5378,7 +5972,7 @@ export default function App() {
   const interiorDraftBounds = getInteriorDraftBounds(interiorShapeDraft);
   const interiorExportData = useMemo(
     () => (showInteriorExportPreview ? collectInteriorDesignContours() : null),
-    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, interiorClipEnabled, interiorMarginInput]
+    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternMode, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, alignedSlotRows, alignedSlotBottomRows, alignedSlotBreakWidth, alignedSlotLeftInset, alignedSlotRightInset, alignedSlotMinLength, alignedSlotUseRowSpacing, alignedSlotRowSpacing, alignedSlotStaggerBreaks, interiorClipEnabled, interiorMarginInput]
   );
   const interiorExportDiagnostics = useMemo(
     () => getInteriorExportDiagnostics(interiorExportData),
@@ -5523,6 +6117,26 @@ export default function App() {
       return <path d={arcPath} fill="none" stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" strokeLinejoin="round" clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
     }
 
+    if (design.kind === 'eraser') {
+      const path = (design.points || [])
+        .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`)
+        .join(' ');
+
+      return (
+        <path
+          d={path}
+          fill="none"
+          stroke="#000000"
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          clipPath={commonClipPath}
+          {...eventProps}
+          style={cursorStyle}
+        />
+      );
+    }
+
     if (design.kind === 'text') {
       const textValue = design.text ?? '';
       const rawLetterSpacing = n(design.letterSpacing, 0);
@@ -5571,8 +6185,8 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
+                  clearMeasureTool();
                   cancelInteriorShapeTool();
-                  setSelectedInteriorPanelIds([]);
                   setWorkspaceMode('frame');
                 }}
                 className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
@@ -5602,11 +6216,7 @@ export default function App() {
                 <div className="absolute right-0 top-10 z-30 w-72 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600 shadow-lg">
                   <div className="mb-2">
                     <p className="font-semibold text-slate-700">Reference</p>
-                    <p className="mt-0.5 text-[11px] text-slate-500">
-                      {selectedInteriorPanelIds.length
-                        ? `${selectedInteriorPanelIds.length} panel${selectedInteriorPanelIds.length === 1 ? '' : 's'} selected`
-                        : hasPanelSplit ? 'Shift-click panel bodies to select reference' : 'Single panel auto reference'}
-                    </p>
+                    <p className="mt-0.5 text-[11px] text-slate-500">Clean main body</p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
@@ -5696,7 +6306,7 @@ export default function App() {
                   </label>
                 ))}
 
-                {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc') && (
+                {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc' || selectedInteriorDesign.kind === 'eraser') && (
                   <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
                     T
                     <input
@@ -5857,6 +6467,7 @@ export default function App() {
                   setPanState(null);
                   setInteriorDrag(null);
                   setInteriorSelectionBox(null);
+                  if (!draggingMeasurement) setHoverSnap(null);
                   setIsInteriorPointerOnBody(false);
                   setIsInteriorPointerOnWhiteSurface(false);
                   if (interiorShapeDraft?.kind !== 'arc') setInteriorShapeDraft(null);
@@ -5865,7 +6476,9 @@ export default function App() {
                 style={{
                   cursor: panState
                     ? 'grabbing'
-                    : activeInteriorShapeTool
+                    : activeTool === 'measure'
+                      ? 'crosshair'
+                      : activeInteriorShapeTool
                       ? isInteriorPointerOnBody ? 'crosshair' : 'default'
                       : (interiorSelectionBox || isInteriorPointerOnWhiteSurface)
                       ? 'crosshair'
@@ -5884,36 +6497,6 @@ export default function App() {
                   stroke="#0f172a"
                   strokeWidth={2 / viewZoom}
                 />
-
-                {interiorPanelReferences.map(panel => {
-                  const panelPath = panel.points
-                    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`)
-                    .join(' ') + ' Z';
-                  const selectedPanel = hasPanelSplit && selectedInteriorPanelIds.includes(panel.id);
-
-                  return (
-                    <g key={panel.id}>
-                      <path
-                        d={panelPath}
-                        fill="transparent"
-                        stroke="none"
-                        pointerEvents={activeInteriorShapeTool || !hasPanelSplit ? 'none' : 'all'}
-                        onMouseDown={(e) => selectInteriorPanelFromCanvas(e, panel.id)}
-                        style={{ cursor: activeInteriorShapeTool || !hasPanelSplit ? 'default' : 'pointer' }}
-                      />
-                      {selectedPanel && (
-                        <path
-                          d={panelPath}
-                          fill="none"
-                          stroke="#2563eb"
-                          strokeWidth={1.5 / viewZoom}
-                          strokeDasharray={`${8 / viewZoom} ${5 / viewZoom}`}
-                          pointerEvents="none"
-                        />
-                      )}
-                    </g>
-                  );
-                })}
 
                 {showInteriorMarginGuide && interiorMarginBoundarySets.length > 0 && (
                   <path
@@ -6008,6 +6591,10 @@ export default function App() {
                           onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
                           style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
                         />
+                      )}
+
+                      {design.kind === 'eraser' && (
+                        renderInteriorDesignBody(design, design)
                       )}
 
                       {design.kind === 'text' && (
@@ -6206,6 +6793,18 @@ export default function App() {
                         ))}
                       </>
                     )}
+
+                    {interiorShapeDraft.kind === 'eraser' && (interiorShapeDraft.points || []).length > 0 && (
+                      <path
+                        d={(interiorShapeDraft.points || []).map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ')}
+                        fill="none"
+                        stroke="#000000"
+                        strokeWidth={eraserSize * scale}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        opacity="0.75"
+                      />
+                    )}
                   </g>
                 )}
 
@@ -6224,6 +6823,18 @@ export default function App() {
                   />
                 )}
 
+                {patternEnabled && patternMode === 'alignedSlots' && !showInteriorExportPreview && (
+                  <g pointerEvents="none">
+                    {getAlignedSlotClearanceContours().map((contour, index) => (
+                      <polygon
+                        key={`aligned-clearance-preview-${index}`}
+                        points={polygonPoints(contour.points)}
+                        fill="#000000"
+                      />
+                    ))}
+                  </g>
+                )}
+
                 {patternEnabled && (
                   <g pointerEvents="none">
                     {getPatternContours().map((contour, index) => (
@@ -6234,6 +6845,71 @@ export default function App() {
                       />
                     ))}
                   </g>
+                )}
+
+                {measurements.map((m) => {
+                  if (m.type === 'angle') return null;
+
+                  const geometry = getMeasurementGeometry(m);
+                  const color = m.selected || draggingMeasurement?.id === m.id ? '#2563eb' : '#ef4444';
+
+                  return (
+                    <g
+                      key={m.id}
+                      onMouseDown={(e) => handleMeasurementMouseDown(e, m)}
+                      onClick={(e) => handleMeasurementClick(e, m)}
+                      style={{ cursor: activeTool === 'measure' ? draggingMeasurement?.id === m.id ? 'grabbing' : 'grab' : 'default' }}
+                    >
+                      <line x1={geometry.d1[0] * scale} y1={geometry.d1[1] * scale} x2={geometry.d2[0] * scale} y2={geometry.d2[1] * scale} stroke="transparent" strokeWidth={14 / viewZoom} />
+                      <line x1={m.p1[0] * scale} y1={m.p1[1] * scale} x2={geometry.d1[0] * scale} y2={geometry.d1[1] * scale} stroke={color} strokeWidth={1.5 / viewZoom} />
+                      <line x1={m.p2[0] * scale} y1={m.p2[1] * scale} x2={geometry.d2[0] * scale} y2={geometry.d2[1] * scale} stroke={color} strokeWidth={1.5 / viewZoom} />
+                      <line x1={geometry.d1[0] * scale} y1={geometry.d1[1] * scale} x2={geometry.d2[0] * scale} y2={geometry.d2[1] * scale} stroke={color} strokeWidth={2 / viewZoom} />
+                      <polygon points={polygonPoints(geometry.leftArrow)} fill={color} />
+                      <polygon points={polygonPoints(geometry.rightArrow)} fill={color} />
+
+                      <text
+                        x={geometry.label[0] * scale}
+                        y={geometry.label[1] * scale}
+                        fontSize={20 / viewZoom}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fill="none"
+                        stroke="#000000"
+                        strokeWidth={6 / viewZoom}
+                        transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
+                      >
+                        {geometry.distance.toFixed(1)} mm
+                      </text>
+
+                      <text
+                        x={geometry.label[0] * scale}
+                        y={geometry.label[1] * scale}
+                        fill={color}
+                        fontSize={13 / viewZoom}
+                        fontWeight="600"
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
+                      >
+                        {geometry.distance.toFixed(1)} mm
+                      </text>
+
+                      {(m.selected || draggingMeasurement?.id === m.id) && (
+                        <>
+                          <rect x={geometry.d1[0] * scale - 4 / viewZoom} y={geometry.d1[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth={1 / viewZoom} />
+                          <rect x={geometry.d2[0] * scale - 4 / viewZoom} y={geometry.d2[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth={1 / viewZoom} />
+                        </>
+                      )}
+                    </g>
+                  );
+                })}
+
+                {measurePoints.map((p, i) => (
+                  <rect key={`interior-measure-point-${i}`} x={p[0] * scale - 4 / viewZoom} y={p[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth="1" />
+                ))}
+
+                {activeTool === 'measure' && hoverSnap && !draggingMeasurement && (
+                  <rect x={hoverSnap[0] * scale - 5 / viewZoom} y={hoverSnap[1] * scale - 5 / viewZoom} width={10 / viewZoom} height={10 / viewZoom} fill="none" stroke="#2563eb" strokeWidth={2 / viewZoom} />
                 )}
 
                 {showInteriorExportPreview && (
@@ -6262,105 +6938,154 @@ export default function App() {
                 )}
               </svg>
 
-              <details
-                className="absolute left-3 top-3 z-20 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
+              <div
+                className="absolute left-3 top-3 z-30 flex max-w-[calc(100%-1.5rem)] items-start gap-2"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
                 onWheel={(e) => e.stopPropagation()}
               >
-                <summary className="cursor-pointer select-none font-semibold text-slate-700">Margin</summary>
-                <div className="mt-2 w-44 space-y-2">
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={interiorClipEnabled}
-                      onChange={e => setInteriorClipEnabled(e.target.checked)}
-                    />
-                    Clip white designs
-                  </label>
-                  <div>
-                    <label className="text-[11px] text-slate-500">Distance (mm)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={interiorMarginInput}
-                      onFocus={() => setShowInteriorMarginGuide(true)}
-                      onChange={e => {
-                        setShowInteriorMarginGuide(true);
-                        setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
-                      }}
-                      onBlur={handleInteriorMarginBlur}
-                      className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                    />
-                  </div>
-                </div>
-              </details>
-
-              <details
-                className="absolute left-32 top-3 z-20 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-700 shadow-sm"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
-                onWheel={(e) => e.stopPropagation()}
-              >
-                <summary className="cursor-pointer select-none font-semibold text-slate-700">Pattern</summary>
-                <div className="mt-2 w-48 space-y-2">
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={patternEnabled}
-                      onChange={e => setPatternEnabled(e.target.checked)}
-                    />
-                    Horizontal slots
-                  </label>
-                  {[
-                    ['Thickness', patternThickness, setPatternThickness, 1, null, null],
-                    ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
-                    ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
-                    ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
-                    ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
-                    ['Seed', patternSeed, setPatternSeed, 1, null, null]
-                  ].map(([label, value, setter, min, randomEnabled, setRandomEnabled]) => (
-                    <div key={label}>
-                      <div className="flex items-center justify-between gap-2">
-                        <label className="text-[11px] text-slate-500">{label} (mm)</label>
-                        {setRandomEnabled && (
-                          <label className="flex items-center gap-1 text-[10px] text-slate-500">
-                            <input
-                              type="checkbox"
-                              checked={randomEnabled}
-                              onChange={e => setRandomEnabled(e.target.checked)}
-                            />
-                            Random
-                          </label>
-                        )}
+                <details className="relative">
+                  <summary className="list-none cursor-pointer select-none rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-white">
+                    Margin
+                  </summary>
+                  <div className="absolute left-0 top-10 z-40 w-52 rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg">
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={interiorClipEnabled}
+                          onChange={e => setInteriorClipEnabled(e.target.checked)}
+                        />
+                        Clip white designs
+                      </label>
+                      <div>
+                        <label className="text-[11px] text-slate-500">Distance (mm)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={interiorMarginInput}
+                          onFocus={() => setShowInteriorMarginGuide(true)}
+                          onChange={e => {
+                            setShowInteriorMarginGuide(true);
+                            setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
+                          }}
+                          onBlur={handleInteriorMarginBlur}
+                          className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                        />
                       </div>
-                      <input
-                        type="number"
-                        min={min}
-                        value={value}
-                        onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
-                        onBlur={() => handleNumberBlur(setter, value, min, Infinity, min)}
-                        className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                      />
                     </div>
-                  ))}
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={patternRoundedEnds}
-                      onChange={e => setPatternRoundedEnds(e.target.checked)}
-                    />
-                    Rounded ends
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
-                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                  >
-                    Regenerate
-                  </button>
-                </div>
-              </details>
+                  </div>
+                </details>
+
+                <details className="relative">
+                  <summary className="list-none cursor-pointer select-none rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-white">
+                    Pattern
+                  </summary>
+                  <div className="absolute left-0 top-10 z-40 max-h-[calc(100vh-11rem)] w-64 overflow-y-auto rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg">
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={patternEnabled}
+                          onChange={e => setPatternEnabled(e.target.checked)}
+                        />
+                        Enable pattern
+                      </label>
+                      <div>
+                        <label className="text-[11px] text-slate-500">Mode</label>
+                        <select
+                          value={patternMode}
+                          onChange={e => setPatternMode(e.target.value)}
+                          className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                        >
+                          <option value="random">Random slots</option>
+                          <option value="alignedSlots">Aligned slots</option>
+                        </select>
+                      </div>
+                      {patternMode === 'alignedSlots' && (
+                        <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-medium text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={alignedSlotStaggerBreaks}
+                            onChange={e => setAlignedSlotStaggerBreaks(e.target.checked)}
+                          />
+                          Stagger breaks
+                        </label>
+                      )}
+                      {(patternMode === 'random'
+                        ? [
+                          ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                          ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
+                          ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
+                          ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
+                          ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
+                          ['Seed', patternSeed, setPatternSeed, 1, null, null]
+                        ]
+                        : [
+                          ['Rows count', alignedSlotRows, setAlignedSlotRows, 1, null, null],
+                          ...(bottomPanelEnabled ? [['Bottom panel rows', alignedSlotBottomRows, setAlignedSlotBottomRows, 1, null, null]] : []),
+                          ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                          ['Break width', alignedSlotBreakWidth, setAlignedSlotBreakWidth, 0, null, null],
+                          ['Left inset', alignedSlotLeftInset, setAlignedSlotLeftInset, 0, null, null],
+                          ['Right inset', alignedSlotRightInset, setAlignedSlotRightInset, 0, null, null],
+                          ['Min segment', alignedSlotMinLength, setAlignedSlotMinLength, 1, null, null],
+                          ['Row spacing', alignedSlotUseRowSpacing ? alignedSlotRowSpacing : formatPositionDistance(getAlignedSlotEqualRowSpacing()), setAlignedSlotRowSpacing, 0, alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing, !alignedSlotUseRowSpacing]
+                        ]).map(([label, value, setter, min, randomEnabled, setRandomEnabled, readOnly = false]) => (
+                          <div key={label}>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-[11px] text-slate-500">{label}{label === 'Rows count' || label === 'Bottom panel rows' ? '' : ' (mm)'}</label>
+                              {setRandomEnabled && (
+                                <label className="flex items-center gap-1 text-[10px] text-slate-500">
+                                  <input
+                                    type="checkbox"
+                                    checked={randomEnabled}
+                                    onChange={e => {
+                                      const checked = e.target.checked;
+                                      if (patternMode === 'alignedSlots' && label === 'Row spacing' && checked) {
+                                        const displayedSpacing = n(value, getAlignedSlotEqualRowSpacing());
+                                        setAlignedSlotRowSpacing(displayedSpacing);
+                                      }
+                                      setRandomEnabled(checked);
+                                    }}
+                                  />
+                                  {patternMode === 'alignedSlots' && label === 'Row spacing' ? 'Use fixed spacing' : 'Random'}
+                                </label>
+                              )}
+                            </div>
+                            <input
+                              type="number"
+                              min={min}
+                              value={value}
+                              readOnly={readOnly}
+                              onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
+                              onBlur={() => {
+                                if (!readOnly) handleNumberBlur(setter, value, min, Infinity, min);
+                              }}
+                              className={['mt-1 w-full rounded-md border p-1.5 text-sm text-slate-900', readOnly ? 'bg-slate-100' : 'bg-white'].join(' ')}
+                            />
+                          </div>
+                        ))}
+                      <label className="flex items-center gap-2 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={patternRoundedEnds}
+                          onChange={e => setPatternRoundedEnds(e.target.checked)}
+                        />
+                        Rounded ends
+                      </label>
+                      {patternMode === 'random' && (
+                        <button
+                          type="button"
+                          onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
+                          className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          Regenerate
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </details>
+              </div>
 
               <div
                 className="absolute left-3 bottom-3 rounded-lg border border-slate-200 bg-white/95 p-2 shadow-sm"
@@ -6407,7 +7132,9 @@ export default function App() {
                 <div>
                   <h2 className="text-sm font-semibold text-slate-800">Design Tools</h2>
                   <p className="text-[11px] text-slate-500">
-                    {activeInteriorShapeTool ? `${getInteriorShapeName(activeInteriorShapeTool)} active` : 'No tool selected'}
+                    {activeTool === 'measure'
+                      ? 'Measure active'
+                      : activeInteriorShapeTool ? `${getInteriorShapeName(activeInteriorShapeTool)} active` : 'No tool selected'}
                   </p>
                 </div>
               </div>
@@ -6420,6 +7147,41 @@ export default function App() {
                   onChange={handleInteriorDesignFileChange}
                   className="hidden"
                 />
+                <button
+                  type="button"
+                  onClick={() => {
+                    cancelInteriorShapeTool();
+                    setActiveTool(prev => {
+                      if (prev === 'measure') {
+                        setMeasurePoints([]);
+                        setMeasurements([]);
+                        setHoverSnap(null);
+                        setDraggingMeasurement(null);
+                        return null;
+                      }
+
+                      setMeasurePoints([]);
+                      setHoverSnap(null);
+                      setDraggingMeasurement(null);
+                      return 'measure';
+                    });
+                  }}
+                  className={[
+                    'w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border',
+                    activeTool === 'measure'
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                  ].join(' ')}
+                >
+                  <Ruler size={17} />
+                  <span className="flex-1 text-left">Measure</span>
+                  <span className={[
+                    'text-[10px] px-1.5 py-0.5 rounded border',
+                    activeTool === 'measure' ? 'border-white/30 text-white/80' : 'border-slate-200 text-slate-400'
+                  ].join(' ')}>
+                    M
+                  </span>
+                </button>
                 <div className="rounded-lg border border-slate-200 bg-white p-2">
                   <p className="mb-2 text-xs font-semibold text-slate-700">Draw shapes</p>
                   <div className="grid grid-cols-2 gap-1.5">
@@ -6467,6 +7229,32 @@ export default function App() {
                       Cancel drawing
                     </button>
                   )}
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white p-2">
+                  <button
+                    type="button"
+                    onClick={() => selectInteriorShapeTool('eraser')}
+                    className={[
+                      'flex w-full items-center gap-2 rounded-md border px-2 py-2 text-xs font-medium transition',
+                      activeInteriorShapeTool === 'eraser'
+                        ? 'border-blue-400 bg-blue-50 text-blue-700'
+                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-white'
+                    ].join(' ')}
+                  >
+                    <Eraser size={15} />
+                    <span className="flex-1 text-left">Eraser</span>
+                  </button>
+                  <label className="mt-2 block text-[11px] font-medium text-slate-500">
+                    Size mm
+                    <input
+                      type="number"
+                      min="1"
+                      value={eraserSizeInput}
+                      onChange={e => setEraserSizeInput(e.target.value === '' ? '' : Number(e.target.value))}
+                      onBlur={() => setEraserSizeInput(Math.max(1, n(eraserSizeInput, 20)))}
+                      className="mt-1 w-full rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                    />
+                  </label>
                 </div>
                 <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
                   <Grid3X3 size={17} />
@@ -6940,6 +7728,63 @@ export default function App() {
                     />
                   </div>
                 </div>
+              )}
+            </div>
+          </details>
+
+          <details className="rounded-lg bg-slate-50 border px-3 py-2">
+            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Add bottom panel</summary>
+            <div className="mt-2 space-y-3">
+              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={bottomPanelEnabled}
+                  onChange={e => setBottomPanelEnabled(e.target.checked)}
+                />
+                Add bottom panel
+              </label>
+
+              {bottomPanelEnabled && (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-slate-500">Bottom panel height (mm)</label>
+                      <input
+                        type="number"
+                        min={minPanelSize}
+                        value={bottomPanelHeightInput}
+                        onFocus={() => setFocusedNumberField('bottomPanelHeight')}
+                        onChange={e => setBottomPanelHeightInput(e.target.value === '' ? '' : +e.target.value)}
+                        onBlur={() => handleNumberBlur(setBottomPanelHeightInput, bottomPanelHeightInput, minPanelSize, Infinity, 400)}
+                        className="w-full mt-1 p-2 border rounded-md text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-500">Gap (mm)</label>
+                      <input
+                        type="number"
+                        value={bottomPanelGap}
+                        readOnly
+                        className="w-full mt-1 p-2 border rounded-md bg-slate-100 text-slate-600 text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  {manualMode && (
+                    <div>
+                      <label className="text-xs text-slate-500">Bottom panel vertical ears</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={bottomPanelVEars}
+                        onChange={e => setBottomPanelVEars(e.target.value === '' ? '' : +e.target.value)}
+                        onBlur={() => handleNumberBlur(setBottomPanelVEars, bottomPanelVEars, 1, Infinity, 1)}
+                        className="w-full mt-1 p-2 border rounded-md text-sm"
+                      />
+                      <p className="text-[11px] text-slate-400 mt-1">Horizontal ears use the main horizontal ear count. Ear size uses the main ear size controls.</p>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </details>
