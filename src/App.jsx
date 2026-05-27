@@ -82,6 +82,7 @@ export default function App() {
   const [activeInteriorShapeTool, setActiveInteriorShapeTool] = useState(null);
   const [interiorShapeDraft, setInteriorShapeDraft] = useState(null);
   const [eraserSizeInput, setEraserSizeInput] = useState(20);
+  const [interiorDimensionDrafts, setInteriorDimensionDrafts] = useState({});
   const [positionDistanceInputs, setPositionDistanceInputs] = useState({ left: '', right: '', top: '', bottom: '' });
   const [interiorPositionMessage, setInteriorPositionMessage] = useState('');
   const [showInteriorExportPreview, setShowInteriorExportPreview] = useState(false);
@@ -395,6 +396,10 @@ export default function App() {
   useEffect(() => {
     selectedInteriorDesignIdsRef.current = selectedInteriorDesignIds;
   }, [selectedInteriorDesignIds]);
+
+  useEffect(() => {
+    setInteriorDimensionDrafts({});
+  }, [selectedInteriorDesignId, selectedInteriorDesignIds.length]);
 
   useEffect(() => {
     if (focusedNumberField) return;
@@ -2382,6 +2387,111 @@ export default function App() {
     return bestDist <= snapToleranceMm ? best : null;
   };
 
+  const nearestPointOnSegment = (point, a, b) => {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 0.000001) return a;
+    const t = clamp(((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSq, 0, 1);
+    return [a[0] + dx * t, a[1] + dy * t];
+  };
+
+  const getInteriorDrawingSnapCandidates = () => {
+    const candidates = [];
+    const addPoint = (point) => {
+      if (!point || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) return;
+      candidates.push({ type: 'point', point });
+    };
+    const addSegment = (a, b) => {
+      if (!a || !b) return;
+      if (!Number.isFinite(a[0]) || !Number.isFinite(a[1]) || !Number.isFinite(b[0]) || !Number.isFinite(b[1])) return;
+      candidates.push({ type: 'segment', a, b });
+    };
+
+    flattenInteriorDesigns(interiorDesignsRef.current).forEach(design => {
+      if (isImportedInteriorSvg(design) || design.kind === 'text' || design.kind === 'eraser') return;
+
+      if (design.kind === 'line') {
+        const p1 = [n(design.x1, 0), n(design.y1, 0)];
+        const p2 = [n(design.x2, 0), n(design.y2, 0)];
+        addPoint(p1);
+        addPoint(p2);
+        addSegment(p1, p2);
+        return;
+      }
+
+      if (design.kind === 'arc') {
+        const points = sampleInteriorThreePointArc(design, 24);
+        points.forEach(addPoint);
+        points.slice(0, -1).forEach((point, index) => addSegment(point, points[index + 1]));
+        getInteriorPointHandles(design).forEach(handle => addPoint([handle.x, handle.y]));
+        return;
+      }
+
+      if (design.kind === 'polygon') {
+        const points = design.points || [];
+        points.forEach(addPoint);
+        points.forEach((point, index) => addSegment(point, points[(index + 1) % points.length]));
+        return;
+      }
+
+      const bounds = getInteriorObjectBounds(design);
+      const corners = [
+        [bounds.x, bounds.y],
+        [bounds.x + bounds.width, bounds.y],
+        [bounds.x + bounds.width, bounds.y + bounds.height],
+        [bounds.x, bounds.y + bounds.height]
+      ];
+      corners.forEach(addPoint);
+      corners.forEach((point, index) => addSegment(point, corners[(index + 1) % corners.length]));
+    });
+
+    return candidates;
+  };
+
+  const findNearestInteriorDrawingSnapPoint = (x, y, { includeSegments = true } = {}) => {
+    const pointer = [x, y];
+    let best = null;
+    let bestDist = Infinity;
+
+    getInteriorDrawingSnapCandidates().forEach(candidate => {
+      if (candidate.type === 'segment' && !includeSegments) return;
+      const point = candidate.type === 'segment'
+        ? nearestPointOnSegment(pointer, candidate.a, candidate.b)
+        : candidate.point;
+      const dist = Math.hypot(point[0] - x, point[1] - y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = point;
+      }
+    });
+
+    const snapTolerancePx = 12;
+    const snapToleranceMm = snapTolerancePx / (scale * viewZoom);
+    return bestDist <= snapToleranceMm ? best : null;
+  };
+
+  const getInteriorDrawingPoint = (e, allowSnap = true, options = {}) => {
+    const point = getSvgPoint(e);
+    if (!allowSnap) return point;
+    const snapped = findNearestInteriorDrawingSnapPoint(point.x, point.y, options);
+    return snapped ? { x: snapped[0], y: snapped[1] } : point;
+  };
+
+  const constrainLinePoint = (start, point, allowAnyAngle) => {
+    if (allowAnyAngle) return point;
+    const dx = point.x - start.x;
+    const dy = point.y - start.y;
+    return Math.abs(dx) >= Math.abs(dy)
+      ? { x: point.x, y: start.y }
+      : { x: start.x, y: point.y };
+  };
+
+  const getInteriorLineDrawingPoint = (e, start = null) => {
+    const point = getInteriorDrawingPoint(e, true, { includeSegments: false });
+    return start ? constrainLinePoint(start, point, e.ctrlKey || e.metaKey) : point;
+  };
+
   const getMeasurementBaseData = (m) => {
     const dx = m.p2[0] - m.p1[0];
     const dy = m.p2[1] - m.p1[1];
@@ -2693,7 +2803,7 @@ export default function App() {
   };
 
   const isImportedInteriorSvg = (design) => !design?.kind || design.kind === 'svg';
-  const isPointEditedInteriorShape = (design) => design?.kind === 'line' || design?.kind === 'arc';
+  const isPointEditedInteriorShape = (design) => design?.kind === 'line' || design?.kind === 'arc' || design?.kind === 'polygon';
   const isInteriorGroup = (design) => design?.kind === 'group';
   const flattenInteriorDesigns = (designs) => (
     designs.flatMap(design => isInteriorGroup(design) ? flattenInteriorDesigns(design.children || []) : [design])
@@ -2702,7 +2812,18 @@ export default function App() {
   const getInteriorObjectBounds = (design) => {
     if (!design) return { x: 0, y: 0, width: 10, height: 10 };
 
-    if (isInteriorGroup(design)) return getInteriorSelectionBounds(design.children || []);
+    if (isInteriorGroup(design)) {
+      if (design.clipBounds) {
+        return {
+          x: n(design.clipBounds.x, 0),
+          y: n(design.clipBounds.y, 0),
+          width: Math.max(10, n(design.clipBounds.width, 10)),
+          height: Math.max(10, n(design.clipBounds.height, 10))
+        };
+      }
+
+      return getInteriorSelectionBounds(design.children || []);
+    }
 
     if (design.kind === 'line') {
       const x1 = n(design.x1, n(design.x, 0));
@@ -2753,6 +2874,23 @@ export default function App() {
       };
     }
 
+    if (design.kind === 'polygon') {
+      const points = (design.points || []).filter(point => Array.isArray(point) && point.length >= 2);
+      if (!points.length) return { x: 0, y: 0, width: 10, height: 10 };
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+      const maxX = Math.max(...xs);
+      const maxY = Math.max(...ys);
+      return {
+        x: minX,
+        y: minY,
+        width: Math.max(10, maxX - minX),
+        height: Math.max(10, maxY - minY)
+      };
+    }
+
     return {
       x: n(design.x, 0),
       y: n(design.y, 0),
@@ -2791,6 +2929,7 @@ export default function App() {
       return {
         ...design,
         ...next,
+        ...(design.clipBounds ? { clipBounds: next } : {}),
         children: (design.children || []).map(child => {
           const childBounds = getInteriorObjectBounds(child);
           return {
@@ -2807,6 +2946,13 @@ export default function App() {
     }
 
     if (design.kind === 'eraser') {
+      return {
+        ...next,
+        points: (design.points || []).map(point => transformPoint(point[0], point[1]))
+      };
+    }
+
+    if (design.kind === 'polygon') {
       return {
         ...next,
         points: (design.points || []).map(point => transformPoint(point[0], point[1]))
@@ -2878,6 +3024,15 @@ export default function App() {
       ];
     }
 
+    if (design?.kind === 'polygon') {
+      return (design.points || []).map((point, index) => ({
+        id: `poly-${index}`,
+        x: point[0],
+        y: point[1],
+        cursor: 'move'
+      }));
+    }
+
     return [];
   };
 
@@ -2886,6 +3041,7 @@ export default function App() {
     ellipse: 'Ellipse',
     line: 'Line',
     arc: '3-point arc',
+    polygon: 'Closed profile',
     text: 'Text',
     eraser: 'Eraser'
   }[kind] || 'Shape');
@@ -2899,7 +3055,7 @@ export default function App() {
       color: 'white',
       exportable: true,
       warnings: [],
-      aspectLocked: draft.kind === 'rect' || draft.kind === 'ellipse' || draft.kind === 'text',
+      aspectLocked: false,
       aspectRatio: draft.kind === 'rect' || draft.kind === 'ellipse' || draft.kind === 'text'
         ? Math.max(10, Math.abs(draft.x2 - draft.x1)) / Math.max(10, Math.abs(draft.y2 - draft.y1))
         : 1
@@ -2983,6 +3139,99 @@ export default function App() {
   const addInteriorShape = (shape) => {
     if (!shape) return;
     applyInteriorDesigns(prev => [...prev, shape], { selectedId: shape.id });
+  };
+
+  const pointKey = (point) => `${Math.round(point[0] * 1000) / 1000},${Math.round(point[1] * 1000) / 1000}`;
+
+  const findClosedLineProfile = (existingLines, closingLine) => {
+    if (existingLines.length < 2 || !closingLine) return null;
+
+    const adjacency = new Map();
+    const pointByKey = new Map();
+    const addEdge = (key, edge) => {
+      adjacency.set(key, [...(adjacency.get(key) || []), edge]);
+      pointByKey.set(edge.fromKey, edge.from);
+      pointByKey.set(edge.toKey, edge.to);
+    };
+
+    existingLines.forEach((line, index) => {
+      const p1 = [n(line.x1, 0), n(line.y1, 0)];
+      const p2 = [n(line.x2, 0), n(line.y2, 0)];
+      const k1 = pointKey(p1);
+      const k2 = pointKey(p2);
+      addEdge(k1, { index, fromKey: k1, toKey: k2, from: p1, to: p2 });
+      addEdge(k2, { index, fromKey: k2, toKey: k1, from: p2, to: p1 });
+    });
+
+    const start = [n(closingLine.x2, 0), n(closingLine.y2, 0)];
+    const targetKey = pointKey([n(closingLine.x1, 0), n(closingLine.y1, 0)]);
+    const startKey = pointKey(start);
+    const stack = [{ key: startKey, pathKeys: [startKey], usedLineIndexes: new Set() }];
+
+    while (stack.length) {
+      const current = stack.pop();
+      const edges = adjacency.get(current.key) || [];
+
+      for (const edge of edges) {
+        if (current.usedLineIndexes.has(edge.index)) continue;
+
+        const nextUsed = new Set(current.usedLineIndexes);
+        nextUsed.add(edge.index);
+        const nextPath = [...current.pathKeys, edge.toKey];
+
+        if (edge.toKey === targetKey && nextUsed.size >= 2) {
+          const closingIndex = existingLines.length;
+          return {
+            points: [
+              [n(closingLine.x1, 0), n(closingLine.y1, 0)],
+              [n(closingLine.x2, 0), n(closingLine.y2, 0)],
+              ...nextPath.slice(1, -1).map(key => pointByKey.get(key) || start)
+            ],
+            usedLineIndexes: new Set([...nextUsed, closingIndex])
+          };
+        }
+
+        if (nextPath.length <= existingLines.length + 1) {
+          stack.push({ key: edge.toKey, pathKeys: nextPath, usedLineIndexes: nextUsed });
+        }
+      }
+    }
+
+    return null;
+  };
+
+  const addInteriorLineOrClosedProfile = (shape) => {
+    if (!shape) return;
+
+    const existingLines = interiorDesignsRef.current.filter(design => (
+      design.kind === 'line'
+      && (design.color || 'white') === 'white'
+      && Math.abs(n(design.thickness, 8) - n(shape.thickness, 8)) < 0.001
+    ));
+    const profile = findClosedLineProfile(existingLines, shape);
+
+    if (!profile) {
+      addInteriorShape(shape);
+      return;
+    }
+
+    const polygon = {
+      id: crypto.randomUUID(),
+      kind: 'polygon',
+      name: 'Closed profile',
+      color: 'white',
+      exportable: true,
+      warnings: [],
+      aspectLocked: false,
+      points: profile.points
+    };
+
+    applyInteriorDesigns(prev => {
+      const lineIdsToRemove = new Set(existingLines
+        .filter((_, index) => profile.usedLineIndexes.has(index))
+        .map(line => line.id));
+      return [...prev.filter(design => !lineIdsToRemove.has(design.id)), polygon];
+    }, { selectedId: polygon.id });
   };
 
   const setInteriorSelection = (ids) => {
@@ -3217,10 +3466,118 @@ export default function App() {
       : { ...design, color }
   );
 
+  const getInteriorDesignById = (id) => flattenInteriorDesigns(interiorDesigns).find(design => design.id === id) || null;
+
+  const getInteriorClipSourceContours = (design) => {
+    if (!design?.clipSourceId) return [];
+    const source = getInteriorDesignById(design.clipSourceId);
+    if (!source || source.id === design.id) return [];
+
+    return getInteriorShapeContours(source)
+      .map(points => cleanDxfPoints(points, true))
+      .filter(points => points.length >= 3);
+  };
+
+  const intersectClosedContourWithPaths = (points, clipPolygons) => {
+    if (!clipPolygons.length || points.length < 3) return [points];
+
+    const subject = cleanClipperPaths([toClipperPath(points)]);
+    const clips = cleanClipperPaths(clipPolygons.map(toClipperPath));
+    if (!subject.length || !clips.length) return [];
+
+    const clipper = new ClipperLib.Clipper();
+    clipper.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    clipper.AddPaths(clips, ClipperLib.PolyType.ptClip, true);
+
+    const solution = new ClipperLib.Paths();
+    clipper.Execute(
+      ClipperLib.ClipType.ctIntersection,
+      solution,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+
+    return cleanClipperPaths(solution).map(fromClipperPath);
+  };
+
+  const getInteriorClipPolygonsForDesign = (design) => {
+    const clipGroups = [];
+    const clipSourceContours = getInteriorClipSourceContours(design);
+    if (clipSourceContours.length) clipGroups.push(clipSourceContours);
+
+    if (interiorClipEnabled && design.color === 'white' && interiorMarginBoundarySets.length) {
+      clipGroups.push(interiorMarginBoundarySets);
+    }
+
+    if (!clipGroups.length) return [];
+
+    const unionedGroups = clipGroups
+      .map(group => unionClipperPaths(orientClipperPaths(group.map(toClipperPath))))
+      .filter(group => group.length);
+
+    if (!unionedGroups.length) return [];
+
+    let current = unionedGroups[0];
+    unionedGroups.slice(1).forEach(group => {
+      if (!current.length) return;
+
+      const clipper = new ClipperLib.Clipper();
+      clipper.AddPaths(current, ClipperLib.PolyType.ptSubject, true);
+      clipper.AddPaths(group, ClipperLib.PolyType.ptClip, true);
+
+      const solution = new ClipperLib.Paths();
+      clipper.Execute(
+        ClipperLib.ClipType.ctIntersection,
+        solution,
+        ClipperLib.PolyFillType.pftNonZero,
+        ClipperLib.PolyFillType.pftNonZero
+      );
+
+      current = cleanClipperPaths(solution);
+    });
+
+    return current.map(fromClipperPath);
+  };
+
+  const applyInteriorClipFromSelection = () => {
+    const selected = interiorDesignsRef.current.filter(design => selectedInteriorDesignIdsRef.current.includes(design.id));
+    const clipSource = selected.find(design => (design.color || 'white') === 'black' && design.kind === 'rect');
+    const clippedTargets = selected.filter(design => design.id !== clipSource?.id && (design.color || 'white') === 'white');
+
+    if (!clipSource || !clippedTargets.length) {
+      showInteriorPositionMessage('Select one black rectangle and at least one white design.');
+      return;
+    }
+
+    const clippedGroup = {
+      id: crypto.randomUUID(),
+      kind: 'group',
+      name: 'Clipped pattern',
+      color: 'white',
+      exportable: clippedTargets.every(design => design.exportable !== false),
+      warnings: clippedTargets.flatMap(design => design.warnings || []),
+      aspectLocked: false,
+      clipBounds: getInteriorObjectBounds(clipSource),
+      children: [
+        { ...clipSource },
+        ...clippedTargets.map(design => ({ ...design, clipSourceId: clipSource.id }))
+      ]
+    };
+
+    applyInteriorDesigns(prev => {
+      const selectedIds = new Set([clipSource.id, ...clippedTargets.map(target => target.id)]);
+      const firstIndex = prev.findIndex(design => selectedIds.has(design.id));
+      const next = prev.filter(design => !selectedIds.has(design.id));
+      next.splice(Math.max(0, firstIndex), 0, clippedGroup);
+      return next;
+    }, { history: true, selectedId: clippedGroup.id });
+  };
+
   const selectInteriorShapeTool = (kind) => {
     clearMeasureTool();
     setActiveInteriorShapeTool(prev => prev === kind ? null : kind);
     setInteriorShapeDraft(null);
+    setHoverSnap(null);
     setInteriorSelection([]);
     setInteriorDrag(null);
   };
@@ -3294,6 +3651,8 @@ export default function App() {
         const cy = bounds.y + ry;
         return (((px - cx) ** 2) / ((rx || 1) ** 2)) + (((py - cy) ** 2) / ((ry || 1) ** 2)) <= 1;
       }
+
+      if (design.kind === 'polygon') return pointInPolygon([px, py], design.points || []);
 
       if (design.kind === 'line' || design.kind === 'arc') {
         return getInteriorShapeContours(design).some(contour => pointInPolygon([px, py], contour));
@@ -3371,6 +3730,20 @@ export default function App() {
   const formatPositionDistance = (value) => {
     const rounded = Math.round(value * 1000) / 1000;
     return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, '').replace(/\.$/, '');
+  };
+
+  const formatInteriorDimensionInput = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '';
+    return numeric.toFixed(2);
+  };
+
+  const clearInteriorDimensionDraft = (field) => {
+    setInteriorDimensionDrafts(prev => {
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -3481,6 +3854,12 @@ export default function App() {
       return;
     }
 
+    if (activeInteriorShapeTool && activeInteriorShapeTool !== 'eraser') {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     const point = getSvgPoint(e);
     const onBody = isInteriorPointOnBody(point);
     const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
@@ -3488,17 +3867,11 @@ export default function App() {
     setIsInteriorPointerOnBody(onBody);
     setIsInteriorPointerOnWhiteSurface(onWhiteSurface);
 
-    if (activeInteriorShapeTool && !onBody) {
-      return;
-    }
-
     if (!activeInteriorShapeTool) {
       setInteriorSelection([]);
       setInteriorSelectionBox({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
       return;
     }
-
-    if (activeInteriorShapeTool === 'arc') return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -3568,15 +3941,43 @@ export default function App() {
     e.preventDefault();
     e.stopPropagation();
 
-    if (activeInteriorShapeTool !== 'arc') return;
+    if (activeInteriorShapeTool === 'eraser') return;
 
-    const point = getSvgPoint(e);
+    const point = activeInteriorShapeTool === 'line'
+      ? getInteriorLineDrawingPoint(e, interiorShapeDraft ? { x: interiorShapeDraft.x1, y: interiorShapeDraft.y1 } : null)
+      : getInteriorDrawingPoint(e, true);
     interiorMousePointRef.current = point;
     const onBody = isInteriorPointOnBody(point);
     const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
     setIsInteriorPointerOnBody(onBody);
     setIsInteriorPointerOnWhiteSurface(onWhiteSurface);
-    if (!onBody) return;
+
+    if (activeInteriorShapeTool !== 'arc') {
+      if (!interiorShapeDraft || interiorShapeDraft.kind !== activeInteriorShapeTool) {
+        setInteriorSelection([]);
+        setInteriorShapeDraft({
+          kind: activeInteriorShapeTool,
+          x1: point.x,
+          y1: point.y,
+          x2: point.x,
+          y2: point.y,
+          drawing: true,
+          clickPlacement: true
+        });
+        return;
+      }
+
+      const nextDraft = {
+        ...interiorShapeDraft,
+        x2: point.x,
+        y2: point.y,
+        drawing: false,
+        clickPlacement: false
+      };
+      commitInteriorClickDraft(nextDraft);
+      setInteriorShapeDraft(null);
+      return;
+    }
 
     const points = [...(interiorShapeDraft?.points || []), [point.x, point.y]];
 
@@ -3607,8 +4008,36 @@ export default function App() {
       ? Math.hypot(interiorShapeDraft.x2 - interiorShapeDraft.x1, interiorShapeDraft.y2 - interiorShapeDraft.y1)
       : Math.min(bounds.width, bounds.height);
 
-    if (length >= 2) addInteriorShape(createInteriorShapeFromDraft(interiorShapeDraft));
+    if (length >= 2) {
+      const shape = createInteriorShapeFromDraft(interiorShapeDraft);
+      if (shape?.kind === 'line') {
+        addInteriorLineOrClosedProfile(shape);
+      } else {
+        addInteriorShape(shape);
+      }
+    }
     setInteriorShapeDraft(null);
+  };
+
+  const commitInteriorClickDraft = (draft) => {
+    if (!draft || draft.kind === 'arc' || draft.kind === 'eraser') return;
+
+    const bounds = getInteriorDraftBounds(draft);
+    if (!bounds) return;
+
+    const isLine = draft.kind === 'line';
+    const length = isLine
+      ? Math.hypot(draft.x2 - draft.x1, draft.y2 - draft.y1)
+      : Math.min(bounds.width, bounds.height);
+
+    if (length < 2) return;
+
+    const shape = createInteriorShapeFromDraft(draft);
+    if (shape?.kind === 'line') {
+      addInteriorLineOrClosedProfile(shape);
+    } else {
+      addInteriorShape(shape);
+    }
   };
 
   const svgTextToDataUrl = (text) => {
@@ -3725,7 +4154,7 @@ export default function App() {
         y: safeHeight / 2 - defaultSize / 2,
         width: defaultSize,
         height: defaultSize,
-        aspectLocked: true,
+        aspectLocked: false,
         aspectRatio: 1
       };
 
@@ -3782,6 +4211,11 @@ export default function App() {
 
   const handleInteriorPreviewMouseMove = (e) => {
     const point = getSvgPoint(e);
+    const drawingPoint = activeInteriorShapeTool && activeInteriorShapeTool !== 'eraser'
+      ? activeInteriorShapeTool === 'line'
+        ? getInteriorLineDrawingPoint(e, interiorShapeDraft ? { x: interiorShapeDraft.x1, y: interiorShapeDraft.y1 } : null)
+        : getInteriorDrawingPoint(e, true)
+      : point;
     interiorMousePointRef.current = point;
     const onBody = isInteriorPointOnBody(point);
     const onWhiteSurface = isInteriorPointOnWhiteDesignSurface(point);
@@ -3819,7 +4253,8 @@ export default function App() {
 
     if (interiorShapeDraft) {
       if (interiorShapeDraft.kind === 'arc') {
-        setInteriorShapeDraft(prev => prev ? { ...prev, preview: [point.x, point.y] } : prev);
+        setHoverSnap(drawingPoint.x !== point.x || drawingPoint.y !== point.y ? [drawingPoint.x, drawingPoint.y] : null);
+        setInteriorShapeDraft(prev => prev ? { ...prev, preview: [drawingPoint.x, drawingPoint.y] } : prev);
         return;
       }
 
@@ -3835,9 +4270,14 @@ export default function App() {
       }
 
       if (interiorShapeDraft.drawing) {
-        setInteriorShapeDraft(prev => prev ? { ...prev, x2: point.x, y2: point.y } : prev);
+        setHoverSnap(drawingPoint.x !== point.x || drawingPoint.y !== point.y ? [drawingPoint.x, drawingPoint.y] : null);
+        setInteriorShapeDraft(prev => prev ? { ...prev, x2: drawingPoint.x, y2: drawingPoint.y } : prev);
         return;
       }
+    }
+
+    if (activeInteriorShapeTool && activeInteriorShapeTool !== 'eraser') {
+      setHoverSnap(drawingPoint.x !== point.x || drawingPoint.y !== point.y ? [drawingPoint.x, drawingPoint.y] : null);
     }
 
     if (!interiorDrag) return;
@@ -3921,6 +4361,11 @@ export default function App() {
       } else if (interiorDrag.handle === 'p3') {
         next.x3 = n(start.x3, 0) + dx;
         next.y3 = n(start.y3, 0) + dy;
+      } else if (String(interiorDrag.handle).startsWith('poly-')) {
+        const pointIndex = Number(String(interiorDrag.handle).replace('poly-', ''));
+        next.points = (start.points || []).map((point, index) => (
+          index === pointIndex ? [point[0] + dx, point[1] + dy] : point
+        ));
       }
 
       updateInteriorDesign(interiorDrag.id, { ...next, ...getInteriorObjectBounds(next) }, { history: false });
@@ -3961,10 +4406,14 @@ export default function App() {
   };
 
   const handleInteriorNumberChange = (field, value) => {
+    setInteriorDimensionDrafts(prev => ({ ...prev, [field]: value }));
+    if (value === '') return;
+    const rawNumber = Number(value);
+    if (!Number.isFinite(rawNumber)) return;
+
     if (selectedInteriorDesignIds.length > 1 && ['x', 'y', 'width', 'height'].includes(field)) {
-      if (value === '') return;
       const bounds = getInteriorSelectionBounds(interiorDesigns.filter(item => selectedInteriorDesignIds.includes(item.id)));
-      const nextBounds = { ...bounds, [field]: field === 'width' || field === 'height' ? Math.max(10, Number(value)) : Number(value) };
+      const nextBounds = { ...bounds, [field]: field === 'width' || field === 'height' ? Math.max(10, rawNumber) : rawNumber };
       const scaleX = nextBounds.width / Math.max(0.0001, bounds.width);
       const scaleY = nextBounds.height / Math.max(0.0001, bounds.height);
       applyInteriorDesigns(prev => prev.map(item => {
@@ -3985,13 +4434,9 @@ export default function App() {
 
     const design = getSelectedInteriorDesign();
     if (!design) return;
-    if (value === '') {
-      updateInteriorDesign(design.id, { [field]: '' });
-      return;
-    }
 
     const min = field === 'width' || field === 'height' ? 10 : -Infinity;
-    const numericValue = Math.max(min, Number(value));
+    const numericValue = Math.max(min, rawNumber);
     const ratio = Math.max(0.0001, n(design.aspectRatio, getInteriorAspectRatio(design)));
     const bounds = getInteriorObjectBounds(design);
     const isBoundsField = ['x', 'y', 'width', 'height'].includes(field);
@@ -4015,8 +4460,22 @@ export default function App() {
   };
 
   const handleInteriorNumberBlur = (field, fallback) => {
+    const draftedValue = interiorDimensionDrafts[field];
+    if (draftedValue === '') {
+      clearInteriorDimensionDraft(field);
+      return;
+    }
+
+    if (selectedInteriorDesignIds.length > 1 && ['x', 'y', 'width', 'height'].includes(field)) {
+      clearInteriorDimensionDraft(field);
+      return;
+    }
+
     const design = getSelectedInteriorDesign();
-    if (!design) return;
+    if (!design) {
+      clearInteriorDimensionDraft(field);
+      return;
+    }
 
     const min = field === 'width' || field === 'height' ? 10 : -Infinity;
     const numericValue = Math.max(min, n(design[field], fallback));
@@ -4026,20 +4485,24 @@ export default function App() {
 
     if (design.aspectLocked && field === 'width') {
       updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, width: numericValue, height: Math.max(10, numericValue / ratio) }));
+      clearInteriorDimensionDraft(field);
       return;
     }
 
     if (design.aspectLocked && field === 'height') {
       updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, height: numericValue, width: Math.max(10, numericValue * ratio) }));
+      clearInteriorDimensionDraft(field);
       return;
     }
 
     if (isBoundsField) {
       updateInteriorDesign(design.id, applyInteriorObjectBounds(design, { ...bounds, [field]: numericValue }));
+      clearInteriorDimensionDraft(field);
       return;
     }
 
     updateInteriorDesign(design.id, { [field]: numericValue });
+    clearInteriorDimensionDraft(field);
   };
 
   const handleInteriorMarginBlur = () => {
@@ -5248,6 +5711,10 @@ export default function App() {
       })];
     }
 
+    if (design.kind === 'polygon') {
+      return [design.points || []];
+    }
+
     if (design.kind === 'line') {
       return offsetOpenStrokeContours(
         [[n(design.x1, 0), n(design.y1, 0)], [n(design.x2, 0), n(design.y2, 0)]],
@@ -5284,7 +5751,7 @@ export default function App() {
           const cleaned = cleanDxfPoints(points, true);
           if (cleaned.length < 3) return;
           const contourSets = design.color === 'white'
-            ? intersectClosedContourWithMargin(cleaned)
+            ? intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design))
             : [cleaned];
           contourSets.forEach(clipped => {
             if (clipped.length < 3) return;
@@ -5332,7 +5799,7 @@ export default function App() {
         const placed = cleanDxfPoints(points.map(placePoint), closed);
         if (placed.length < (closed ? 3 : 2)) return;
         const clippedSets = closed
-          ? (design.color === 'white' ? intersectClosedContourWithMargin(placed) : [placed])
+          ? (design.color === 'white' ? intersectClosedContourWithPaths(placed, getInteriorClipPolygonsForDesign(design)) : [placed])
           : (interiorClipEnabled ? [] : [placed]);
 
         clippedSets.forEach(clipped => {
@@ -5473,7 +5940,7 @@ export default function App() {
     const patternContours = getPatternContours().map((contour, index) => ({
       ...contour,
       materialColor: 'white',
-      zIndex: interiorDesigns.length + 0.5,
+      zIndex: -1,
       contourOrder: contours.length + clearanceContours.length + index
     }));
 
@@ -5998,6 +6465,8 @@ export default function App() {
     };
   };
 
+  const getInteriorDesignClipPathId = (designId) => `interior-design-clip-${designId}`;
+
   const getMeasuredTextBox = (text, fontFamily = 'Arial, sans-serif', letterSpacing = 0) => {
     const safeText = text || 'Text';
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -6047,7 +6516,9 @@ export default function App() {
     const y = bounds.y;
     const itemWidth = bounds.width;
     const itemHeight = bounds.height;
-    const commonClipPath = interiorClipEnabled && design.color === 'white' ? 'url(#interior-margin-clip)' : undefined;
+    const commonClipPath = getInteriorClipPolygonsForDesign(design).length
+      ? `url(#${getInteriorDesignClipPathId(design.id)})`
+      : undefined;
     const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
     const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
     const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
@@ -6107,6 +6578,10 @@ export default function App() {
 
     if (design.kind === 'ellipse') {
       return <ellipse cx={(x + itemWidth / 2) * scale} cy={(y + itemHeight / 2) * scale} rx={(itemWidth / 2) * scale} ry={(itemHeight / 2) * scale} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+    }
+
+    if (design.kind === 'polygon') {
+      return <polygon points={polygonPoints(design.points || [])} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'line') {
@@ -6298,9 +6773,18 @@ export default function App() {
                     {label}
                     <input
                       type="number"
-                      value={selectedInteriorBounds?.[field] ?? selectedInteriorDesign[field] ?? ''}
+                      value={interiorDimensionDrafts[field] ?? formatInteriorDimensionInput(selectedInteriorBounds?.[field] ?? selectedInteriorDesign[field] ?? '')}
+                      onFocus={() => {
+                        setInteriorDimensionDrafts(prev => ({
+                          ...prev,
+                          [field]: formatInteriorDimensionInput(selectedInteriorBounds?.[field] ?? selectedInteriorDesign[field] ?? '')
+                        }));
+                      }}
                       onChange={e => handleInteriorNumberChange(field, e.target.value)}
                       onBlur={() => handleInteriorNumberBlur(field, field === 'width' || field === 'height' ? 100 : 0)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') e.currentTarget.blur();
+                      }}
                       className="w-20 rounded-md border bg-white p-1.5 text-xs text-slate-900"
                     />
                   </label>
@@ -6391,6 +6875,15 @@ export default function App() {
                 >
                   Ungroup
                 </button>
+                <button
+                  type="button"
+                  disabled={selectedInteriorDesignIds.length < 2}
+                  onClick={applyInteriorClipFromSelection}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  title="Clip selected white design to selected black rectangle"
+                >
+                  Clip
+                </button>
 
                 <div className="flex items-center rounded-md border border-slate-200 bg-white">
                   <button
@@ -6461,7 +6954,7 @@ export default function App() {
                 onMouseUp={() => {
                   finishInteriorInteraction();
                   finishInteriorSelectionBox();
-                  finishInteriorShapeDraft();
+                  if (interiorShapeDraft?.kind === 'eraser') finishInteriorShapeDraft();
                 }}
                 onMouseLeave={() => {
                   setPanState(null);
@@ -6479,7 +6972,7 @@ export default function App() {
                     : activeTool === 'measure'
                       ? 'crosshair'
                       : activeInteriorShapeTool
-                      ? isInteriorPointerOnBody ? 'crosshair' : 'default'
+                      ? 'crosshair'
                       : (interiorSelectionBox || isInteriorPointerOnWhiteSurface)
                       ? 'crosshair'
                       : 'default'
@@ -6489,6 +6982,18 @@ export default function App() {
                   <clipPath id="interior-margin-clip" clipPathUnits="userSpaceOnUse">
                     <path d={buildInteriorMarginPath()} />
                   </clipPath>
+                  {flattenInteriorDesigns(interiorDesigns).map(design => {
+                    const clipPolygons = getInteriorClipPolygonsForDesign(design);
+                    if (!clipPolygons.length) return null;
+
+                    return (
+                      <clipPath key={design.id} id={getInteriorDesignClipPathId(design.id)} clipPathUnits="userSpaceOnUse">
+                        {clipPolygons.map((points, index) => (
+                          <polygon key={`${design.id}-clip-${index}`} points={polygonPoints(points)} />
+                        ))}
+                      </clipPath>
+                    );
+                  })}
                 </defs>
 
                 <path
@@ -6509,6 +7014,18 @@ export default function App() {
                   />
                 )}
 
+                {patternEnabled && (
+                  <g pointerEvents="none">
+                    {getPatternContours().map((contour, index) => (
+                      <polygon
+                        key={`pattern-preview-${index}`}
+                        points={polygonPoints(contour.points)}
+                        fill="#ffffff"
+                      />
+                    ))}
+                  </g>
+                )}
+
                 {interiorDesigns.map((design) => {
                   const selected = selectedInteriorDesignIds.includes(design.id) || design.id === selectedInteriorDesignId;
                   const bounds = getInteriorObjectBounds(design);
@@ -6516,7 +7033,9 @@ export default function App() {
                   const y = bounds.y;
                   const itemWidth = bounds.width;
                   const itemHeight = bounds.height;
-                  const commonClipPath = interiorClipEnabled && design.color === 'white' ? 'url(#interior-margin-clip)' : undefined;
+                  const commonClipPath = getInteriorClipPolygonsForDesign(design).length
+                    ? `url(#${getInteriorDesignClipPathId(design.id)})`
+                    : undefined;
                   const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
                   const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
                   const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
@@ -6554,6 +7073,17 @@ export default function App() {
                           cy={(y + itemHeight / 2) * scale}
                           rx={(itemWidth / 2) * scale}
                           ry={(itemHeight / 2) * scale}
+                          fill={shapeFill}
+                          clipPath={commonClipPath}
+                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                        />
+                      )}
+
+                      {design.kind === 'polygon' && (
+                        <polygon
+                          points={polygonPoints(design.points || [])}
                           fill={shapeFill}
                           clipPath={commonClipPath}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
@@ -6654,6 +7184,18 @@ export default function App() {
                     </g>
                   );
                 })}
+
+                {patternEnabled && patternMode === 'alignedSlots' && !showInteriorExportPreview && (
+                  <g pointerEvents="none">
+                    {getAlignedSlotClearanceContours().map((contour, index) => (
+                      <polygon
+                        key={`aligned-clearance-preview-${index}`}
+                        points={polygonPoints(contour.points)}
+                        fill="#000000"
+                      />
+                    ))}
+                  </g>
+                )}
 
                 {selectedInteriorDesignItems.length > 1 && selectedInteriorBounds && !showInteriorExportPreview && (
                   <g>
@@ -6823,30 +7365,6 @@ export default function App() {
                   />
                 )}
 
-                {patternEnabled && patternMode === 'alignedSlots' && !showInteriorExportPreview && (
-                  <g pointerEvents="none">
-                    {getAlignedSlotClearanceContours().map((contour, index) => (
-                      <polygon
-                        key={`aligned-clearance-preview-${index}`}
-                        points={polygonPoints(contour.points)}
-                        fill="#000000"
-                      />
-                    ))}
-                  </g>
-                )}
-
-                {patternEnabled && (
-                  <g pointerEvents="none">
-                    {getPatternContours().map((contour, index) => (
-                      <polygon
-                        key={`pattern-preview-${index}`}
-                        points={polygonPoints(contour.points)}
-                        fill="#ffffff"
-                      />
-                    ))}
-                  </g>
-                )}
-
                 {measurements.map((m) => {
                   if (m.type === 'angle') return null;
 
@@ -6908,7 +7426,7 @@ export default function App() {
                   <rect key={`interior-measure-point-${i}`} x={p[0] * scale - 4 / viewZoom} y={p[1] * scale - 4 / viewZoom} width={8 / viewZoom} height={8 / viewZoom} fill="#2563eb" stroke="white" strokeWidth="1" />
                 ))}
 
-                {activeTool === 'measure' && hoverSnap && !draggingMeasurement && (
+                {((activeTool === 'measure') || (activeInteriorShapeTool && activeInteriorShapeTool !== 'eraser')) && hoverSnap && !draggingMeasurement && (
                   <rect x={hoverSnap[0] * scale - 5 / viewZoom} y={hoverSnap[1] * scale - 5 / viewZoom} width={10 / viewZoom} height={10 / viewZoom} fill="none" stroke="#2563eb" strokeWidth={2 / viewZoom} />
                 )}
 
