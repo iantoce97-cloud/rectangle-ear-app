@@ -13,7 +13,6 @@ import {
   Grid3X3,
   Upload,
   Wrench,
-  ArrowLeft,
   ArrowUp,
   ArrowDown,
   PenLine,
@@ -109,6 +108,19 @@ export default function App() {
   const [alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing] = useState(false);
   const [alignedSlotRowSpacing, setAlignedSlotRowSpacing] = useState(80);
   const [alignedSlotStaggerBreaks, setAlignedSlotStaggerBreaks] = useState(false);
+  const [presentationItems, setPresentationItems] = useState(() => {
+    if (typeof localStorage === 'undefined') return [];
+    try {
+      const saved = JSON.parse(localStorage.getItem('rectangle-ear-presentation-items') || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
+  const [selectedPresentationItemId, setSelectedPresentationItemId] = useState(null);
+  const [presentationZoom, setPresentationZoom] = useState(1);
+  const [presentationPosition, setPresentationPosition] = useState(null);
+  const [presentationDrag, setPresentationDrag] = useState(null);
 
   const [activeTool, setActiveTool] = useState(null);
 
@@ -130,6 +142,11 @@ export default function App() {
   const interiorSelectionJustFinishedRef = useRef(false);
   const interiorSuppressNextObjectClickRef = useRef(false);
   const positionMessageTimeoutRef = useRef(null);
+  const presentationItemsRef = useRef([]);
+  const selectedPresentationItemIdRef = useRef(null);
+  const presentationClipboardRef = useRef(null);
+  const presentationMousePointRef = useRef(null);
+  const presentationSvgRef = useRef(null);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -390,6 +407,17 @@ export default function App() {
   }, [interiorDesigns]);
 
   useEffect(() => {
+    presentationItemsRef.current = presentationItems;
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('rectangle-ear-presentation-items', JSON.stringify(presentationItems));
+    }
+  }, [presentationItems]);
+
+  useEffect(() => {
+    selectedPresentationItemIdRef.current = selectedPresentationItemId;
+  }, [selectedPresentationItemId]);
+
+  useEffect(() => {
     selectedInteriorDesignIdRef.current = selectedInteriorDesignId;
   }, [selectedInteriorDesignId]);
 
@@ -459,6 +487,9 @@ export default function App() {
         if (workspaceMode === 'interior') {
           e.preventDefault();
           copySelectedInteriorDesign();
+        } else if (workspaceMode === 'presentation') {
+          e.preventDefault();
+          copySelectedPresentationItem();
         }
         return;
       }
@@ -467,6 +498,9 @@ export default function App() {
         if (workspaceMode === 'interior') {
           e.preventDefault();
           pasteInteriorDesign();
+        } else if (workspaceMode === 'presentation') {
+          e.preventDefault();
+          pastePresentationItem();
         }
         return;
       }
@@ -502,9 +536,15 @@ export default function App() {
         clearMeasureTool();
         setActiveInteriorShapeTool(null);
         setInteriorShapeDraft(null);
+        setPresentationDrag(null);
       }
 
       if (!isTextEditingTarget(e.target) && (e.key === 'Delete' || e.key === 'Backspace')) {
+        if (workspaceMode === 'presentation' && selectedPresentationItemIdRef.current) {
+          e.preventDefault();
+          deleteSelectedPresentationItem();
+          return;
+        }
         setMeasurements(prev => prev.filter(m => !m.selected));
         setDraggingMeasurement(null);
       }
@@ -512,6 +552,7 @@ export default function App() {
 
     const handleMouseUp = () => {
       finishInteriorInteraction();
+      setPresentationDrag(null);
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -6452,6 +6493,339 @@ export default function App() {
     setWorkspaceMode('interior');
   };
 
+  const getBoundsFromPointSets = (sets) => {
+    const points = sets.flat().filter(point => point && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+    if (!points.length) return { x: 0, y: 0, width: 1, height: 1 };
+
+    const xs = points.map(point => point[0]);
+    const ys = points.map(point => point[1]);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const maxX = Math.max(...xs);
+    const maxY = Math.max(...ys);
+    return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+  };
+
+  const createPresentationSnapshot = () => {
+    const panelPolygons = getPanelVertexSets().map(panel => transformPoints(panel));
+    const exportData = collectInteriorDesignContours();
+    const whitePolygons = exportData.contours
+      .filter(contour => contour.materialColor === 'white' && contour.closed && contour.points?.length >= 3)
+      .map(contour => contour.points);
+    const bounds = getBoundsFromPointSets([...panelPolygons, ...whitePolygons]);
+    const index = presentationItemsRef.current.length + 1;
+
+    return {
+      id: crypto.randomUUID(),
+      name: `Panel ${index}`,
+      x: 40 * index,
+      y: 40 * index,
+      width: bounds.width,
+      height: bounds.height,
+      rotation: 0,
+      itemScale: 1,
+      tint: '#000000',
+      bounds,
+      panelPolygons,
+      whitePolygons,
+      createdAt: Date.now()
+    };
+  };
+
+  const sendCurrentDesignToPresentation = () => {
+    const snapshot = createPresentationSnapshot();
+    setPresentationItems(prev => [...prev, snapshot]);
+    setSelectedPresentationItemId(snapshot.id);
+    setWorkspaceMode('presentation');
+    setPresentationPosition(null);
+  };
+
+  const selectedPresentationItem = presentationItems.find(item => item.id === selectedPresentationItemId);
+
+  const getPresentationItemCornerPoints = (item) => {
+    const itemScale = Math.max(0.05, n(item.itemScale, 1));
+    const w = item.width * itemScale;
+    const h = item.height * itemScale;
+    const cx = item.x + w / 2;
+    const cy = item.y + h / 2;
+    const angle = (n(item.rotation, 0) * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    return [
+      [item.x, item.y],
+      [item.x + w, item.y],
+      [item.x + w, item.y + h],
+      [item.x, item.y + h]
+    ].map(([x, y]) => {
+      const dx = x - cx;
+      const dy = y - cy;
+      return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+    });
+  };
+
+  const getPresentationBaseViewBox = () => {
+    const itemSets = presentationItems.map(getPresentationItemCornerPoints);
+    const bounds = itemSets.length ? getBoundsFromPointSets(itemSets) : { x: 0, y: 0, width: 1600, height: 900 };
+    const pad = 220;
+    return {
+      x: (bounds.x - pad) * scale,
+      y: (bounds.y - pad) * scale,
+      width: Math.max(1200, bounds.width * scale + pad * 2 * scale),
+      height: Math.max(760, bounds.height * scale + pad * 2 * scale)
+    };
+  };
+
+  const getPresentationViewBox = () => {
+    const base = getPresentationBaseViewBox();
+    return {
+      x: presentationPosition?.x ?? base.x,
+      y: presentationPosition?.y ?? base.y,
+      width: base.width / presentationZoom,
+      height: base.height / presentationZoom
+    };
+  };
+
+  const resetPresentationView = () => {
+    setPresentationZoom(1);
+    setPresentationPosition(null);
+    setPresentationDrag(null);
+  };
+
+  const handlePresentationWheel = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const current = getPresentationViewBox();
+    const base = getPresentationBaseViewBox();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const mouseSvgX = current.x + (mouseX / rect.width) * current.width;
+    const mouseSvgY = current.y + (mouseY / rect.height) * current.height;
+    const zoomFactor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const nextZoom = clamp(presentationZoom * zoomFactor, MIN_VIEW_ZOOM, MAX_VIEW_ZOOM);
+    const nextWidth = base.width / nextZoom;
+    const nextHeight = base.height / nextZoom;
+
+    setPresentationZoom(nextZoom);
+    setPresentationPosition({
+      x: mouseSvgX - (mouseX / rect.width) * nextWidth,
+      y: mouseSvgY - (mouseY / rect.height) * nextHeight
+    });
+  };
+
+  const getPresentationPoint = (e) => getSvgPoint(e);
+
+  const startPresentationItemDrag = (e, item, mode, handle = null) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = getPresentationPoint(e);
+    setSelectedPresentationItemId(item.id);
+    setPresentationDrag({
+      mode,
+      handle,
+      id: item.id,
+      startPoint: point,
+      startItem: { ...item }
+    });
+  };
+
+  const handlePresentationMouseDown = (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      setPresentationDrag({ mode: 'pan', startClientX: e.clientX, startClientY: e.clientY, startView: getPresentationViewBox() });
+      return;
+    }
+
+    if (e.target === e.currentTarget) {
+      setSelectedPresentationItemId(null);
+    }
+  };
+
+  const handlePresentationMouseMove = (e) => {
+    const point = getPresentationPoint(e);
+    presentationMousePointRef.current = point;
+
+    if (!presentationDrag) return;
+
+    if (presentationDrag.mode === 'pan') {
+      const svg = e.currentTarget;
+      const rect = svg.getBoundingClientRect();
+      const dxPx = e.clientX - presentationDrag.startClientX;
+      const dyPx = e.clientY - presentationDrag.startClientY;
+      setPresentationPosition({
+        x: presentationDrag.startView.x - (dxPx / rect.width) * presentationDrag.startView.width,
+        y: presentationDrag.startView.y - (dyPx / rect.height) * presentationDrag.startView.height
+      });
+      return;
+    }
+
+    setPresentationItems(prev => prev.map(item => {
+      if (item.id !== presentationDrag.id) return item;
+      const dx = point.x - presentationDrag.startPoint.x;
+      const dy = point.y - presentationDrag.startPoint.y;
+      const start = presentationDrag.startItem;
+
+      if (presentationDrag.mode === 'move') {
+        return { ...item, x: start.x + dx, y: start.y + dy };
+      }
+
+      if (presentationDrag.mode === 'scale') {
+        const startScale = Math.max(0.05, n(start.itemScale, 1));
+        const rawScale = Math.max(
+          (start.width * startScale + dx * (presentationDrag.handle.includes('e') ? 1 : -1)) / start.width,
+          (start.height * startScale + dy * (presentationDrag.handle.includes('s') ? 1 : -1)) / start.height
+        );
+        return { ...item, itemScale: clamp(rawScale, 0.05, 20) };
+      }
+
+      if (presentationDrag.mode === 'rotate') {
+        const startScale = Math.max(0.05, n(start.itemScale, 1));
+        const cx = start.x + (start.width * startScale) / 2;
+        const cy = start.y + (start.height * startScale) / 2;
+        const startAngle = Math.atan2(presentationDrag.startPoint.y - cy, presentationDrag.startPoint.x - cx);
+        const nextAngle = Math.atan2(point.y - cy, point.x - cx);
+        return { ...item, rotation: start.rotation + (nextAngle - startAngle) * 180 / Math.PI };
+      }
+
+      return item;
+    }));
+  };
+
+  const updateSelectedPresentationItem = (updates) => {
+    if (!selectedPresentationItemId) return;
+    setPresentationItems(prev => prev.map(item => item.id === selectedPresentationItemId ? { ...item, ...updates } : item));
+  };
+
+  const copySelectedPresentationItem = () => {
+    const item = presentationItemsRef.current.find(entry => entry.id === selectedPresentationItemIdRef.current);
+    if (item) presentationClipboardRef.current = { ...item };
+  };
+
+  const pastePresentationItem = () => {
+    const source = presentationClipboardRef.current;
+    if (!source) return;
+    const sourceScale = Math.max(0.05, n(source.itemScale, 1));
+    const point = presentationMousePointRef.current || { x: source.x + 40, y: source.y + 40 };
+    const next = {
+      ...source,
+      id: crypto.randomUUID(),
+      name: `${source.name} copy`,
+      x: point.x - (source.width * sourceScale) / 2,
+      y: point.y - (source.height * sourceScale) / 2,
+      createdAt: Date.now()
+    };
+    setPresentationItems(prev => [...prev, next]);
+    setSelectedPresentationItemId(next.id);
+  };
+
+  const deleteSelectedPresentationItem = () => {
+    setPresentationItems(prev => prev.filter(item => item.id !== selectedPresentationItemIdRef.current));
+    setSelectedPresentationItemId(null);
+  };
+
+  const presentationItemTransform = (item) => {
+    const itemScale = Math.max(0.05, n(item.itemScale, 1));
+    const cx = (item.width * itemScale * scale) / 2;
+    const cy = (item.height * itemScale * scale) / 2;
+    return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy}) scale(${itemScale}) translate(${-item.bounds.x * scale} ${-item.bounds.y * scale})`;
+  };
+
+  const renderPresentationItemArtwork = (item) => (
+    <g transform={presentationItemTransform(item)}>
+      {item.panelPolygons.map((points, index) => (
+        <polygon key={`panel-${item.id}-${index}`} points={polygonPoints(points)} fill={item.tint || '#000000'} />
+      ))}
+      {item.whitePolygons.map((points, index) => (
+        <polygon key={`white-${item.id}-${index}`} points={polygonPoints(points)} fill="#ffffff" />
+      ))}
+    </g>
+  );
+
+  const getPresentationExportBounds = () => {
+    const sets = presentationItems.map(getPresentationItemCornerPoints);
+    const bounds = getBoundsFromPointSets(sets);
+    const pad = 40;
+    return { x: bounds.x - pad, y: bounds.y - pad, width: bounds.width + pad * 2, height: bounds.height + pad * 2 };
+  };
+
+  const presentationPolygonPointsRaw = (points) => points.map(([x, y]) => `${roundDXF(x)},${roundDXF(y)}`).join(' ');
+
+  const buildPresentationSvgMarkup = () => {
+    const bounds = getPresentationExportBounds();
+    const artwork = presentationItems.map(item => {
+      const itemScale = Math.max(0.05, n(item.itemScale, 1));
+      const cx = (item.width * itemScale) / 2;
+      const cy = (item.height * itemScale) / 2;
+      const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)}) scale(${roundDXF(itemScale)}) translate(${-roundDXF(item.bounds.x)} ${-roundDXF(item.bounds.y)})`;
+      const panels = item.panelPolygons.map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="${item.tint || '#000000'}"/>`).join('');
+      const whites = item.whitePolygons.map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="#ffffff"/>`).join('');
+      return `<g transform="${transform}">${panels}${whites}</g>`;
+    }).join('');
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${roundDXF(bounds.x)} ${roundDXF(bounds.y)} ${roundDXF(bounds.width)} ${roundDXF(bounds.height)}"><rect x="${roundDXF(bounds.x)}" y="${roundDXF(bounds.y)}" width="${roundDXF(bounds.width)}" height="${roundDXF(bounds.height)}" fill="#ffffff"/>${artwork}</svg>`;
+  };
+
+  const downloadTextFile = (content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const exportPresentationSvg = () => {
+    downloadTextFile(buildPresentationSvgMarkup(), 'presentation.svg', 'image/svg+xml');
+  };
+
+  const exportPresentationPng = () => {
+    const markup = buildPresentationSvgMarkup();
+    const bounds = getPresentationExportBounds();
+    const blob = new Blob([markup], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const image = new window.Image();
+    image.onload = () => {
+      const maxSize = 5000;
+      const ratio = Math.min(3, maxSize / Math.max(bounds.width, bounds.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.round(bounds.height * ratio));
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(pngBlob => {
+        if (!pngBlob) return;
+        const pngUrl = URL.createObjectURL(pngBlob);
+        const a = document.createElement('a');
+        a.href = pngUrl;
+        a.download = 'presentation.png';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(pngUrl);
+      }, 'image/png');
+    };
+    image.src = url;
+  };
+
+  const exportPresentationPdf = () => {
+    const markup = buildPresentationSvgMarkup();
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+    printWindow.document.write(`<html><head><title>Presentation PDF</title><style>body{margin:0;background:#fff}svg{width:100vw;height:100vh;display:block}</style></head><body>${markup}<script>window.onload=()=>window.print()</script></body></html>`);
+    printWindow.document.close();
+  };
+
   const getInlineSvgRenderData = (svgText) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(svgText || '', 'image/svg+xml');
@@ -6651,24 +7025,234 @@ export default function App() {
     return null;
   };
 
+  if (workspaceMode === 'presentation') {
+    const presentationViewBox = getPresentationViewBox();
+
+    return (
+      <div className="h-screen overflow-hidden bg-slate-100 p-3">
+        <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
+          <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+                {[
+                  ['Frame', 'frame'],
+                  ['Interior', 'interior'],
+                  ['Presentation', 'presentation']
+                ].map(([label, mode]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      clearMeasureTool();
+                      cancelInteriorShapeTool();
+                      setWorkspaceMode(mode);
+                    }}
+                    className={[
+                      'rounded-md px-3 py-1.5 text-sm font-semibold transition',
+                      workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                    ].join(' ')}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-slate-800">Presentation</h1>
+                <p className="text-xs text-slate-500">{presentationItems.length} saved panel{presentationItems.length === 1 ? '' : 's'}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {selectedPresentationItem && (
+                <>
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    Scale
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.05"
+                      value={Number.isFinite(Number(selectedPresentationItem.itemScale)) ? Number(selectedPresentationItem.itemScale).toFixed(2) : ''}
+                      onChange={e => updateSelectedPresentationItem({ itemScale: e.target.value === '' ? '' : Math.max(0.05, Number(e.target.value)) })}
+                      onBlur={() => updateSelectedPresentationItem({ itemScale: Math.max(0.05, n(selectedPresentationItem.itemScale, 1)) })}
+                      className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    Rotate
+                    <input
+                      type="number"
+                      step="1"
+                      value={Math.round(selectedPresentationItem.rotation || 0)}
+                      onChange={e => updateSelectedPresentationItem({ rotation: e.target.value === '' ? '' : Number(e.target.value) })}
+                      onBlur={() => updateSelectedPresentationItem({ rotation: n(selectedPresentationItem.rotation, 0) })}
+                      className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    Tint
+                    <input
+                      type="color"
+                      value={selectedPresentationItem.tint || '#000000'}
+                      onChange={e => updateSelectedPresentationItem({ tint: e.target.value })}
+                      className="h-8 w-10 rounded-md border border-slate-200 bg-white p-1"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={deleteSelectedPresentationItem}
+                    className="inline-flex items-center justify-center rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 hover:bg-red-100"
+                    title="Delete presentation item"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </>
+              )}
+              <button type="button" onClick={resetPresentationView} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                Reset view
+              </button>
+              <button type="button" onClick={exportPresentationSvg} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                SVG
+              </button>
+              <button type="button" onClick={exportPresentationPng} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                PNG
+              </button>
+              <button type="button" onClick={exportPresentationPdf} className="rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800">
+                PDF
+              </button>
+            </div>
+          </div>
+
+          <div className="relative flex-1 min-h-0 bg-white">
+            <svg
+              ref={presentationSvgRef}
+              width="100%"
+              height="100%"
+              viewBox={`${presentationViewBox.x} ${presentationViewBox.y} ${presentationViewBox.width} ${presentationViewBox.height}`}
+              className="h-full w-full"
+              onWheel={handlePresentationWheel}
+              onMouseDown={handlePresentationMouseDown}
+              onMouseMove={handlePresentationMouseMove}
+              onMouseUp={() => setPresentationDrag(null)}
+              onMouseLeave={() => setPresentationDrag(null)}
+              style={{ cursor: presentationDrag?.mode === 'pan' ? 'grabbing' : 'default' }}
+            >
+              <rect
+                x={presentationViewBox.x - presentationViewBox.width * 2}
+                y={presentationViewBox.y - presentationViewBox.height * 2}
+                width={presentationViewBox.width * 5}
+                height={presentationViewBox.height * 5}
+                fill="#ffffff"
+                pointerEvents="none"
+              />
+              {presentationItems.map(item => {
+                const itemScale = Math.max(0.05, n(item.itemScale, 1));
+                const selected = item.id === selectedPresentationItemId;
+                const x = item.x * scale;
+                const y = item.y * scale;
+                const w = item.width * itemScale * scale;
+                const h = item.height * itemScale * scale;
+                const handleSize = 10 / presentationZoom;
+                const rotateY = y - 28 / presentationZoom;
+
+                return (
+                  <g key={item.id}>
+                    <g
+                      onMouseDown={(e) => startPresentationItemDrag(e, item, 'move')}
+                      style={{ cursor: presentationDrag?.id === item.id && presentationDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                    >
+                      {renderPresentationItemArtwork(item)}
+                    </g>
+                    {selected && (
+                      <g>
+                        <rect
+                          x={x}
+                          y={y}
+                          width={w}
+                          height={h}
+                          fill="none"
+                          stroke="#2563eb"
+                          strokeWidth={1.5 / presentationZoom}
+                          strokeDasharray={`${6 / presentationZoom} ${5 / presentationZoom}`}
+                          pointerEvents="none"
+                        />
+                        {[
+                          ['nw', x, y],
+                          ['ne', x + w, y],
+                          ['sw', x, y + h],
+                          ['se', x + w, y + h]
+                        ].map(([handle, hx, hy]) => (
+                          <rect
+                            key={handle}
+                            x={hx - handleSize / 2}
+                            y={hy - handleSize / 2}
+                            width={handleSize}
+                            height={handleSize}
+                            fill="#2563eb"
+                            stroke="#ffffff"
+                            strokeWidth={1 / presentationZoom}
+                            onMouseDown={(e) => startPresentationItemDrag(e, item, 'scale', handle)}
+                            style={{ cursor: `${handle}-resize` }}
+                          />
+                        ))}
+                        <line
+                          x1={x + w / 2}
+                          y1={y}
+                          x2={x + w / 2}
+                          y2={rotateY}
+                          stroke="#2563eb"
+                          strokeWidth={1 / presentationZoom}
+                        />
+                        <circle
+                          cx={x + w / 2}
+                          cy={rotateY}
+                          r={6 / presentationZoom}
+                          fill="#ffffff"
+                          stroke="#2563eb"
+                          strokeWidth={1.5 / presentationZoom}
+                          onMouseDown={(e) => startPresentationItemDrag(e, item, 'rotate')}
+                          style={{ cursor: 'grab' }}
+                        />
+                      </g>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (workspaceMode === 'interior') {
     return (
       <div className="h-screen overflow-hidden bg-slate-100 p-3">
         <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
           <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
-              <button
-                type="button"
-                onClick={() => {
-                  clearMeasureTool();
-                  cancelInteriorShapeTool();
-                  setWorkspaceMode('frame');
-                }}
-                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                <ArrowLeft size={16} />
-                Back to frame
-              </button>
+              <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+                {[
+                  ['Frame', 'frame'],
+                  ['Interior', 'interior'],
+                  ['Presentation', 'presentation']
+                ].map(([label, mode]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      clearMeasureTool();
+                      cancelInteriorShapeTool();
+                      setWorkspaceMode(mode);
+                    }}
+                    className={[
+                      'rounded-md px-3 py-1.5 text-sm font-semibold transition',
+                      workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                    ].join(' ')}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Interior Designer</h1>
                 <p className="text-xs text-slate-500">
@@ -6680,6 +7264,13 @@ export default function App() {
             </div>
 
             <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={sendCurrentDesignToPresentation}
+                className="rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600"
+              >
+                Send to presentation
+              </button>
               <details
                 className="relative"
                 onMouseDown={(e) => e.stopPropagation()}
@@ -8373,14 +8964,23 @@ export default function App() {
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={openInteriorDesigner}
-            className="w-full inline-flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white font-semibold py-2.5 rounded-lg transition shadow-sm"
-          >
-            <PenLine size={17} />
-            Interior design
-          </button>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={openInteriorDesigner}
+              className="w-full inline-flex items-center justify-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white font-semibold py-2.5 rounded-lg transition shadow-sm"
+            >
+              <PenLine size={17} />
+              Interior
+            </button>
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode('presentation')}
+              className="w-full inline-flex items-center justify-center gap-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 font-semibold py-2.5 rounded-lg transition shadow-sm"
+            >
+              Presentation
+            </button>
+          </div>
 
           <div className="grid grid-cols-2 gap-2">
             <button onClick={downloadDXF} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-lg transition shadow-sm">
