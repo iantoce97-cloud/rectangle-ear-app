@@ -1660,6 +1660,28 @@ export default function App() {
     ];
   };
 
+  const getPresentationOuterFrameCleanVertexSets = () => {
+    const mainTop = getCleanTopSpanVertices(leftEarDepth, safeWidth - rightEarDepth);
+    const mainPanel = [
+      ...mainTop,
+      [safeWidth - rightEarDepth, bottomBaseY],
+      [leftEarDepth, bottomBaseY]
+    ];
+
+    if (!bottomPanelEnabled) return [mainPanel];
+
+    const yOffset = safeHeight + bottomPanelGap;
+    return [
+      mainPanel,
+      [
+        [leftEarDepth, yOffset + topEarDepth],
+        [safeWidth - rightEarDepth, yOffset + topEarDepth],
+        [safeWidth - rightEarDepth, yOffset + bottomPanelHeight - bottomEarDepth],
+        [leftEarDepth, yOffset + bottomPanelHeight - bottomEarDepth]
+      ]
+    ];
+  };
+
   const polygonArea = (pointsArray) => {
     let area = 0;
     for (let i = 0; i < pointsArray.length; i++) {
@@ -1697,6 +1719,37 @@ export default function App() {
     const positive = solve(distance);
     const positiveArea = positive.reduce((sum, path) => sum + Math.abs(polygonArea(path)), 0);
     if (positive.length && positiveArea < sourceArea) return positive;
+
+    return [];
+  };
+
+  const offsetPolygonOutward = (pointsArray, distance) => {
+    if (distance <= 0) return [pointsArray];
+
+    const scaleFactor = 1000;
+    const source = pointsArray.map(([x, y]) => ({
+      X: Math.round(x * scaleFactor),
+      Y: Math.round(y * scaleFactor)
+    }));
+    const sourceArea = Math.abs(polygonArea(pointsArray));
+
+    const solve = (delta) => {
+      const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * scaleFactor);
+      offsetter.AddPath(source, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+      const solution = new ClipperLib.Paths();
+      offsetter.Execute(solution, delta * scaleFactor);
+      return solution
+        .map(path => path.map(point => [point.X / scaleFactor, point.Y / scaleFactor]))
+        .filter(path => path.length >= 3);
+    };
+
+    const positive = solve(distance);
+    const positiveArea = positive.reduce((sum, path) => sum + Math.abs(polygonArea(path)), 0);
+    if (positive.length && positiveArea > sourceArea) return positive;
+
+    const negative = solve(-distance);
+    const negativeArea = negative.reduce((sum, path) => sum + Math.abs(polygonArea(path)), 0);
+    if (negative.length && negativeArea > sourceArea) return negative;
 
     return [];
   };
@@ -6508,6 +6561,8 @@ export default function App() {
 
   const createPresentationSnapshot = () => {
     const panelPolygons = getPanelVertexSets().map(panel => transformPoints(panel));
+    const cleanPanelPolygons = getCleanMainBodyPanelVertexSets().map(panel => transformPoints(panel));
+    const outerFrameCleanPolygons = getPresentationOuterFrameCleanVertexSets().map(panel => transformPoints(panel));
     const exportData = collectInteriorDesignContours();
     const whitePolygons = exportData.contours
       .filter(contour => contour.materialColor === 'white' && contour.closed && contour.points?.length >= 3)
@@ -6525,9 +6580,23 @@ export default function App() {
       rotation: 0,
       itemScale: 1,
       tint: '#000000',
+      showOuterFrame: false,
+      outerFrameThickness: 30,
       bounds,
       panelPolygons,
+      cleanPanelPolygons,
+      outerFrameCleanPolygons,
       whitePolygons,
+      outerFrameEarOffset: Math.max(topEarDepth, rightEarDepth, bottomEarDepth, leftEarDepth, splitEarDepth),
+      hasPanelSplitSnapshot: hasPanelSplit,
+      splitFillSnapshot: hasPanelSplit
+        ? {
+            leftX: safeSplitPosition,
+            rightX: safeRightSplitPosition,
+            topY: Math.min(splitLeftBaseY, splitRightBaseY),
+            bottomY: bottomBaseY
+          }
+        : null,
       createdAt: Date.now()
     };
   };
@@ -6542,21 +6611,115 @@ export default function App() {
 
   const selectedPresentationItem = presentationItems.find(item => item.id === selectedPresentationItemId);
 
+  const getPresentationOuterFrameThickness = (item) => (
+    item?.showOuterFrame ? Math.max(0, n(item.outerFrameThickness, 30)) : 0
+  );
+
+  const getPresentationBodyPolygons = (item) => item?.panelPolygons || [];
+
+  const getTopProfileFromPanelPolygon = (points, sampleCount = 96) => {
+    if (!points?.length) return [];
+    const bounds = getBoundsFromPointSets([points]);
+    const topProfile = [];
+
+    for (let i = 0; i <= sampleCount; i++) {
+      const x = bounds.x + (bounds.width * i) / sampleCount;
+      const intersections = [];
+
+      for (let j = 0; j < points.length; j++) {
+        const a = points[j];
+        const b = points[(j + 1) % points.length];
+        const minX = Math.min(a[0], b[0]);
+        const maxX = Math.max(a[0], b[0]);
+        if (x < minX - 0.001 || x > maxX + 0.001) continue;
+
+        if (Math.abs(a[0] - b[0]) < 0.001) {
+          if (Math.abs(x - a[0]) < 0.001) {
+            intersections.push(a[1], b[1]);
+          }
+          continue;
+        }
+
+        const t = (x - a[0]) / (b[0] - a[0]);
+        if (t < -0.001 || t > 1.001) continue;
+        intersections.push(a[1] + (b[1] - a[1]) * t);
+      }
+
+      if (intersections.length) {
+        topProfile.push([x, Math.min(...intersections)]);
+      }
+    }
+
+    const cleaned = [];
+    topProfile.forEach(point => {
+      const last = cleaned[cleaned.length - 1];
+      if (!last || Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.5) cleaned.push(point);
+    });
+
+    return cleaned.length >= 2 ? cleaned : [[bounds.x, bounds.y], [bounds.x + bounds.width, bounds.y]];
+  };
+
+  const getPresentationOuterFrameRings = (item) => {
+    const thickness = getPresentationOuterFrameThickness(item);
+    if (thickness <= 0) return [];
+
+    const framePanels = item.outerFrameCleanPolygons?.length
+      ? item.outerFrameCleanPolygons
+      : item.cleanPanelPolygons?.length
+        ? item.cleanPanelPolygons
+        : item.panelPolygons || [];
+    const earOffset = Math.max(0, n(item.outerFrameEarOffset, 10));
+    const rings = framePanels.flatMap((framePanel) => {
+      const innerPaths = offsetPolygonOutward(framePanel, earOffset);
+      const outerPaths = offsetPolygonOutward(framePanel, earOffset + thickness);
+
+      return innerPaths.flatMap((inner, index) => {
+        const outer = outerPaths[index] || outerPaths[0];
+        return outer ? [{ outer, inner }] : [];
+      });
+    });
+
+    if (item.hasPanelSplitSnapshot && item.splitFillSnapshot) {
+      const split = item.splitFillSnapshot;
+      rings.push({
+        solid: [
+          [split.leftX, split.topY],
+          [split.rightX, split.topY],
+          [split.rightX, split.bottomY],
+          [split.leftX, split.bottomY]
+        ]
+      });
+    }
+
+    return rings;
+  };
+
   const getPresentationItemCornerPoints = (item) => {
     const itemScale = Math.max(0.05, n(item.itemScale, 1));
-    const w = item.width * itemScale;
-    const h = item.height * itemScale;
-    const cx = item.x + w / 2;
-    const cy = item.y + h / 2;
+    const frameBounds = getBoundsFromPointSets([
+      [item.bounds.x, item.bounds.y],
+      [item.bounds.x + item.bounds.width, item.bounds.y],
+      [item.bounds.x + item.bounds.width, item.bounds.y + item.bounds.height],
+      [item.bounds.x, item.bounds.y + item.bounds.height],
+      ...getPresentationOuterFrameRings(item).flatMap(ring => ring.solid || [...ring.outer, ...ring.inner])
+    ]);
+    const localX = frameBounds.x - item.bounds.x;
+    const localY = frameBounds.y - item.bounds.y;
+    const w = frameBounds.width * itemScale;
+    const h = frameBounds.height * itemScale;
+    const x0 = item.x + localX * itemScale;
+    const y0 = item.y + localY * itemScale;
+    const cx = x0 + w / 2;
+    const cy = y0 + h / 2;
     const angle = (n(item.rotation, 0) * Math.PI) / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
 
     return [
-      [item.x, item.y],
-      [item.x + w, item.y],
-      [item.x + w, item.y + h],
-      [item.x, item.y + h]
+      [x0, y0],
+      [x0 + w, y0],
+      [x0 + w, y0 + h],
+      [x0, y0 + h]
     ].map(([x, y]) => {
       const dx = x - cx;
       const dy = y - cy;
@@ -6735,9 +6898,29 @@ export default function App() {
     return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy}) scale(${itemScale}) translate(${-item.bounds.x * scale} ${-item.bounds.y * scale})`;
   };
 
+  const presentationPolygonPath = (points) => (
+    points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${x * scale} ${y * scale}`).join(' ') + ' Z'
+  );
+
   const renderPresentationItemArtwork = (item) => (
     <g transform={presentationItemTransform(item)}>
-      {item.panelPolygons.map((points, index) => (
+      {getPresentationOuterFrameRings(item).map((ring, index) => (
+        ring.solid ? (
+          <polygon
+            key={`outer-frame-${item.id}-${index}`}
+            points={polygonPoints(ring.solid)}
+            fill="#000000"
+          />
+        ) : (
+          <path
+            key={`outer-frame-${item.id}-${index}`}
+            d={`${presentationPolygonPath(ring.outer)} ${presentationPolygonPath(ring.inner)}`}
+            fill="#000000"
+            fillRule="evenodd"
+          />
+        )
+      ))}
+      {getPresentationBodyPolygons(item).map((points, index) => (
         <polygon key={`panel-${item.id}-${index}`} points={polygonPoints(points)} fill={item.tint || '#000000'} />
       ))}
       {item.whitePolygons.map((points, index) => (
@@ -6754,6 +6937,9 @@ export default function App() {
   };
 
   const presentationPolygonPointsRaw = (points) => points.map(([x, y]) => `${roundDXF(x)},${roundDXF(y)}`).join(' ');
+  const presentationPolygonPathRaw = (points) => (
+    points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${roundDXF(x)} ${roundDXF(y)}`).join(' ') + ' Z'
+  );
 
   const buildPresentationSvgMarkup = () => {
     const bounds = getPresentationExportBounds();
@@ -6762,9 +6948,14 @@ export default function App() {
       const cx = (item.width * itemScale) / 2;
       const cy = (item.height * itemScale) / 2;
       const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)}) scale(${roundDXF(itemScale)}) translate(${-roundDXF(item.bounds.x)} ${-roundDXF(item.bounds.y)})`;
-      const panels = item.panelPolygons.map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="${item.tint || '#000000'}"/>`).join('');
+      const outerFrame = getPresentationOuterFrameRings(item)
+        .map(ring => ring.solid
+          ? `<polygon points="${presentationPolygonPointsRaw(ring.solid)}" fill="#000000"/>`
+          : `<path d="${presentationPolygonPathRaw(ring.outer)} ${presentationPolygonPathRaw(ring.inner)}" fill="#000000" fill-rule="evenodd"/>`)
+        .join('');
+      const panels = getPresentationBodyPolygons(item).map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="${item.tint || '#000000'}"/>`).join('');
       const whites = item.whitePolygons.map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="#ffffff"/>`).join('');
-      return `<g transform="${transform}">${panels}${whites}</g>`;
+      return `<g transform="${transform}">${outerFrame}${panels}${whites}</g>`;
     }).join('');
 
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${roundDXF(bounds.x)} ${roundDXF(bounds.y)} ${roundDXF(bounds.width)} ${roundDXF(bounds.height)}"><rect x="${roundDXF(bounds.x)}" y="${roundDXF(bounds.y)}" width="${roundDXF(bounds.width)}" height="${roundDXF(bounds.height)}" fill="#ffffff"/>${artwork}</svg>`;
@@ -7099,6 +7290,38 @@ export default function App() {
                   </label>
                   <button
                     type="button"
+                    onClick={() => updateSelectedPresentationItem({
+                      showOuterFrame: !selectedPresentationItem.showOuterFrame,
+                      outerFrameThickness: Math.max(0, n(selectedPresentationItem.outerFrameThickness, 30))
+                    })}
+                    className={[
+                      'rounded-md border px-3 py-2 text-xs font-semibold transition',
+                      selectedPresentationItem.showOuterFrame
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                    ].join(' ')}
+                  >
+                    {selectedPresentationItem.showOuterFrame ? 'Frame on' : 'Add frame'}
+                  </button>
+                  {selectedPresentationItem.showOuterFrame && (
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Frame mm
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={selectedPresentationItem.outerFrameThickness ?? 30}
+                        onChange={e => updateSelectedPresentationItem({ outerFrameThickness: e.target.value })}
+                        onBlur={() => updateSelectedPresentationItem({ outerFrameThickness: Math.max(0, n(selectedPresentationItem.outerFrameThickness, 30)) })}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') e.currentTarget.blur();
+                        }}
+                        className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                  )}
+                  <button
+                    type="button"
                     onClick={deleteSelectedPresentationItem}
                     className="inline-flex items-center justify-center rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 hover:bg-red-100"
                     title="Delete presentation item"
@@ -7146,11 +7369,18 @@ export default function App() {
               />
               {presentationItems.map(item => {
                 const itemScale = Math.max(0.05, n(item.itemScale, 1));
+                const presentationFrameBounds = getBoundsFromPointSets([
+                  [item.bounds.x, item.bounds.y],
+                  [item.bounds.x + item.bounds.width, item.bounds.y],
+                  [item.bounds.x + item.bounds.width, item.bounds.y + item.bounds.height],
+                  [item.bounds.x, item.bounds.y + item.bounds.height],
+      ...getPresentationOuterFrameRings(item).flatMap(ring => ring.solid || [...ring.outer, ...ring.inner])
+                ]);
                 const selected = item.id === selectedPresentationItemId;
-                const x = item.x * scale;
-                const y = item.y * scale;
-                const w = item.width * itemScale * scale;
-                const h = item.height * itemScale * scale;
+                const x = (item.x + (presentationFrameBounds.x - item.bounds.x) * itemScale) * scale;
+                const y = (item.y + (presentationFrameBounds.y - item.bounds.y) * itemScale) * scale;
+                const w = presentationFrameBounds.width * itemScale * scale;
+                const h = presentationFrameBounds.height * itemScale * scale;
                 const handleSize = 10 / presentationZoom;
                 const rotateY = y - 28 / presentationZoom;
 
