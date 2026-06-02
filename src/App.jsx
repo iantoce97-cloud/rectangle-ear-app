@@ -2,6 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { svgPathProperties } from 'svg-path-properties';
 import { SVGPathData, SVGPathDataTransformer, encodeSVGPath } from 'svg-pathdata';
 import ClipperLib from 'clipper-lib';
+import opentype from 'opentype.js';
+import {
+  builtInPresentationDecorations as projectPresentationDecorations,
+  fallbackPresentationDecorationUrl,
+  legacyPresentationDecorationAliases
+} from './presentationDecorations';
+import { interiorFontOptions } from './interiorFonts';
 import {
   Ruler,
   MousePointer2,
@@ -118,9 +125,29 @@ export default function App() {
     }
   });
   const [selectedPresentationItemId, setSelectedPresentationItemId] = useState(null);
+  const [selectedPresentationItemIds, setSelectedPresentationItemIds] = useState([]);
   const [presentationZoom, setPresentationZoom] = useState(1);
   const [presentationPosition, setPresentationPosition] = useState(null);
   const [presentationDrag, setPresentationDrag] = useState(null);
+  const [presentationDecorations, setPresentationDecorations] = useState(() => {
+    if (typeof localStorage === 'undefined') return [];
+    try {
+      const saved = JSON.parse(localStorage.getItem('rectangle-ear-presentation-decorations') || '[]');
+      return Array.isArray(saved) ? saved.map(item => ({ ...item, imageUrl: item.imageUrl || '' })) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [presentationDecorationOverrides, setPresentationDecorationOverrides] = useState(() => {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const saved = JSON.parse(localStorage.getItem('rectangle-ear-presentation-decoration-overrides') || '{}');
+      return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+    } catch {
+      return {};
+    }
+  });
+  const [loadedInteriorFonts, setLoadedInteriorFonts] = useState({});
 
   const [activeTool, setActiveTool] = useState(null);
 
@@ -144,9 +171,13 @@ export default function App() {
   const positionMessageTimeoutRef = useRef(null);
   const presentationItemsRef = useRef([]);
   const selectedPresentationItemIdRef = useRef(null);
+  const selectedPresentationItemIdsRef = useRef([]);
+  const presentationUndoStackRef = useRef([]);
+  const presentationRedoStackRef = useRef([]);
   const presentationClipboardRef = useRef(null);
   const presentationMousePointRef = useRef(null);
   const presentationSvgRef = useRef(null);
+  const presentationDecorationFileInputRef = useRef(null);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -162,15 +193,6 @@ export default function App() {
   };
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-
-  const interiorFontOptions = [
-    { label: 'Arial', value: 'Arial, sans-serif' },
-    { label: 'Impact', value: 'Impact, Haettenschweiler, sans-serif' },
-    { label: 'Times New Roman', value: '"Times New Roman", Times, serif' },
-    { label: 'Georgia', value: 'Georgia, serif' },
-    { label: 'Verdana', value: 'Verdana, Geneva, sans-serif' },
-    { label: 'Courier New', value: '"Courier New", Courier, monospace' }
-  ];
 
   const cloneInteriorDesigns = (designs) => designs.map(design => ({ ...design }));
 
@@ -224,6 +246,65 @@ export default function App() {
 
     interiorUndoStackRef.current.push(cloneInteriorDesigns(interiorDesignsRef.current));
     restoreInteriorHistorySnapshot(next);
+  };
+
+  const clonePresentationItems = (items) => items.map(item => ({ ...item }));
+
+  const samePresentationItems = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  const recordPresentationHistory = (snapshot = presentationItemsRef.current) => {
+    const cloned = clonePresentationItems(snapshot);
+    const stack = presentationUndoStackRef.current;
+    const last = stack[stack.length - 1];
+    if (last && samePresentationItems(last, cloned)) return;
+
+    stack.push(cloned);
+    if (stack.length > 80) stack.shift();
+    presentationRedoStackRef.current = [];
+  };
+
+  const applyPresentationItems = (updater, { history = true, selectedId, selectedIds } = {}) => {
+    setPresentationItems(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (history && !samePresentationItems(prev, next)) recordPresentationHistory(prev);
+      return next;
+    });
+
+    if (selectedId !== undefined) {
+      setSelectedPresentationItemId(selectedId);
+      setSelectedPresentationItemIds(selectedId ? [selectedId] : []);
+    }
+
+    if (selectedIds !== undefined) {
+      const nextIds = selectedIds.filter(Boolean);
+      setSelectedPresentationItemIds(nextIds);
+      setSelectedPresentationItemId(nextIds[nextIds.length - 1] || null);
+    }
+  };
+
+  const restorePresentationHistorySnapshot = (snapshot) => {
+    const selectedStillExists = snapshot.some(item => item.id === selectedPresentationItemIdRef.current);
+    const remainingSelection = selectedPresentationItemIdsRef.current.filter(id => snapshot.some(item => item.id === id));
+    setPresentationItems(clonePresentationItems(snapshot));
+    if (!selectedStillExists) setSelectedPresentationItemId(remainingSelection[remainingSelection.length - 1] || null);
+    setSelectedPresentationItemIds(remainingSelection);
+    setPresentationDrag(null);
+  };
+
+  const undoPresentationAction = () => {
+    const previous = presentationUndoStackRef.current.pop();
+    if (!previous) return;
+
+    presentationRedoStackRef.current.push(clonePresentationItems(presentationItemsRef.current));
+    restorePresentationHistorySnapshot(previous);
+  };
+
+  const redoPresentationAction = () => {
+    const next = presentationRedoStackRef.current.pop();
+    if (!next) return;
+
+    presentationUndoStackRef.current.push(clonePresentationItems(presentationItemsRef.current));
+    restorePresentationHistorySnapshot(next);
   };
 
   const copySelectedInteriorDesign = () => {
@@ -394,6 +475,72 @@ export default function App() {
 
   const offsetFromAngle = (angle) => safeWidth * Math.tan((clamp(angle, 30, 150) - 90) * Math.PI / 180);
 
+  const openPresentationImageDb = () => new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+
+    const request = indexedDB.open('rectangle-ear-presentation-assets', 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore('images');
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  const putPresentationStoredImage = async (key, imageUrl) => {
+    if (!key || !imageUrl || !imageUrl.startsWith('data:')) return;
+    const db = await openPresentationImageDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('images', 'readwrite');
+      tx.objectStore('images').put(imageUrl, key);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  };
+
+  const getPresentationStoredImage = async (key) => {
+    if (!key) return '';
+    const db = await openPresentationImageDb();
+    const value = await new Promise((resolve, reject) => {
+      const tx = db.transaction('images', 'readonly');
+      const request = tx.objectStore('images').get(key);
+      request.onsuccess = () => resolve(request.result || '');
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return value;
+  };
+
+  const deletePresentationStoredImage = async (key) => {
+    if (!key) return;
+    const db = await openPresentationImageDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('images', 'readwrite');
+      tx.objectStore('images').delete(key);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  };
+
+  const sanitizePresentationDecorationForStorage = (decoration) => {
+    const { imageUrl, ...rest } = decoration;
+    return {
+      ...rest,
+      hasStoredImage: Boolean(imageUrl?.startsWith?.('data:')),
+      imageUrl: imageUrl && !imageUrl.startsWith('data:') ? imageUrl : ''
+    };
+  };
+
+  const sanitizePresentationItemForStorage = (item) => {
+    if (!isPresentationImageItem(item)) return item;
+    const { imageUrl, ...rest } = item;
+    return rest;
+  };
+
   const clearMeasureTool = () => {
     setActiveTool(null);
     setMeasurePoints([]);
@@ -409,13 +556,144 @@ export default function App() {
   useEffect(() => {
     presentationItemsRef.current = presentationItems;
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('rectangle-ear-presentation-items', JSON.stringify(presentationItems));
+      try {
+        localStorage.setItem('rectangle-ear-presentation-items', JSON.stringify(presentationItems.map(sanitizePresentationItemForStorage)));
+      } catch {
+        // Avoid crashing when browser storage is full.
+      }
     }
   }, [presentationItems]);
 
   useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      presentationDecorations.forEach(decoration => {
+        if (decoration.imageUrl?.startsWith?.('data:')) {
+          putPresentationStoredImage(`decoration:${decoration.id}`, decoration.imageUrl).catch(() => {});
+        }
+      });
+      try {
+        localStorage.setItem(
+          'rectangle-ear-presentation-decorations',
+          JSON.stringify(presentationDecorations.map(sanitizePresentationDecorationForStorage))
+        );
+      } catch {
+        // Avoid crashing when browser storage is full.
+      }
+    }
+  }, [presentationDecorations]);
+
+  useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      Object.entries(presentationDecorationOverrides).forEach(([id, override]) => {
+        if (override?.imageUrl?.startsWith?.('data:')) {
+          putPresentationStoredImage(`override:${id}`, override.imageUrl).catch(() => {});
+        }
+      });
+      const metadata = Object.fromEntries(
+        Object.entries(presentationDecorationOverrides).map(([id, override]) => {
+          const { imageUrl, ...rest } = override || {};
+          return [id, {
+            ...rest,
+            hasStoredImage: Boolean(imageUrl?.startsWith?.('data:')),
+            imageUrl: imageUrl && !imageUrl.startsWith('data:') ? imageUrl : ''
+          }];
+        })
+      );
+      try {
+        localStorage.setItem('rectangle-ear-presentation-decoration-overrides', JSON.stringify(metadata));
+      } catch {
+        // Avoid crashing when browser storage is full.
+      }
+    }
+  }, [presentationDecorationOverrides]);
+
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.setAttribute('data-interior-fonts', 'true');
+    style.textContent = interiorFontOptions
+      .map(font => `@font-face{font-family:${JSON.stringify(font.value)};src:url(${font.url}) format("truetype");font-display:block;}`)
+      .join('\n');
+    document.head.appendChild(style);
+
+    let cancelled = false;
+    Promise.all(interiorFontOptions.map(async font => {
+      const response = await fetch(font.url);
+      const buffer = await response.arrayBuffer();
+      return [font.value, opentype.parse(buffer)];
+    }))
+      .then(entries => {
+        if (!cancelled) setLoadedInteriorFonts(Object.fromEntries(entries));
+      })
+      .catch(() => {
+        if (!cancelled) setLoadedInteriorFonts({});
+      });
+
+    return () => {
+      cancelled = true;
+      document.head.removeChild(style);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateStoredImages = async () => {
+      const hydratedDecorations = await Promise.all(presentationDecorations.map(async decoration => {
+        if (decoration.imageUrl || !decoration.hasStoredImage) return decoration;
+        const imageUrl = await getPresentationStoredImage(`decoration:${decoration.id}`).catch(() => '');
+        return imageUrl ? { ...decoration, imageUrl } : decoration;
+      }));
+
+      if (!cancelled && hydratedDecorations.some((decoration, index) => decoration !== presentationDecorations[index])) {
+        setPresentationDecorations(hydratedDecorations);
+      }
+
+      const overrideEntries = await Promise.all(Object.entries(presentationDecorationOverrides).map(async ([id, override]) => {
+        if (override?.imageUrl || !override?.hasStoredImage) return [id, override];
+        const imageUrl = await getPresentationStoredImage(`override:${id}`).catch(() => '');
+        return [id, imageUrl ? { ...override, imageUrl } : override];
+      }));
+      const hydratedOverrides = Object.fromEntries(overrideEntries);
+
+      if (!cancelled && Object.entries(hydratedOverrides).some(([id, override]) => override !== presentationDecorationOverrides[id])) {
+        setPresentationDecorationOverrides(hydratedOverrides);
+      }
+    };
+
+    hydrateStoredImages().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const normalizeDecorationName = (value) => String(value || '').trim().toLowerCase();
+    const localToProjectIds = Object.fromEntries(
+      presentationDecorations
+        .map(decoration => [decoration.id, legacyPresentationDecorationAliases[normalizeDecorationName(decoration.name)]])
+        .filter(([, projectId]) => projectId)
+    );
+    const localIds = Object.keys(localToProjectIds);
+    if (!localIds.length) return;
+
+    localIds.forEach(id => {
+      deletePresentationStoredImage(`decoration:${id}`).catch(() => {});
+    });
+    setPresentationDecorations(prev => prev.filter(decoration => !localToProjectIds[decoration.id]));
+    setPresentationItems(prev => prev.map(item => (
+      localToProjectIds[item.sourceDecorationId]
+        ? { ...item, sourceDecorationId: localToProjectIds[item.sourceDecorationId], imageUrl: undefined }
+        : item
+    )));
+  }, []);
+
+  useEffect(() => {
     selectedPresentationItemIdRef.current = selectedPresentationItemId;
   }, [selectedPresentationItemId]);
+
+  useEffect(() => {
+    selectedPresentationItemIdsRef.current = selectedPresentationItemIds;
+  }, [selectedPresentationItemIds]);
 
   useEffect(() => {
     selectedInteriorDesignIdRef.current = selectedInteriorDesignId;
@@ -475,10 +753,18 @@ export default function App() {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !isTextEditingTarget(e.target)) {
         e.preventDefault();
-        if (e.shiftKey) {
-          redoInteriorDesignAction();
-        } else {
-          undoInteriorDesignAction();
+        if (workspaceMode === 'interior') {
+          if (e.shiftKey) {
+            redoInteriorDesignAction();
+          } else {
+            undoInteriorDesignAction();
+          }
+        } else if (workspaceMode === 'presentation') {
+          if (e.shiftKey) {
+            redoPresentationAction();
+          } else {
+            undoPresentationAction();
+          }
         }
         return;
       }
@@ -552,7 +838,15 @@ export default function App() {
 
     const handleMouseUp = () => {
       finishInteriorInteraction();
-      setPresentationDrag(null);
+      setPresentationDrag(prev => {
+        if (prev?.startItems && samePresentationItems(prev.startItems, presentationItemsRef.current)) {
+          const last = presentationUndoStackRef.current[presentationUndoStackRef.current.length - 1];
+          if (last && samePresentationItems(last, prev.startItems)) {
+            presentationUndoStackRef.current.pop();
+          }
+        }
+        return null;
+      });
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -3168,10 +3462,10 @@ export default function App() {
         height: itemHeight,
         text: 'Text',
         fontSize: itemHeight,
-        fontFamily: 'Arial, sans-serif',
+        fontFamily: interiorFontOptions[0].value,
         letterSpacing: 0,
-        exportable: false,
-        warnings: ['Text is visual only for now. Convert text to paths before DXF export.'],
+        exportable: true,
+        warnings: [],
         aspectRatio: itemWidth / itemHeight
       };
     }
@@ -5281,6 +5575,241 @@ export default function App() {
     addFlattenedCubic(points, p0123, p123, p23, p3, tolerance, depth + 1);
   };
 
+  const getInteriorFont = (fontFamily) => (
+    loadedInteriorFonts[fontFamily] || loadedInteriorFonts[interiorFontOptions[0]?.value]
+  );
+
+  const buildInteriorTextPathData = (design, fontSize = 100) => {
+    const font = getInteriorFont(design.fontFamily);
+    const text = design.text || '';
+    if (!font || !text) return null;
+
+    const path = new opentype.Path();
+    const letterSpacing = n(design.letterSpacing, 0) * (fontSize / Math.max(1, n(design.height, fontSize)));
+    let cursorX = 0;
+
+    Array.from(text).forEach(char => {
+      const glyphPath = font.getPath(char, cursorX, 0, fontSize);
+      path.commands.push(...glyphPath.commands);
+      cursorX += font.getAdvanceWidth(char, fontSize) + letterSpacing;
+    });
+
+    const box = path.getBoundingBox();
+    if (!Number.isFinite(box.x1) || !Number.isFinite(box.y1) || box.x2 - box.x1 <= 0 || box.y2 - box.y1 <= 0) {
+      return null;
+    }
+
+    return {
+      path,
+      box: {
+        x: box.x1,
+        y: box.y1,
+        width: box.x2 - box.x1,
+        height: box.y2 - box.y1
+      }
+    };
+  };
+
+  const transformInteriorTextPoint = (point, textData, bounds) => {
+    const sx = bounds.width / Math.max(0.001, textData.box.width);
+    const sy = bounds.height / Math.max(0.001, textData.box.height);
+    return [
+      bounds.x + (point[0] - textData.box.x) * sx,
+      bounds.y + (point[1] - textData.box.y) * sy
+    ];
+  };
+
+  const flattenInteriorTextPath = (design, tolerance = 0.15) => {
+    const textData = buildInteriorTextPathData(design);
+    if (!textData) return [];
+
+    const bounds = getInteriorObjectBounds(design);
+    const contours = [];
+    let current = [0, 0];
+    let start = [0, 0];
+    let points = [];
+
+    const pushPoint = (point) => {
+      const transformed = transformInteriorTextPoint(point, textData, bounds);
+      const last = points[points.length - 1];
+      if (!last || Math.hypot(transformed[0] - last[0], transformed[1] - last[1]) > 0.01) {
+        points.push(transformed);
+      }
+    };
+
+    const closeCurrent = () => {
+      if (points.length >= 3) contours.push(cleanDxfPoints(points, true));
+      points = [];
+    };
+
+    textData.path.commands.forEach(command => {
+      if (command.type === 'M') {
+        closeCurrent();
+        current = [command.x, command.y];
+        start = current;
+        pushPoint(current);
+        return;
+      }
+
+      if (command.type === 'L') {
+        current = [command.x, command.y];
+        pushPoint(current);
+        return;
+      }
+
+      if (command.type === 'Q') {
+        const p0 = current;
+        const p1 = [command.x1, command.y1];
+        const p2 = [command.x, command.y];
+        const cubic1 = [
+          p0[0] + (2 / 3) * (p1[0] - p0[0]),
+          p0[1] + (2 / 3) * (p1[1] - p0[1])
+        ];
+        const cubic2 = [
+          p2[0] + (2 / 3) * (p1[0] - p2[0]),
+          p2[1] + (2 / 3) * (p1[1] - p2[1])
+        ];
+        const curvePoints = [];
+        addFlattenedCubic(curvePoints, p0, cubic1, cubic2, p2, tolerance);
+        curvePoints.forEach(pushPoint);
+        current = p2;
+        return;
+      }
+
+      if (command.type === 'C') {
+        const p0 = current;
+        const p1 = [command.x1, command.y1];
+        const p2 = [command.x2, command.y2];
+        const p3 = [command.x, command.y];
+        const curvePoints = [];
+        addFlattenedCubic(curvePoints, p0, p1, p2, p3, tolerance);
+        curvePoints.forEach(pushPoint);
+        current = p3;
+        return;
+      }
+
+      if (command.type === 'Z') {
+        pushPoint(start);
+        closeCurrent();
+        current = start;
+      }
+    });
+
+    closeCurrent();
+    return contours.filter(contour => contour.length >= 3);
+  };
+
+  const getInteriorTextPreviewPath = (design) => {
+    return flattenInteriorTextPath(design, 0.12)
+      .map(contour => (
+        contour.map(([px, py], index) => `${index === 0 ? 'M' : 'L'} ${px * scale} ${py * scale}`).join(' ') + ' Z'
+      ))
+      .join(' ');
+  };
+
+  const getPointSetBounds = (points) => {
+    if (!points.length) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    points.forEach(([px, py]) => {
+      minX = Math.min(minX, px);
+      minY = Math.min(minY, py);
+      maxX = Math.max(maxX, px);
+      maxY = Math.max(maxY, py);
+    });
+
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  };
+
+  const getInteriorTextBooleanContours = (design) => {
+    const textPaths = cleanClipperPaths(
+      flattenInteriorTextPath(design, 0.12)
+        .map(points => toClipperPath(points))
+    );
+
+    return unionClipperPaths(textPaths)
+      .map((path, textContourIndex) => ({
+        path,
+        points: fromClipperPath(path),
+        textContourIndex,
+        role: ClipperLib.Clipper.Orientation(path) ? 'outer' : 'hole'
+      }));
+  };
+
+  const getInteriorTextBridgeContours = (design, textContours = getInteriorTextBooleanContours(design)) => {
+    if (!design.textBridgesEnabled || design.color === 'black') return [];
+
+    const bridgeWidth = Math.max(1, n(design.textBridgeWidth, 8));
+    const outers = textContours.filter(contour => contour.role === 'outer');
+    const holes = textContours.filter(contour => contour.role === 'hole');
+
+    return holes.flatMap(hole => {
+      const holeBounds = getPointSetBounds(hole.points);
+      if (!holeBounds || holeBounds.width <= 0 || holeBounds.height <= 0) return [];
+
+      const holeCenter = [
+        holeBounds.x + holeBounds.width / 2,
+        holeBounds.y + holeBounds.height / 2
+      ];
+
+      const parent = outers
+        .map(outer => ({ outer, bounds: getPointSetBounds(outer.points) }))
+        .filter(item => item.bounds && pointInPolygon(holeCenter, item.outer.points))
+        .sort((a, b) => Math.abs(signedPolygonArea(a.outer.points)) - Math.abs(signedPolygonArea(b.outer.points)))[0];
+
+      if (!parent) return [];
+
+      const outerBounds = parent.bounds;
+      const half = bridgeWidth / 2;
+      const distances = [
+        { side: 'left', value: Math.abs(holeCenter[0] - outerBounds.x) },
+        { side: 'right', value: Math.abs(outerBounds.x + outerBounds.width - holeCenter[0]) },
+        { side: 'top', value: Math.abs(holeCenter[1] - outerBounds.y) },
+        { side: 'bottom', value: Math.abs(outerBounds.y + outerBounds.height - holeCenter[1]) }
+      ].sort((a, b) => a.value - b.value);
+
+      const side = distances[0]?.side || 'right';
+      const pad = bridgeWidth;
+      let rect;
+
+      if (side === 'left') {
+        rect = [
+          [outerBounds.x - pad, holeCenter[1] - half],
+          [holeBounds.x + holeBounds.width / 2, holeCenter[1] - half],
+          [holeBounds.x + holeBounds.width / 2, holeCenter[1] + half],
+          [outerBounds.x - pad, holeCenter[1] + half]
+        ];
+      } else if (side === 'right') {
+        rect = [
+          [holeBounds.x + holeBounds.width / 2, holeCenter[1] - half],
+          [outerBounds.x + outerBounds.width + pad, holeCenter[1] - half],
+          [outerBounds.x + outerBounds.width + pad, holeCenter[1] + half],
+          [holeBounds.x + holeBounds.width / 2, holeCenter[1] + half]
+        ];
+      } else if (side === 'top') {
+        rect = [
+          [holeCenter[0] - half, outerBounds.y - pad],
+          [holeCenter[0] + half, outerBounds.y - pad],
+          [holeCenter[0] + half, holeBounds.y + holeBounds.height / 2],
+          [holeCenter[0] - half, holeBounds.y + holeBounds.height / 2]
+        ];
+      } else {
+        rect = [
+          [holeCenter[0] - half, holeBounds.y + holeBounds.height / 2],
+          [holeCenter[0] + half, holeBounds.y + holeBounds.height / 2],
+          [holeCenter[0] + half, outerBounds.y + outerBounds.height + pad],
+          [holeCenter[0] - half, outerBounds.y + outerBounds.height + pad]
+        ];
+      }
+
+      return [cleanDxfPoints(rect, true)];
+    }).filter(points => points.length >= 3);
+  };
+
   const sampleSvgPathCommands = (commands, matrix, tolerance = 0.12) => {
     const points = [];
     let current = [0, 0];
@@ -5825,6 +6354,10 @@ export default function App() {
       return offsetOpenStrokeContours(design.points || [], thickness, 'round');
     }
 
+    if (design.kind === 'text') {
+      return flattenInteriorTextPath(design, 0.12);
+    }
+
     return [];
   };
 
@@ -5834,13 +6367,62 @@ export default function App() {
     const parser = new DOMParser();
 
     flattenInteriorDesigns(interiorDesigns).forEach((design, designIndex) => {
-      if (design.exportable === false) {
+      if (design.exportable === false && design.kind !== 'text') {
         skipped.push(design.name);
         return;
       }
 
       if (!isImportedInteriorSvg(design)) {
         const layer = `SHAPE_${designIndex + 1}`;
+        if (design.kind === 'text') {
+          const textContours = getInteriorTextBooleanContours(design);
+
+          textContours.forEach((textContour) => {
+            const cleaned = cleanDxfPoints(textContour.points, true);
+            if (cleaned.length < 3) return;
+            const isHole = textContour.role === 'hole';
+            const materialColor = design.color === 'black' || isHole ? 'black' : 'white';
+            const contourSets = materialColor === 'white'
+              ? intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design))
+              : [cleaned];
+
+            contourSets.forEach(clipped => {
+              if (clipped.length < 3) return;
+              contours.push({
+                points: clipped,
+                closed: true,
+                source: isHole ? 'knockout' : 'fill',
+                fillRule: 'nonzero',
+                layer,
+                designId: design.id,
+                designName: design.name,
+                materialColor,
+                zIndex: designIndex,
+                contourOrder: contours.length + textContour.textContourIndex / 1000
+              });
+            });
+          });
+
+          getInteriorTextBridgeContours(design, textContours).forEach((bridgePoints, bridgeIndex) => {
+            const cleaned = cleanDxfPoints(bridgePoints, true);
+            if (cleaned.length < 3) return;
+
+            contours.push({
+              points: cleaned,
+              closed: true,
+              source: 'knockout',
+              fillRule: 'nonzero',
+              layer,
+              designId: design.id,
+              designName: `${design.name || 'Text'} bridge`,
+              materialColor: 'black',
+              zIndex: designIndex + 0.01,
+              contourOrder: contours.length + bridgeIndex / 1000
+            });
+          });
+          return;
+        }
+
         getInteriorShapeContours(design).forEach(points => {
           const cleaned = cleanDxfPoints(points, true);
           if (cleaned.length < 3) return;
@@ -6603,19 +7185,122 @@ export default function App() {
 
   const sendCurrentDesignToPresentation = () => {
     const snapshot = createPresentationSnapshot();
-    setPresentationItems(prev => [...prev, snapshot]);
-    setSelectedPresentationItemId(snapshot.id);
+    applyPresentationItems(prev => [...prev, snapshot], { selectedId: snapshot.id });
     setWorkspaceMode('presentation');
     setPresentationPosition(null);
   };
 
   const selectedPresentationItem = presentationItems.find(item => item.id === selectedPresentationItemId);
 
+  const getPresentationItemWidth = (item) => Math.max(1, n(item.width, item.bounds?.width || 1));
+
+  const getPresentationItemHeight = (item) => Math.max(1, n(item.height, item.bounds?.height || 1));
+
+  const getPresentationItemScale = (item) => (
+    isPresentationImageItem(item) ? 1 : Math.max(0.05, n(item.itemScale, 1))
+  );
+
   const getPresentationOuterFrameThickness = (item) => (
     item?.showOuterFrame ? Math.max(0, n(item.outerFrameThickness, 30)) : 0
   );
 
-  const getPresentationBodyPolygons = (item) => item?.panelPolygons || [];
+  const isPresentationImageItem = (item) => item?.kind === 'pillar' || item?.kind === 'decoration';
+
+  const getPresentationImageUrl = (item) => {
+    if (item?.sourceDecorationId) {
+      const decoration = allPresentationDecorations.find(entry => entry.id === item.sourceDecorationId);
+      if (decoration?.imageUrl) return decoration.imageUrl;
+    }
+
+    return item?.imageUrl || fallbackPresentationDecorationUrl;
+  };
+
+  const builtInPresentationDecorations = projectPresentationDecorations.map(decoration => ({
+    ...decoration,
+    ...(presentationDecorationOverrides[decoration.id] || {}),
+    imageUrl: presentationDecorationOverrides[decoration.id]?.imageUrl || decoration.imageUrl,
+    naturalWidth: presentationDecorationOverrides[decoration.id]?.naturalWidth || decoration.naturalWidth,
+    naturalHeight: presentationDecorationOverrides[decoration.id]?.naturalHeight || decoration.naturalHeight
+  }));
+
+  const allPresentationDecorations = [...builtInPresentationDecorations, ...presentationDecorations];
+
+  const getPresentationBodyPolygons = (item) => isPresentationImageItem(item) ? [] : item?.panelPolygons || [];
+
+  const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  const loadImageElement = (src) => new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+
+  const removeLightImageBackground = async (src) => {
+    const image = await loadImageElement(src);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, image.naturalWidth || image.width || 1);
+    canvas.height = Math.max(1, image.naturalHeight || image.height || 1);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const { data, width: imageWidth, height: imageHeight } = imageData;
+    const visited = new Uint8Array(imageWidth * imageHeight);
+    const queue = [];
+    let head = 0;
+
+    const isLightBackground = (x, y) => {
+      const index = (y * imageWidth + x) * 4;
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const brightness = (r + g + b) / 3;
+      return brightness >= 224 && max - min <= 22;
+    };
+
+    const enqueue = (x, y) => {
+      if (x < 0 || y < 0 || x >= imageWidth || y >= imageHeight) return;
+      const index = y * imageWidth + x;
+      if (visited[index] || !isLightBackground(x, y)) return;
+      visited[index] = 1;
+      queue.push(index);
+    };
+
+    for (let x = 0; x < imageWidth; x++) {
+      enqueue(x, 0);
+      enqueue(x, imageHeight - 1);
+    }
+    for (let y = 0; y < imageHeight; y++) {
+      enqueue(0, y);
+      enqueue(imageWidth - 1, y);
+    }
+
+    while (head < queue.length) {
+      const index = queue[head++];
+      const x = index % imageWidth;
+      const y = Math.floor(index / imageWidth);
+      data[index * 4 + 3] = 0;
+      enqueue(x + 1, y);
+      enqueue(x - 1, y);
+      enqueue(x, y + 1);
+      enqueue(x, y - 1);
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return {
+      imageUrl: canvas.toDataURL('image/png'),
+      naturalWidth: imageWidth,
+      naturalHeight: imageHeight
+    };
+  };
 
   const getTopProfileFromPanelPolygon = (points, sampleCount = 96) => {
     if (!points?.length) return [];
@@ -6660,6 +7345,7 @@ export default function App() {
   };
 
   const getPresentationOuterFrameRings = (item) => {
+    if (isPresentationImageItem(item)) return [];
     const thickness = getPresentationOuterFrameThickness(item);
     if (thickness <= 0) return [];
 
@@ -6695,7 +7381,28 @@ export default function App() {
   };
 
   const getPresentationItemCornerPoints = (item) => {
-    const itemScale = Math.max(0.05, n(item.itemScale, 1));
+    const itemScale = getPresentationItemScale(item);
+    if (isPresentationImageItem(item)) {
+      const w = getPresentationItemWidth(item) * itemScale;
+      const h = getPresentationItemHeight(item) * itemScale;
+      const cx = item.x + w / 2;
+      const cy = item.y + h / 2;
+      const angle = (n(item.rotation, 0) * Math.PI) / 180;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+
+      return [
+        [item.x, item.y],
+        [item.x + w, item.y],
+        [item.x + w, item.y + h],
+        [item.x, item.y + h]
+      ].map(([x, y]) => {
+        const dx = x - cx;
+        const dy = y - cy;
+        return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+      });
+    }
+
     const frameBounds = getBoundsFromPointSets([
       [item.bounds.x, item.bounds.y],
       [item.bounds.x + item.bounds.width, item.bounds.y],
@@ -6740,6 +7447,15 @@ export default function App() {
   };
 
   const getPresentationViewBox = () => {
+    if (presentationPosition?.width && presentationPosition?.height) {
+      return {
+        x: presentationPosition.x,
+        y: presentationPosition.y,
+        width: presentationPosition.width,
+        height: presentationPosition.height
+      };
+    }
+
     const base = getPresentationBaseViewBox();
     return {
       x: presentationPosition?.x ?? base.x,
@@ -6769,30 +7485,255 @@ export default function App() {
     const mouseSvgY = current.y + (mouseY / rect.height) * current.height;
     const zoomFactor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
     const nextZoom = clamp(presentationZoom * zoomFactor, MIN_VIEW_ZOOM, MAX_VIEW_ZOOM);
-    const nextWidth = base.width / nextZoom;
-    const nextHeight = base.height / nextZoom;
+    const appliedZoomFactor = presentationZoom ? nextZoom / presentationZoom : zoomFactor;
+    const nextWidth = presentationPosition?.width
+      ? current.width / appliedZoomFactor
+      : base.width / nextZoom;
+    const nextHeight = presentationPosition?.height
+      ? current.height / appliedZoomFactor
+      : base.height / nextZoom;
 
     setPresentationZoom(nextZoom);
     setPresentationPosition({
       x: mouseSvgX - (mouseX / rect.width) * nextWidth,
-      y: mouseSvgY - (mouseY / rect.height) * nextHeight
+      y: mouseSvgY - (mouseY / rect.height) * nextHeight,
+      width: nextWidth,
+      height: nextHeight
     });
   };
 
-  const getPresentationPoint = (e) => getSvgPoint(e);
+  const getPresentationPoint = (e) => {
+    const svg = presentationSvgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+
+    const rect = svg.getBoundingClientRect();
+    const viewBox = getPresentationViewBox();
+    const x = viewBox.x + ((e.clientX - rect.left) / rect.width) * viewBox.width;
+    const y = viewBox.y + ((e.clientY - rect.top) / rect.height) * viewBox.height;
+    return { x: x / scale, y: y / scale };
+  };
+
+  const setPresentationSelection = (ids) => {
+    const uniqueIds = [...new Set(ids.filter(Boolean))];
+    setSelectedPresentationItemIds(uniqueIds);
+    setSelectedPresentationItemId(uniqueIds[uniqueIds.length - 1] || null);
+  };
+
+  const togglePresentationItemSelection = (id) => {
+    const current = selectedPresentationItemIdsRef.current;
+    const next = current.includes(id)
+      ? current.filter(itemId => itemId !== id)
+      : [...current, id];
+    setPresentationSelection(next);
+  };
 
   const startPresentationItemDrag = (e, item, mode, handle = null) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     const point = getPresentationPoint(e);
-    setSelectedPresentationItemId(item.id);
+
+    if (mode === 'move' && e.shiftKey) {
+      togglePresentationItemSelection(item.id);
+      return;
+    }
+
+    const currentSelection = selectedPresentationItemIdsRef.current;
+    const movingIds = mode === 'move' && currentSelection.includes(item.id)
+      ? currentSelection
+      : [item.id];
+    if (!currentSelection.includes(item.id) || mode !== 'move') {
+      setPresentationSelection([item.id]);
+    }
+
+    recordPresentationHistory();
     setPresentationDrag({
       mode,
       handle,
       id: item.id,
+      ids: movingIds,
+      freeScale: e.ctrlKey || e.metaKey,
       startPoint: point,
-      startItem: { ...item }
+      startItem: { ...item },
+      startItems: clonePresentationItems(presentationItemsRef.current)
+    });
+  };
+
+  const getPresentationItemVisualBounds = (item) => {
+    if (isPresentationImageItem(item)) {
+      return {
+        x: item.x,
+        y: item.y,
+        width: getPresentationItemWidth(item),
+        height: getPresentationItemHeight(item)
+      };
+    }
+
+    const frameBounds = getBoundsFromPointSets([
+      [item.bounds.x, item.bounds.y],
+      [item.bounds.x + item.bounds.width, item.bounds.y],
+      [item.bounds.x + item.bounds.width, item.bounds.y + item.bounds.height],
+      [item.bounds.x, item.bounds.y + item.bounds.height],
+      ...getPresentationOuterFrameRings(item).flatMap(ring => ring.solid || [...ring.outer, ...ring.inner])
+    ]);
+
+    return {
+      x: item.x + frameBounds.x - item.bounds.x,
+      y: item.y + frameBounds.y - item.bounds.y,
+      width: frameBounds.width,
+      height: frameBounds.height
+    };
+  };
+
+  const clearPresentationItems = () => {
+    applyPresentationItems([], { selectedId: null });
+    setPresentationDrag(null);
+    setPresentationPosition(null);
+  };
+
+  const createPresentationDecorationItem = (decoration, point) => {
+    const naturalWidth = Math.max(1, n(decoration.naturalWidth, 300));
+    const naturalHeight = Math.max(1, n(decoration.naturalHeight, 300));
+    const heightMm = 300;
+    const widthMm = heightMm * (naturalWidth / naturalHeight);
+    return {
+      id: crypto.randomUUID(),
+      kind: 'decoration',
+      name: decoration.name || 'Decoration',
+      sourceDecorationId: decoration.id,
+      imageType: decoration.id === 'builtin-stone-pillar' ? 'stone-pillar' : decoration.imageType,
+      x: point.x - widthMm / 2,
+      y: point.y - heightMm / 2,
+      width: widthMm,
+      height: heightMm,
+      rotation: 0,
+      itemScale: 1,
+      createdAt: Date.now()
+    };
+  };
+
+  const addDecorationToPresentation = (decoration, point = null) => {
+    const targetPoint = point || presentationMousePointRef.current || { x: 0, y: 0 };
+    const next = createPresentationDecorationItem(decoration, targetPoint);
+    applyPresentationItems(prev => [next, ...prev], { selectedId: next.id });
+  };
+
+  const handlePresentationDecorationDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const decorationId = e.dataTransfer.getData('presentation-decoration-id');
+    const decoration = allPresentationDecorations.find(item => item.id === decorationId);
+    if (!decoration) return;
+    addDecorationToPresentation(decoration, getPresentationPoint(e));
+  };
+
+  const handlePresentationDecorationFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!files.length) return;
+
+    const nextDecorations = [];
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) continue;
+      try {
+        const rawUrl = await readFileAsDataUrl(file);
+        const cleaned = await removeLightImageBackground(rawUrl);
+        nextDecorations.push({
+          id: crypto.randomUUID(),
+          name: file.name.replace(/\.[^.]+$/, '') || 'Decoration',
+          imageUrl: cleaned.imageUrl,
+          naturalWidth: cleaned.naturalWidth,
+          naturalHeight: cleaned.naturalHeight,
+          createdAt: Date.now()
+        });
+      } catch {
+        const rawUrl = await readFileAsDataUrl(file);
+        nextDecorations.push({
+          id: crypto.randomUUID(),
+          name: file.name.replace(/\.[^.]+$/, '') || 'Decoration',
+          imageUrl: rawUrl,
+          naturalWidth: 300,
+          naturalHeight: 300,
+          createdAt: Date.now()
+        });
+      }
+    }
+
+    if (nextDecorations.length) {
+      setPresentationDecorations(prev => [...prev, ...nextDecorations]);
+    }
+  };
+
+  const deletePresentationDecoration = (id) => {
+    setPresentationDecorations(prev => prev.filter(item => item.id !== id));
+    deletePresentationStoredImage(`decoration:${id}`).catch(() => {});
+  };
+
+  const removePresentationDecorationBackground = async (decoration) => {
+    if (!decoration) return;
+    try {
+      const cleaned = await removeLightImageBackground(decoration.imageUrl);
+      if (decoration.builtIn) {
+        setPresentationDecorationOverrides(prev => ({
+          ...prev,
+          [decoration.id]: {
+            imageUrl: cleaned.imageUrl,
+            naturalWidth: cleaned.naturalWidth,
+            naturalHeight: cleaned.naturalHeight
+          }
+        }));
+        setPresentationItems(prev => prev.map(item => (
+          item.sourceDecorationId === decoration.id || item.imageType === 'stone-pillar'
+            ? {
+                ...item,
+                sourceDecorationId: decoration.id,
+                imageType: 'stone-pillar',
+                width: getPresentationItemWidth(item),
+                height: getPresentationItemHeight(item)
+              }
+            : item
+        )));
+        return;
+      }
+
+      setPresentationDecorations(prev => prev.map(item => (
+        item.id === decoration.id
+          ? {
+              ...item,
+              imageUrl: cleaned.imageUrl,
+              naturalWidth: cleaned.naturalWidth,
+              naturalHeight: cleaned.naturalHeight
+            }
+          : item
+      )));
+      setPresentationItems(prev => prev.map(item => (
+        item.sourceDecorationId === decoration.id
+          ? {
+              ...item,
+              width: getPresentationItemWidth(item),
+              height: getPresentationItemHeight(item)
+            }
+          : item
+      )));
+    } catch {
+      // Keep the original image when cleanup cannot be applied.
+    }
+  };
+
+  const reorderSelectedPresentationItem = (mode) => {
+    const id = selectedPresentationItemIdRef.current;
+    if (!id) return;
+
+    applyPresentationItems(prev => {
+      const index = prev.findIndex(item => item.id === id);
+      if (index < 0) return prev;
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+      if (mode === 'back') next.unshift(item);
+      if (mode === 'front') next.push(item);
+      if (mode === 'backward') next.splice(Math.max(0, index - 1), 0, item);
+      if (mode === 'forward') next.splice(Math.min(next.length, index + 1), 0, item);
+      return next;
     });
   };
 
@@ -6805,7 +7746,7 @@ export default function App() {
     }
 
     if (e.target === e.currentTarget) {
-      setSelectedPresentationItemId(null);
+      setPresentationSelection([]);
     }
   };
 
@@ -6822,77 +7763,130 @@ export default function App() {
       const dyPx = e.clientY - presentationDrag.startClientY;
       setPresentationPosition({
         x: presentationDrag.startView.x - (dxPx / rect.width) * presentationDrag.startView.width,
-        y: presentationDrag.startView.y - (dyPx / rect.height) * presentationDrag.startView.height
+        y: presentationDrag.startView.y - (dyPx / rect.height) * presentationDrag.startView.height,
+        width: presentationDrag.startView.width,
+        height: presentationDrag.startView.height
       });
       return;
     }
 
-    setPresentationItems(prev => prev.map(item => {
-      if (item.id !== presentationDrag.id) return item;
+    applyPresentationItems(prev => prev.map(item => {
+      const draggedIds = presentationDrag.ids || [presentationDrag.id];
+      if (presentationDrag.mode === 'move') {
+        if (!draggedIds.includes(item.id)) return item;
+      } else if (item.id !== presentationDrag.id) {
+        return item;
+      }
       const dx = point.x - presentationDrag.startPoint.x;
       const dy = point.y - presentationDrag.startPoint.y;
-      const start = presentationDrag.startItem;
+      const start = presentationDrag.startItems?.find(startItem => startItem.id === item.id) || presentationDrag.startItem;
 
       if (presentationDrag.mode === 'move') {
         return { ...item, x: start.x + dx, y: start.y + dy };
       }
 
       if (presentationDrag.mode === 'scale') {
+        const startWidth = getPresentationItemWidth(start);
+        const startHeight = getPresentationItemHeight(start);
+        if (isPresentationImageItem(start)) {
+          const nextWidth = startWidth + dx * (presentationDrag.handle.includes('e') ? 1 : -1);
+          const nextHeight = startHeight + dy * (presentationDrag.handle.includes('s') ? 1 : -1);
+          const nextX = presentationDrag.handle.includes('w') ? start.x + dx : start.x;
+          const nextY = presentationDrag.handle.includes('n') ? start.y + dy : start.y;
+
+          if (!presentationDrag.freeScale) {
+            const widthFactor = nextWidth / Math.max(1, startWidth);
+            const heightFactor = nextHeight / Math.max(1, startHeight);
+            const factor = Math.max(0.01, Math.abs(widthFactor) > Math.abs(heightFactor) ? widthFactor : heightFactor);
+            const lockedWidth = Math.max(1, startWidth * factor);
+            const lockedHeight = Math.max(1, startHeight * factor);
+            return {
+              ...item,
+              x: presentationDrag.handle.includes('w') ? start.x + startWidth - lockedWidth : start.x,
+              y: presentationDrag.handle.includes('n') ? start.y + startHeight - lockedHeight : start.y,
+              width: lockedWidth,
+              height: lockedHeight
+            };
+          }
+
+          return {
+            ...item,
+            x: nextWidth < 1 ? item.x : nextX,
+            y: nextHeight < 1 ? item.y : nextY,
+            width: Math.max(1, nextWidth),
+            height: Math.max(1, nextHeight)
+          };
+        }
+
         const startScale = Math.max(0.05, n(start.itemScale, 1));
         const rawScale = Math.max(
-          (start.width * startScale + dx * (presentationDrag.handle.includes('e') ? 1 : -1)) / start.width,
-          (start.height * startScale + dy * (presentationDrag.handle.includes('s') ? 1 : -1)) / start.height
+          (startWidth * startScale + dx * (presentationDrag.handle.includes('e') ? 1 : -1)) / startWidth,
+          (startHeight * startScale + dy * (presentationDrag.handle.includes('s') ? 1 : -1)) / startHeight
         );
         return { ...item, itemScale: clamp(rawScale, 0.05, 20) };
       }
 
       if (presentationDrag.mode === 'rotate') {
-        const startScale = Math.max(0.05, n(start.itemScale, 1));
-        const cx = start.x + (start.width * startScale) / 2;
-        const cy = start.y + (start.height * startScale) / 2;
+        const startScale = getPresentationItemScale(start);
+        const cx = start.x + (getPresentationItemWidth(start) * startScale) / 2;
+        const cy = start.y + (getPresentationItemHeight(start) * startScale) / 2;
         const startAngle = Math.atan2(presentationDrag.startPoint.y - cy, presentationDrag.startPoint.x - cx);
         const nextAngle = Math.atan2(point.y - cy, point.x - cx);
         return { ...item, rotation: start.rotation + (nextAngle - startAngle) * 180 / Math.PI };
       }
 
       return item;
-    }));
+    }), { history: false });
   };
 
   const updateSelectedPresentationItem = (updates) => {
     if (!selectedPresentationItemId) return;
-    setPresentationItems(prev => prev.map(item => item.id === selectedPresentationItemId ? { ...item, ...updates } : item));
+    applyPresentationItems(prev => prev.map(item => item.id === selectedPresentationItemId ? { ...item, ...updates } : item));
   };
 
   const copySelectedPresentationItem = () => {
-    const item = presentationItemsRef.current.find(entry => entry.id === selectedPresentationItemIdRef.current);
-    if (item) presentationClipboardRef.current = { ...item };
+    const ids = selectedPresentationItemIdsRef.current.length
+      ? selectedPresentationItemIdsRef.current
+      : [selectedPresentationItemIdRef.current].filter(Boolean);
+    const items = presentationItemsRef.current.filter(entry => ids.includes(entry.id));
+    if (items.length) presentationClipboardRef.current = items.map(item => ({ ...item }));
   };
 
   const pastePresentationItem = () => {
     const source = presentationClipboardRef.current;
     if (!source) return;
-    const sourceScale = Math.max(0.05, n(source.itemScale, 1));
-    const point = presentationMousePointRef.current || { x: source.x + 40, y: source.y + 40 };
-    const next = {
-      ...source,
+    const sourceItems = Array.isArray(source) ? source : [source];
+    const firstSource = sourceItems[0];
+    const point = presentationMousePointRef.current || { x: n(firstSource?.x, 0) + 40, y: n(firstSource?.y, 0) + 40 };
+    const sourceBounds = getBoundsFromPointSets(sourceItems.flatMap(item => getPresentationItemCornerPoints(item)));
+    const dx = point.x - (sourceBounds.x + sourceBounds.width / 2);
+    const dy = point.y - (sourceBounds.y + sourceBounds.height / 2);
+    const nextItems = sourceItems.map(item => ({
+      ...item,
       id: crypto.randomUUID(),
-      name: `${source.name} copy`,
-      x: point.x - (source.width * sourceScale) / 2,
-      y: point.y - (source.height * sourceScale) / 2,
+      name: `${item.name} copy`,
+      x: item.x + dx,
+      y: item.y + dy,
       createdAt: Date.now()
-    };
-    setPresentationItems(prev => [...prev, next]);
-    setSelectedPresentationItemId(next.id);
+    }));
+    applyPresentationItems(prev => [...prev, ...nextItems], { selectedIds: nextItems.map(item => item.id) });
   };
 
   const deleteSelectedPresentationItem = () => {
-    setPresentationItems(prev => prev.filter(item => item.id !== selectedPresentationItemIdRef.current));
-    setSelectedPresentationItemId(null);
+    const ids = selectedPresentationItemIdsRef.current.length
+      ? selectedPresentationItemIdsRef.current
+      : [selectedPresentationItemIdRef.current].filter(Boolean);
+    applyPresentationItems(prev => prev.filter(item => !ids.includes(item.id)), { selectedIds: [] });
   };
 
   const presentationItemTransform = (item) => {
-    const itemScale = Math.max(0.05, n(item.itemScale, 1));
+    const itemScale = getPresentationItemScale(item);
+    if (isPresentationImageItem(item)) {
+      const cx = (getPresentationItemWidth(item) * scale) / 2;
+      const cy = (getPresentationItemHeight(item) * scale) / 2;
+      return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy})`;
+    }
+
     const cx = (item.width * itemScale * scale) / 2;
     const cy = (item.height * itemScale * scale) / 2;
     return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy}) scale(${itemScale}) translate(${-item.bounds.x * scale} ${-item.bounds.y * scale})`;
@@ -6904,6 +7898,17 @@ export default function App() {
 
   const renderPresentationItemArtwork = (item) => (
     <g transform={presentationItemTransform(item)}>
+      {isPresentationImageItem(item) && (
+        <image
+          href={getPresentationImageUrl(item)}
+          xlinkHref={getPresentationImageUrl(item)}
+          x="0"
+          y="0"
+          width={getPresentationItemWidth(item) * scale}
+          height={getPresentationItemHeight(item) * scale}
+          preserveAspectRatio="none"
+        />
+      )}
       {getPresentationOuterFrameRings(item).map((ring, index) => (
         ring.solid ? (
           <polygon
@@ -6923,7 +7928,7 @@ export default function App() {
       {getPresentationBodyPolygons(item).map((points, index) => (
         <polygon key={`panel-${item.id}-${index}`} points={polygonPoints(points)} fill={item.tint || '#000000'} />
       ))}
-      {item.whitePolygons.map((points, index) => (
+      {(item.whitePolygons || []).map((points, index) => (
         <polygon key={`white-${item.id}-${index}`} points={polygonPoints(points)} fill="#ffffff" />
       ))}
     </g>
@@ -6940,11 +7945,24 @@ export default function App() {
   const presentationPolygonPathRaw = (points) => (
     points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${roundDXF(x)} ${roundDXF(y)}`).join(' ') + ' Z'
   );
+  const getPresentationLayeredItems = () => (
+    presentationItems
+  );
 
   const buildPresentationSvgMarkup = () => {
     const bounds = getPresentationExportBounds();
-    const artwork = presentationItems.map(item => {
-      const itemScale = Math.max(0.05, n(item.itemScale, 1));
+    const artwork = getPresentationLayeredItems().map(item => {
+      const itemScale = getPresentationItemScale(item);
+      if (isPresentationImageItem(item)) {
+        const width = getPresentationItemWidth(item);
+        const height = getPresentationItemHeight(item);
+        const cx = width / 2;
+        const cy = height / 2;
+        const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)})`;
+        const imageUrl = getPresentationImageUrl(item);
+        return `<image href="${imageUrl}" xlink:href="${imageUrl}" x="0" y="0" width="${roundDXF(width)}" height="${roundDXF(height)}" preserveAspectRatio="none" transform="${transform}"/>`;
+      }
+
       const cx = (item.width * itemScale) / 2;
       const cy = (item.height * itemScale) / 2;
       const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)}) scale(${roundDXF(itemScale)}) translate(${-roundDXF(item.bounds.x)} ${-roundDXF(item.bounds.y)})`;
@@ -6954,11 +7972,11 @@ export default function App() {
           : `<path d="${presentationPolygonPathRaw(ring.outer)} ${presentationPolygonPathRaw(ring.inner)}" fill="#000000" fill-rule="evenodd"/>`)
         .join('');
       const panels = getPresentationBodyPolygons(item).map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="${item.tint || '#000000'}"/>`).join('');
-      const whites = item.whitePolygons.map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="#ffffff"/>`).join('');
+      const whites = (item.whitePolygons || []).map(points => `<polygon points="${presentationPolygonPointsRaw(points)}" fill="#ffffff"/>`).join('');
       return `<g transform="${transform}">${outerFrame}${panels}${whites}</g>`;
     }).join('');
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${roundDXF(bounds.x)} ${roundDXF(bounds.y)} ${roundDXF(bounds.width)} ${roundDXF(bounds.height)}"><rect x="${roundDXF(bounds.x)}" y="${roundDXF(bounds.y)}" width="${roundDXF(bounds.width)}" height="${roundDXF(bounds.height)}" fill="#ffffff"/>${artwork}</svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${roundDXF(bounds.x)} ${roundDXF(bounds.y)} ${roundDXF(bounds.width)} ${roundDXF(bounds.height)}"><rect x="${roundDXF(bounds.x)}" y="${roundDXF(bounds.y)}" width="${roundDXF(bounds.width)}" height="${roundDXF(bounds.height)}" fill="#ffffff"/>${artwork}</svg>`;
   };
 
   const downloadTextFile = (content, filename, type) => {
@@ -7033,6 +8051,9 @@ export default function App() {
   const getInteriorDesignClipPathId = (designId) => `interior-design-clip-${designId}`;
 
   const getMeasuredTextBox = (text, fontFamily = 'Arial, sans-serif', letterSpacing = 0) => {
+    const textData = buildInteriorTextPathData({ text, fontFamily, letterSpacing, height: 100 });
+    if (textData) return textData.box;
+
     const safeText = text || 'Text';
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const textNode = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -7179,13 +8200,8 @@ export default function App() {
 
     if (design.kind === 'text') {
       const textValue = design.text ?? '';
-      const rawLetterSpacing = n(design.letterSpacing, 0);
-      const measurementLetterSpacing = rawLetterSpacing * (100 / Math.max(1, itemHeight));
-      const textBox = getMeasuredTextBox(textValue, design.fontFamily || 'Arial, sans-serif', measurementLetterSpacing);
-      const textScaleX = itemWidth / Math.max(0.001, textBox.width);
-      const textScaleY = itemHeight / Math.max(0.001, textBox.height);
-      const textTranslateX = (x - textBox.x * textScaleX) * scale;
-      const textTranslateY = (y - textBox.y * textScaleY) * scale;
+      const outlineMarkup = getInteriorTextPreviewPath(design);
+      const bridgeContours = getInteriorTextBridgeContours(design);
       return (
         <g clipPath={commonClipPath} {...eventProps} style={cursorStyle}>
           <rect
@@ -7195,20 +8211,22 @@ export default function App() {
             height={itemHeight * scale}
             fill="transparent"
           />
-          {textValue && (
-            <text
-              x="0"
-              y="0"
+          {textValue && outlineMarkup && (
+            <path
+              d={outlineMarkup}
               fill={shapeFill}
-              fontSize="100"
-              fontFamily={design.fontFamily || 'Arial, sans-serif'}
-              letterSpacing={measurementLetterSpacing}
-              transform={`translate(${textTranslateX} ${textTranslateY}) scale(${textScaleX * scale} ${textScaleY * scale})`}
+              fillRule="nonzero"
               pointerEvents="none"
-            >
-              {textValue}
-            </text>
+            />
           )}
+          {bridgeContours.map((bridgePoints, bridgeIndex) => (
+            <polygon
+              key={`bridge-${bridgeIndex}`}
+              points={polygonPoints(bridgePoints)}
+              fill="#000000"
+              pointerEvents="none"
+            />
+          ))}
         </g>
       );
     }
@@ -7249,25 +8267,54 @@ export default function App() {
               </div>
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Presentation</h1>
-                <p className="text-xs text-slate-500">{presentationItems.length} saved panel{presentationItems.length === 1 ? '' : 's'}</p>
+                <p className="text-xs text-slate-500">{presentationItems.length} saved item{presentationItems.length === 1 ? '' : 's'}</p>
               </div>
             </div>
 
             <div className="flex items-center gap-2">
               {selectedPresentationItem && (
                 <>
-                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
-                    Scale
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0.05"
-                      value={Number.isFinite(Number(selectedPresentationItem.itemScale)) ? Number(selectedPresentationItem.itemScale).toFixed(2) : ''}
-                      onChange={e => updateSelectedPresentationItem({ itemScale: e.target.value === '' ? '' : Math.max(0.05, Number(e.target.value)) })}
-                      onBlur={() => updateSelectedPresentationItem({ itemScale: Math.max(0.05, n(selectedPresentationItem.itemScale, 1)) })}
-                      className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
-                    />
-                  </label>
+                  {isPresentationImageItem(selectedPresentationItem) ? (
+                    <>
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                        W
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="1"
+                          value={Number.isFinite(Number(selectedPresentationItem.width)) ? Number(selectedPresentationItem.width).toFixed(2) : ''}
+                          onChange={e => updateSelectedPresentationItem({ width: e.target.value === '' ? '' : Number(e.target.value) })}
+                          onBlur={() => updateSelectedPresentationItem({ width: Math.max(1, n(selectedPresentationItem.width, 1)) })}
+                          className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                        />
+                      </label>
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                        H
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="1"
+                          value={Number.isFinite(Number(selectedPresentationItem.height)) ? Number(selectedPresentationItem.height).toFixed(2) : ''}
+                          onChange={e => updateSelectedPresentationItem({ height: e.target.value === '' ? '' : Number(e.target.value) })}
+                          onBlur={() => updateSelectedPresentationItem({ height: Math.max(1, n(selectedPresentationItem.height, 1)) })}
+                          className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Scale
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.05"
+                        value={Number.isFinite(Number(selectedPresentationItem.itemScale)) ? Number(selectedPresentationItem.itemScale).toFixed(2) : ''}
+                        onChange={e => updateSelectedPresentationItem({ itemScale: e.target.value === '' ? '' : Math.max(0.05, Number(e.target.value)) })}
+                        onBlur={() => updateSelectedPresentationItem({ itemScale: Math.max(0.05, n(selectedPresentationItem.itemScale, 1)) })}
+                        className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                  )}
                   <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
                     Rotate
                     <input
@@ -7288,37 +8335,47 @@ export default function App() {
                       className="h-8 w-10 rounded-md border border-slate-200 bg-white p-1"
                     />
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => updateSelectedPresentationItem({
-                      showOuterFrame: !selectedPresentationItem.showOuterFrame,
-                      outerFrameThickness: Math.max(0, n(selectedPresentationItem.outerFrameThickness, 30))
-                    })}
-                    className={[
-                      'rounded-md border px-3 py-2 text-xs font-semibold transition',
-                      selectedPresentationItem.showOuterFrame
-                        ? 'border-slate-900 bg-slate-900 text-white'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                    ].join(' ')}
-                  >
-                    {selectedPresentationItem.showOuterFrame ? 'Frame on' : 'Add frame'}
-                  </button>
-                  {selectedPresentationItem.showOuterFrame && (
-                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
-                      Frame mm
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        value={selectedPresentationItem.outerFrameThickness ?? 30}
-                        onChange={e => updateSelectedPresentationItem({ outerFrameThickness: e.target.value })}
-                        onBlur={() => updateSelectedPresentationItem({ outerFrameThickness: Math.max(0, n(selectedPresentationItem.outerFrameThickness, 30)) })}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') e.currentTarget.blur();
-                        }}
-                        className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
-                      />
-                    </label>
+                  <div className="inline-flex overflow-hidden rounded-md border border-slate-200 bg-white">
+                    <button type="button" onClick={() => reorderSelectedPresentationItem('back')} className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Send to back">Back</button>
+                    <button type="button" onClick={() => reorderSelectedPresentationItem('backward')} className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Send backward"><ArrowDown size={14} /></button>
+                    <button type="button" onClick={() => reorderSelectedPresentationItem('forward')} className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Send forward"><ArrowUp size={14} /></button>
+                    <button type="button" onClick={() => reorderSelectedPresentationItem('front')} className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Send to front">Front</button>
+                  </div>
+                  {!isPresentationImageItem(selectedPresentationItem) && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => updateSelectedPresentationItem({
+                          showOuterFrame: !selectedPresentationItem.showOuterFrame,
+                          outerFrameThickness: Math.max(0, n(selectedPresentationItem.outerFrameThickness, 30))
+                        })}
+                        className={[
+                          'rounded-md border px-3 py-2 text-xs font-semibold transition',
+                          selectedPresentationItem.showOuterFrame
+                            ? 'border-slate-900 bg-slate-900 text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                        ].join(' ')}
+                      >
+                        {selectedPresentationItem.showOuterFrame ? 'Frame on' : 'Add frame'}
+                      </button>
+                      {selectedPresentationItem.showOuterFrame && (
+                        <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                          Frame mm
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0"
+                            value={selectedPresentationItem.outerFrameThickness ?? 30}
+                            onChange={e => updateSelectedPresentationItem({ outerFrameThickness: e.target.value })}
+                            onBlur={() => updateSelectedPresentationItem({ outerFrameThickness: Math.max(0, n(selectedPresentationItem.outerFrameThickness, 30)) })}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') e.currentTarget.blur();
+                            }}
+                            className="w-20 rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                          />
+                        </label>
+                      )}
+                    </>
                   )}
                   <button
                     type="button"
@@ -7333,6 +8390,14 @@ export default function App() {
               <button type="button" onClick={resetPresentationView} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
                 Reset view
               </button>
+              <button
+                type="button"
+                disabled={!presentationItems.length}
+                onClick={clearPresentationItems}
+                className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-40"
+              >
+                Clear all
+              </button>
               <button type="button" onClick={exportPresentationSvg} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
                 SVG
               </button>
@@ -7345,18 +8410,99 @@ export default function App() {
             </div>
           </div>
 
-          <div className="relative flex-1 min-h-0 bg-white">
+          <div className="relative flex-1 min-h-0 bg-white flex">
+            <aside className="w-52 shrink-0 border-r border-slate-200 bg-slate-50 p-3 overflow-y-auto">
+              <input
+                ref={presentationDecorationFileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handlePresentationDecorationFiles}
+              />
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-800">Decor</h2>
+                  <p className="text-[11px] text-slate-500">Drag into view</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => presentationDecorationFileInputRef.current?.click()}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-100"
+                  title="Add image"
+                >
+                  <Plus size={15} />
+                </button>
+              </div>
+              <div className="space-y-2">
+                {allPresentationDecorations.map(decoration => (
+                  <div
+                    key={decoration.id}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData('presentation-decoration-id', decoration.id);
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
+                    onDoubleClick={() => addDecorationToPresentation(decoration)}
+                    className="group rounded-lg border border-slate-200 bg-white p-2 cursor-grab active:cursor-grabbing"
+                  >
+                    <div className="aspect-[4/3] rounded-md border border-slate-100 bg-white flex items-center justify-center overflow-hidden">
+                      <img src={decoration.imageUrl} alt="" className="max-h-full max-w-full object-contain" />
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="block truncate text-[11px] font-medium text-slate-600">{decoration.name}</span>
+                        <span className="block text-[9px] uppercase tracking-wide text-slate-400">
+                          {decoration.projectAsset ? 'Project asset' : 'Local only'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removePresentationDecorationBackground(decoration);
+                          }}
+                          className="rounded border border-slate-200 bg-slate-50 p-1 text-slate-600 hover:bg-slate-100"
+                          title="Remove background"
+                        >
+                          <Eraser size={12} />
+                        </button>
+                        {!decoration.builtIn && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deletePresentationDecoration(decoration.id);
+                            }}
+                            className="rounded border border-red-100 bg-red-50 p-1 text-red-600 hover:bg-red-100"
+                            title="Delete decoration"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </aside>
             <svg
               ref={presentationSvgRef}
               width="100%"
               height="100%"
               viewBox={`${presentationViewBox.x} ${presentationViewBox.y} ${presentationViewBox.width} ${presentationViewBox.height}`}
-              className="h-full w-full"
+              className="h-full w-full flex-1"
               onWheel={handlePresentationWheel}
               onMouseDown={handlePresentationMouseDown}
               onMouseMove={handlePresentationMouseMove}
               onMouseUp={() => setPresentationDrag(null)}
               onMouseLeave={() => setPresentationDrag(null)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+              }}
+              onDrop={handlePresentationDecorationDrop}
               style={{ cursor: presentationDrag?.mode === 'pan' ? 'grabbing' : 'default' }}
             >
               <rect
@@ -7367,18 +8513,21 @@ export default function App() {
                 fill="#ffffff"
                 pointerEvents="none"
               />
-              {presentationItems.map(item => {
-                const itemScale = Math.max(0.05, n(item.itemScale, 1));
-                const presentationFrameBounds = getBoundsFromPointSets([
-                  [item.bounds.x, item.bounds.y],
-                  [item.bounds.x + item.bounds.width, item.bounds.y],
-                  [item.bounds.x + item.bounds.width, item.bounds.y + item.bounds.height],
-                  [item.bounds.x, item.bounds.y + item.bounds.height],
-      ...getPresentationOuterFrameRings(item).flatMap(ring => ring.solid || [...ring.outer, ...ring.inner])
-                ]);
-                const selected = item.id === selectedPresentationItemId;
-                const x = (item.x + (presentationFrameBounds.x - item.bounds.x) * itemScale) * scale;
-                const y = (item.y + (presentationFrameBounds.y - item.bounds.y) * itemScale) * scale;
+              {getPresentationLayeredItems().map(item => {
+                const itemScale = getPresentationItemScale(item);
+                const presentationFrameBounds = isPresentationImageItem(item)
+                  ? { x: 0, y: 0, width: getPresentationItemWidth(item), height: getPresentationItemHeight(item) }
+                  : getBoundsFromPointSets([
+                      [item.bounds.x, item.bounds.y],
+                      [item.bounds.x + item.bounds.width, item.bounds.y],
+                      [item.bounds.x + item.bounds.width, item.bounds.y + item.bounds.height],
+                      [item.bounds.x, item.bounds.y + item.bounds.height],
+                      ...getPresentationOuterFrameRings(item).flatMap(ring => ring.solid || [...ring.outer, ...ring.inner])
+                    ]);
+                const selected = selectedPresentationItemIds.includes(item.id);
+                const primarySelected = item.id === selectedPresentationItemId;
+                const x = (item.x + (isPresentationImageItem(item) ? 0 : presentationFrameBounds.x - item.bounds.x) * itemScale) * scale;
+                const y = (item.y + (isPresentationImageItem(item) ? 0 : presentationFrameBounds.y - item.bounds.y) * itemScale) * scale;
                 const w = presentationFrameBounds.width * itemScale * scale;
                 const h = presentationFrameBounds.height * itemScale * scale;
                 const handleSize = 10 / presentationZoom;
@@ -7405,43 +8554,47 @@ export default function App() {
                           strokeDasharray={`${6 / presentationZoom} ${5 / presentationZoom}`}
                           pointerEvents="none"
                         />
-                        {[
-                          ['nw', x, y],
-                          ['ne', x + w, y],
-                          ['sw', x, y + h],
-                          ['se', x + w, y + h]
-                        ].map(([handle, hx, hy]) => (
-                          <rect
-                            key={handle}
-                            x={hx - handleSize / 2}
-                            y={hy - handleSize / 2}
-                            width={handleSize}
-                            height={handleSize}
-                            fill="#2563eb"
-                            stroke="#ffffff"
-                            strokeWidth={1 / presentationZoom}
-                            onMouseDown={(e) => startPresentationItemDrag(e, item, 'scale', handle)}
-                            style={{ cursor: `${handle}-resize` }}
-                          />
-                        ))}
-                        <line
-                          x1={x + w / 2}
-                          y1={y}
-                          x2={x + w / 2}
-                          y2={rotateY}
-                          stroke="#2563eb"
-                          strokeWidth={1 / presentationZoom}
-                        />
-                        <circle
-                          cx={x + w / 2}
-                          cy={rotateY}
-                          r={6 / presentationZoom}
-                          fill="#ffffff"
-                          stroke="#2563eb"
-                          strokeWidth={1.5 / presentationZoom}
-                          onMouseDown={(e) => startPresentationItemDrag(e, item, 'rotate')}
-                          style={{ cursor: 'grab' }}
-                        />
+                        {primarySelected && (
+                          <>
+                            {[
+                              ['nw', x, y],
+                              ['ne', x + w, y],
+                              ['sw', x, y + h],
+                              ['se', x + w, y + h]
+                            ].map(([handle, hx, hy]) => (
+                              <rect
+                                key={handle}
+                                x={hx - handleSize / 2}
+                                y={hy - handleSize / 2}
+                                width={handleSize}
+                                height={handleSize}
+                                fill="#2563eb"
+                                stroke="#ffffff"
+                                strokeWidth={1 / presentationZoom}
+                                onMouseDown={(e) => startPresentationItemDrag(e, item, 'scale', handle)}
+                                style={{ cursor: `${handle}-resize` }}
+                              />
+                            ))}
+                            <line
+                              x1={x + w / 2}
+                              y1={y}
+                              x2={x + w / 2}
+                              y2={rotateY}
+                              stroke="#2563eb"
+                              strokeWidth={1 / presentationZoom}
+                            />
+                            <circle
+                              cx={x + w / 2}
+                              cy={rotateY}
+                              r={6 / presentationZoom}
+                              fill="#ffffff"
+                              stroke="#2563eb"
+                              strokeWidth={1.5 / presentationZoom}
+                              onMouseDown={(e) => startPresentationItemDrag(e, item, 'rotate')}
+                              style={{ cursor: 'grab' }}
+                            />
+                          </>
+                        )}
                       </g>
                     )}
                   </g>
@@ -7641,10 +8794,11 @@ export default function App() {
                       <select
                         value={selectedInteriorDesign.fontFamily || interiorFontOptions[0].value}
                         onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { fontFamily: e.target.value })}
-                        className="w-36 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                        className="w-40 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                        style={{ fontFamily: selectedInteriorDesign.fontFamily || interiorFontOptions[0].value }}
                       >
                         {interiorFontOptions.map(font => (
-                          <option key={font.value} value={font.value}>
+                          <option key={font.value} value={font.value} style={{ fontFamily: font.value }}>
                             {font.label}
                           </option>
                         ))}
@@ -7661,6 +8815,33 @@ export default function App() {
                         className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
                       />
                     </label>
+                    <button
+                      type="button"
+                      onClick={() => updateInteriorDesign(selectedInteriorDesign.id, { textBridgesEnabled: !selectedInteriorDesign.textBridgesEnabled })}
+                      className={[
+                        'inline-flex items-center rounded-md border px-2 py-1.5 text-xs font-medium transition',
+                        selectedInteriorDesign.textBridgesEnabled
+                          ? 'border-blue-200 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                      ].join(' ')}
+                      title="Add black bridges through enclosed text holes"
+                    >
+                      Bridges
+                    </button>
+                    {selectedInteriorDesign.textBridgesEnabled && (
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                        Bridge
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="1"
+                          value={selectedInteriorDesign.textBridgeWidth ?? 8}
+                          onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { textBridgeWidth: e.target.value === '' ? '' : Number(e.target.value) })}
+                          onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { textBridgeWidth: Math.max(1, n(selectedInteriorDesign.textBridgeWidth, 8)) })}
+                          className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                        />
+                      </label>
+                    )}
                   </>
                 )}
 
