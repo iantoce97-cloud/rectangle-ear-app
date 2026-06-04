@@ -176,8 +176,10 @@ export default function App() {
   const presentationRedoStackRef = useRef([]);
   const presentationClipboardRef = useRef(null);
   const presentationMousePointRef = useRef(null);
+  const presentationClientMouseRef = useRef(null);
   const presentationSvgRef = useRef(null);
   const presentationDecorationFileInputRef = useRef(null);
+  const importedSvgHitCacheRef = useRef(new Map());
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -379,6 +381,7 @@ export default function App() {
   const INITIAL_DIMENSION_OFFSET = 25;
   const ARC_SEGMENTS = 64;
   const EAR_ARC_SEGMENTS = 12;
+  const IMPORTED_SVG_HIT_TOLERANCE_PX = 8;
 
   const topVisibleCornerMargin = Math.max(0, margin - topEarDepth);
   const MIN_VIEW_ZOOM = 0.1;
@@ -750,6 +753,10 @@ export default function App() {
   }, [topShape, focusedNumberField, leftHeight, safeHeight, vEars]);
 
   useEffect(() => {
+    const handleWindowMouseMove = (e) => {
+      presentationClientMouseRef.current = { x: e.clientX, y: e.clientY };
+    };
+
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !isTextEditingTarget(e.target)) {
         e.preventDefault();
@@ -849,14 +856,16 @@ export default function App() {
       });
     };
 
+    window.addEventListener('mousemove', handleWindowMouseMove);
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('mouseup', handleMouseUp);
 
     return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [workspaceMode]);
+  }, [workspaceMode, presentationPosition, presentationZoom]);
 
   // Clear measurements when geometry changes
   useEffect(() => {
@@ -3634,6 +3643,120 @@ export default function App() {
   };
 
   const getSvgChildBBox = (svg, child) => {
+    const geometryPoints = [];
+    const cssRules = parseSvgCssRules(svg);
+    const ignoredTags = new Set(['defs', 'style', 'title', 'desc', 'metadata', 'namedview', 'sodipodi:namedview']);
+
+    const addPoints = (points) => {
+      points
+        .filter(point => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]))
+        .forEach(point => geometryPoints.push(point));
+    };
+
+    const walkGeometry = (node, parentMatrix = [1, 0, 0, 1, 0, 0], parentStyle = getDefaultSvgStyle(), visitedUses = new Set()) => {
+      if (node.nodeType !== 1) return;
+
+      const tag = node.tagName?.toLowerCase();
+      if (!tag || ignoredTags.has(tag)) return;
+
+      const matrix = multiplyMatrix(parentMatrix, parseSvgTransform(node.getAttribute('transform')));
+      const style = resolveSvgNodeStyle(node, parentStyle, cssRules);
+      if (isHiddenSvgStyle(style)) return;
+
+      if (tag === 'use') {
+        const rawHref = node.getAttribute('href') || node.getAttribute('xlink:href') || '';
+        const id = rawHref.startsWith('#') ? rawHref.slice(1) : '';
+        const target = getSvgElementById(svg, id);
+        if (target && !visitedUses.has(id)) {
+          const x = parseFloat(node.getAttribute('x')) || 0;
+          const y = parseFloat(node.getAttribute('y')) || 0;
+          walkGeometry(target, multiplyMatrix(matrix, [1, 0, 0, 1, x, y]), style, new Set([...visitedUses, id]));
+        }
+        return;
+      }
+
+      const fillVisible = hasVisibleFill(style, tag);
+      const strokeVisible = hasBlackStroke(style);
+      const strokeWidth = getStrokeWidth(style, matrix);
+
+      if (tag === 'path' && (fillVisible || strokeVisible)) {
+        const d = node.getAttribute('d');
+        if (d) {
+          try {
+            splitSvgPathSubpaths(d).forEach(subpath => {
+              const points = sampleSvgPathCommands(subpath.commands, matrix, 0.1);
+              if (fillVisible) addPoints(points);
+              if (strokeVisible && strokeWidth > 0) {
+                const outlines = subpath.closed
+                  ? offsetClosedStrokeContours(points, strokeWidth)
+                  : offsetOpenStrokeContours(points, strokeWidth, style['stroke-linecap']);
+                outlines.forEach(addPoints);
+              }
+            });
+          } catch {
+            // Fall back to browser bbox below if this path cannot be sampled.
+          }
+        }
+      } else if (tag === 'rect' && (fillVisible || strokeVisible)) {
+        const x = parseFloat(node.getAttribute('x')) || 0;
+        const y = parseFloat(node.getAttribute('y')) || 0;
+        const w = parseFloat(node.getAttribute('width')) || 0;
+        const h = parseFloat(node.getAttribute('height')) || 0;
+        const rawRx = node.hasAttribute('rx') ? parseFloat(node.getAttribute('rx')) : parseFloat(node.getAttribute('ry')) || 0;
+        const rawRy = node.hasAttribute('ry') ? parseFloat(node.getAttribute('ry')) : rawRx;
+        const points = buildRoundedRectPoints(x, y, w, h, rawRx, rawRy, matrix);
+        addPoints(points);
+        if (strokeVisible && strokeWidth > 0) offsetClosedStrokeContours(points, strokeWidth).forEach(addPoints);
+      } else if ((tag === 'circle' || tag === 'ellipse') && (fillVisible || strokeVisible)) {
+        const cx = parseFloat(node.getAttribute('cx')) || 0;
+        const cy = parseFloat(node.getAttribute('cy')) || 0;
+        const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
+        const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
+        const points = [];
+        for (let i = 0; i < 160; i++) {
+          const angle = i * Math.PI * 2 / 160;
+          points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
+        }
+        addPoints(points);
+        if (strokeVisible && strokeWidth > 0) offsetClosedStrokeContours(points, strokeWidth).forEach(addPoints);
+      } else if ((tag === 'polygon' || tag === 'polyline') && (fillVisible || strokeVisible)) {
+        const points = parseSvgPoints(node.getAttribute('points')).map(point => applyMatrix(matrix, point));
+        addPoints(points);
+        if (strokeVisible && strokeWidth > 0) {
+          const outlines = tag === 'polygon'
+            ? offsetClosedStrokeContours(points, strokeWidth)
+            : offsetOpenStrokeContours(points, strokeWidth, style['stroke-linecap']);
+          outlines.forEach(addPoints);
+        }
+      } else if (tag === 'line' && strokeVisible && strokeWidth > 0) {
+        const p1 = [parseFloat(node.getAttribute('x1')) || 0, parseFloat(node.getAttribute('y1')) || 0];
+        const p2 = [parseFloat(node.getAttribute('x2')) || 0, parseFloat(node.getAttribute('y2')) || 0];
+        offsetOpenStrokeContours([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], strokeWidth, style['stroke-linecap']).forEach(addPoints);
+      }
+
+      Array.from(node.children || []).forEach(childNode => walkGeometry(childNode, matrix, style, visitedUses));
+    };
+
+    walkGeometry(child);
+
+    if (geometryPoints.length) {
+      const xs = geometryPoints.map(point => point[0]);
+      const ys = geometryPoints.map(point => point[1]);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+      const maxX = Math.max(...xs);
+      const maxY = Math.max(...ys);
+      if (maxX - minX > 0.0001 && maxY - minY > 0.0001) {
+        const pad = 0.001;
+        return {
+          x: minX - pad,
+          y: minY - pad,
+          width: maxX - minX + pad * 2,
+          height: maxY - minY + pad * 2
+        };
+      }
+    }
+
     const serializer = new XMLSerializer();
     const testSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     Array.from(svg.attributes).forEach(attr => testSvg.setAttribute(attr.name, attr.value));
@@ -3672,6 +3795,52 @@ export default function App() {
     return null;
   };
 
+  const getSvgArtworkBBox = (svg) => {
+    const testSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const ignoredTags = new Set(['defs', 'style', 'title', 'desc', 'metadata', 'namedview', 'sodipodi:namedview']);
+    Array.from(svg.attributes).forEach(attr => testSvg.setAttribute(attr.name, attr.value));
+    testSvg.style.position = 'fixed';
+    testSvg.style.left = '-10000px';
+    testSvg.style.top = '-10000px';
+    testSvg.style.width = '1px';
+    testSvg.style.height = '1px';
+    testSvg.style.opacity = '0';
+    testSvg.style.pointerEvents = 'none';
+    testSvg.setAttribute('aria-hidden', 'true');
+
+    Array.from(svg.children)
+      .filter(node => ['defs', 'style'].includes(node.tagName?.toLowerCase()))
+      .forEach(node => testSvg.appendChild(node.cloneNode(true)));
+
+    Array.from(svg.children)
+      .filter(node => {
+        const tag = node.tagName?.toLowerCase();
+        return tag && !ignoredTags.has(tag);
+      })
+      .forEach(node => testSvg.appendChild(node.cloneNode(true)));
+
+    document.body.appendChild(testSvg);
+
+    try {
+      const box = testSvg.getBBox();
+      if (box.width > 0.0001 && box.height > 0.0001) {
+        const pad = 0.001;
+        return {
+          x: box.x - pad,
+          y: box.y - pad,
+          width: box.width + pad * 2,
+          height: box.height + pad * 2
+        };
+      }
+    } catch {
+      // If browser measurement fails, keep using the original SVG document box.
+    } finally {
+      document.body.removeChild(testSvg);
+    }
+
+    return null;
+  };
+
   const createSvgChildObject = (design, child, childIndex, svg) => {
     const serializer = new XMLSerializer();
     const defs = Array.from(svg.children)
@@ -3680,30 +3849,34 @@ export default function App() {
       .join('');
     const rootBox = getSvgRootBox(svg);
     const childBox = getSvgChildBBox(svg, child) || rootBox;
+    const sourceBox = design.sourceBox || rootBox;
     const designWidth = Math.max(10, n(design.width, 10));
     const designHeight = Math.max(10, n(design.height, 10));
-    const scaleX = designWidth / (rootBox.width || 1);
-    const scaleY = designHeight / (rootBox.height || 1);
+    const scaleX = designWidth / (sourceBox.width || 1);
+    const scaleY = designHeight / (sourceBox.height || 1);
     const attrs = Array.from(svg.attributes)
       .filter(attr => !['viewBox', 'width', 'height'].includes(attr.name))
       .map(attr => `${attr.name}="${attr.value.replace(/"/g, '&quot;')}"`)
       .join(' ');
     const fittedAttrs = [
       attrs,
-      `viewBox="${childBox.x} ${childBox.y} ${childBox.width} ${childBox.height}"`,
+      `viewBox="0 0 ${childBox.width} ${childBox.height}"`,
       `width="${childBox.width}"`,
       `height="${childBox.height}"`
     ].filter(Boolean).join(' ');
-    const svgText = `<svg ${fittedAttrs}>${defs}${serializer.serializeToString(child)}</svg>`;
+    const normalizedChild = `<g transform="translate(${-childBox.x} ${-childBox.y})">${serializer.serializeToString(child)}</g>`;
+    const svgText = `<svg ${fittedAttrs}>${defs}${normalizedChild}</svg>`;
+    const localSourceBox = { x: 0, y: 0, width: childBox.width, height: childBox.height };
     const validation = validateInteriorSvg(svgText);
     return {
       ...design,
       id: crypto.randomUUID(),
       name: `${design.name || 'SVG'} part ${childIndex + 1}`,
-      x: n(design.x, 0) + (childBox.x - rootBox.x) * scaleX,
-      y: n(design.y, 0) + (childBox.y - rootBox.y) * scaleY,
+      x: n(design.x, 0) + (childBox.x - sourceBox.x) * scaleX,
+      y: n(design.y, 0) + (childBox.y - sourceBox.y) * scaleY,
       width: Math.max(1, childBox.width * scaleX),
       height: Math.max(1, childBox.height * scaleY),
+      sourceBox: localSourceBox,
       svgText,
       href: svgTextToDataUrl(svgText),
       exportable: validation.exportable,
@@ -3725,7 +3898,7 @@ export default function App() {
 
       return subpaths
         .map(subpath => {
-          const clone = pathElement.cloneNode(false);
+          const clone = pathElement.cloneNode(true);
           clone.setAttribute('d', encodeSVGPath(subpath.commands));
           return clone;
         })
@@ -3758,6 +3931,24 @@ export default function App() {
   };
 
   const getUngroupedSvgParts = (svg) => {
+    const dedupeParts = (parts) => {
+      const seen = new Set();
+      return parts.filter(part => {
+        const box = getSvgChildBBox(svg, part);
+        const boxKey = box
+          ? [box.x, box.y, box.width, box.height].map(value => Math.round(value * 1000) / 1000).join(',')
+          : 'no-box';
+        const tag = part.tagName?.toLowerCase() || 'node';
+        const dataKey = tag === 'path'
+          ? (part.getAttribute('d') || '').replace(/\s+/g, ' ').trim()
+          : `${part.getAttribute('points') || ''}|${part.getAttribute('x') || ''}|${part.getAttribute('y') || ''}|${part.getAttribute('width') || ''}|${part.getAttribute('height') || ''}|${part.getAttribute('cx') || ''}|${part.getAttribute('cy') || ''}|${part.getAttribute('r') || ''}|${part.getAttribute('rx') || ''}|${part.getAttribute('ry') || ''}`;
+        const key = `${tag}|${boxKey}|${dataKey}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+
     const topLevelChildren = Array.from(svg.children)
       .filter(child => !ignoredSvgUngroupTags.has(child.tagName.toLowerCase()));
     const onlyChild = topLevelChildren.length === 1 ? topLevelChildren[0] : null;
@@ -3765,21 +3956,21 @@ export default function App() {
 
     if (onlyChild && ['g', 'svg', 'symbol'].includes(onlyChildTag)) {
       const wrappedDrawableParts = collectDrawableSvgUngroupParts(onlyChild);
-      if (wrappedDrawableParts.length > 1) return wrappedDrawableParts;
+      if (wrappedDrawableParts.length > 1) return dedupeParts(wrappedDrawableParts);
     }
 
     const hasTopLevelGroup = topLevelChildren.some(child => child.tagName.toLowerCase() === 'g');
 
-    if (hasTopLevelGroup) return topLevelChildren;
+    if (hasTopLevelGroup) return dedupeParts(topLevelChildren);
 
     const topLevelParts = topLevelChildren.flatMap(child => (
       child.tagName.toLowerCase() === 'path' ? splitUngroupPathElement(child) : [child]
     ));
 
-    if (topLevelParts.length > 1) return topLevelParts;
+    if (topLevelParts.length > 1) return dedupeParts(topLevelParts);
 
     const leafParts = topLevelChildren.flatMap(collectDrawableSvgUngroupParts);
-    return leafParts.length > 1 ? leafParts : topLevelParts;
+    return leafParts.length > 1 ? dedupeParts(leafParts) : dedupeParts(topLevelParts);
   };
 
   const ungroupSelectedInteriorDesign = () => {
@@ -4016,21 +4207,27 @@ export default function App() {
       .some(panel => pointInPolygon([point.x, point.y], panel))
   );
 
-  const isInteriorPointOnWhiteDesignSurface = (point) => {
+  const isInteriorPointOnWhiteDesignSurface = (point, includeImportedSvgTolerance = false) => {
     const px = point.x;
     const py = point.y;
+    const importedSvgToleranceMm = includeImportedSvgTolerance
+      ? IMPORTED_SVG_HIT_TOLERANCE_PX / Math.max(0.0001, scale * viewZoom)
+      : 0;
 
     return flattenInteriorDesigns(interiorDesignsRef.current).some(design => {
       if ((design.color || 'white') !== 'white') return false;
 
       const bounds = getInteriorObjectBounds(design);
-      const inBounds = px >= bounds.x
-        && px <= bounds.x + bounds.width
-        && py >= bounds.y
-        && py <= bounds.y + bounds.height;
+      const tolerance = isImportedInteriorSvg(design) ? importedSvgToleranceMm : 0;
+      const inBounds = px >= bounds.x - tolerance
+        && px <= bounds.x + bounds.width + tolerance
+        && py >= bounds.y - tolerance
+        && py <= bounds.y + bounds.height + tolerance;
       if (!inBounds) return false;
 
-      if (design.kind === 'rect' || design.kind === 'text' || isImportedInteriorSvg(design)) return true;
+      if (isImportedInteriorSvg(design)) return isPointNearImportedSvgVisibleSurface(design, point, tolerance);
+
+      if (design.kind === 'rect' || design.kind === 'text') return true;
 
       if (design.kind === 'ellipse') {
         const rx = bounds.width / 2;
@@ -4530,6 +4727,14 @@ export default function App() {
       const svgText = String(reader.result || '');
       const validation = validateInteriorSvg(svgText);
       const defaultSize = Math.max(80, Math.min(safeWidth, safeHeight) * 0.25);
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+      const rootBox = svg && !doc.querySelector('parsererror') ? getSvgRootBox(svg) : { x: 0, y: 0, width: 100, height: 100 };
+      const sourceBox = svg && !doc.querySelector('parsererror') ? (getSvgArtworkBBox(svg) || rootBox) : rootBox;
+      const aspectRatio = sourceBox.width / Math.max(0.0001, sourceBox.height);
+      const fittedWidth = aspectRatio >= 1 ? defaultSize : defaultSize * aspectRatio;
+      const fittedHeight = aspectRatio >= 1 ? defaultSize / aspectRatio : defaultSize;
       const nextDesign = {
         id: crypto.randomUUID(),
         name: file.name.replace(/\.svg$/i, '') || 'SVG design',
@@ -4538,12 +4743,13 @@ export default function App() {
         exportable: validation.exportable,
         warnings: validation.warnings,
         color: 'white',
-        x: safeWidth / 2 - defaultSize / 2,
-        y: safeHeight / 2 - defaultSize / 2,
-        width: defaultSize,
-        height: defaultSize,
+        x: safeWidth / 2 - fittedWidth / 2,
+        y: safeHeight / 2 - fittedHeight / 2,
+        width: fittedWidth,
+        height: fittedHeight,
+        sourceBox,
         aspectLocked: false,
-        aspectRatio: 1
+        aspectRatio
       };
 
       applyInteriorDesigns(prev => [...prev, nextDesign], { selectedId: nextDesign.id });
@@ -4560,13 +4766,13 @@ export default function App() {
       e.stopPropagation();
       return;
     }
-    e.preventDefault();
-    e.stopPropagation();
-
     const point = getSvgPoint(e);
-    if (mode === 'move' && (design.color || 'white') === 'white' && !isInteriorPointOnWhiteDesignSurface(point)) {
+    if (mode === 'move' && (design.color || 'white') === 'white' && !isInteriorPointOnWhiteDesignSurface(point, true)) {
       return;
     }
+
+    e.preventDefault();
+    e.stopPropagation();
 
     const bounds = getInteriorObjectBounds(design);
     const selectedIds = selectedInteriorDesignIdsRef.current;
@@ -4958,12 +5164,20 @@ export default function App() {
   };
 
   const selectInteriorDesignFromCanvas = (e, designId) => {
-    e.stopPropagation();
     if (interiorSuppressNextObjectClickRef.current) {
       interiorSuppressNextObjectClickRef.current = false;
       return;
     }
     if (activeInteriorShapeTool) return;
+
+    const design = interiorDesignsRef.current.find(item => item.id === designId)
+      || flattenInteriorDesigns(interiorDesignsRef.current).find(item => item.id === designId);
+    if (design && (design.color || 'white') === 'white') {
+      const point = getSvgPoint(e);
+      if (!isInteriorPointOnWhiteDesignSurface(point, true)) return;
+    }
+
+    e.stopPropagation();
     if (e.shiftKey) {
       toggleInteriorSelection(designId);
     } else {
@@ -5107,6 +5321,10 @@ export default function App() {
   };
 
   const roundDXF = (value) => Math.round(value * 1000000) / 1000000;
+  const DXF_OPTIMIZE_POINT_TOLERANCE = 0.02;
+  const DXF_OPTIMIZE_COLINEAR_TOLERANCE = 0.015;
+  const DXF_OPTIMIZE_SIMPLIFY_TOLERANCE = 0.08;
+  const DXF_OPTIMIZE_DEDUPE_PRECISION = 0.02;
   let dxfHandleCounter = 0x100;
   const nextDxfHandle = () => (dxfHandleCounter++).toString(16).toUpperCase();
   const resetDxfHandles = () => {
@@ -5240,12 +5458,14 @@ export default function App() {
 
   const toRawDXFPoint = ([x, y]) => [roundDXF(x), roundDXF(drawingMaxY - y)];
 
-  const cleanDxfPoints = (points, closed) => {
+  const cleanDxfPoints = (points, closed, options = {}) => {
+    const pointTolerance = options.pointTolerance ?? 0.01;
+    const colinearTolerance = options.colinearTolerance ?? 0.005;
     const cleaned = [];
 
     points.forEach(point => {
       const last = cleaned[cleaned.length - 1];
-      if (!last || Math.hypot(point[0] - last[0], point[1] - last[1]) > 0.01) {
+      if (!last || Math.hypot(point[0] - last[0], point[1] - last[1]) > pointTolerance) {
         cleaned.push(point);
       }
     });
@@ -5253,7 +5473,7 @@ export default function App() {
     if (closed && cleaned.length > 2) {
       const first = cleaned[0];
       const last = cleaned[cleaned.length - 1];
-      if (Math.hypot(first[0] - last[0], first[1] - last[1]) <= 0.01) {
+      if (Math.hypot(first[0] - last[0], first[1] - last[1]) <= pointTolerance) {
         cleaned.pop();
       }
     }
@@ -5274,7 +5494,7 @@ export default function App() {
         const cross = Math.abs(ax * by - ay * bx);
         const base = Math.hypot(next[0] - prev[0], next[1] - prev[1]) || 1;
 
-        if (cross / base < 0.005) {
+        if (cross / base < colinearTolerance) {
           cleaned.splice(i, 1);
           changed = true;
           break;
@@ -5283,6 +5503,307 @@ export default function App() {
     }
 
     return cleaned;
+  };
+
+  const perpendicularDistanceToLine = (point, start, end) => {
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const length = Math.hypot(dx, dy);
+    if (length <= 0.000001) return Math.hypot(point[0] - start[0], point[1] - start[1]);
+    return Math.abs(dy * point[0] - dx * point[1] + end[0] * start[1] - end[1] * start[0]) / length;
+  };
+
+  const simplifyOpenPolyline = (points, tolerance) => {
+    if (points.length <= 2) return points;
+
+    let maxDistance = 0;
+    let splitIndex = 0;
+    const start = points[0];
+    const end = points[points.length - 1];
+
+    for (let i = 1; i < points.length - 1; i++) {
+      const distance = perpendicularDistanceToLine(points[i], start, end);
+      if (distance > maxDistance) {
+        maxDistance = distance;
+        splitIndex = i;
+      }
+    }
+
+    if (maxDistance <= tolerance) return [start, end];
+
+    const left = simplifyOpenPolyline(points.slice(0, splitIndex + 1), tolerance);
+    const right = simplifyOpenPolyline(points.slice(splitIndex), tolerance);
+    return [...left.slice(0, -1), ...right];
+  };
+
+  const simplifyClosedPolyline = (points, tolerance) => {
+    if (points.length <= 3) return points;
+
+    let splitIndex = 1;
+    let maxDistance = 0;
+    for (let i = 1; i < points.length; i++) {
+      const distance = Math.hypot(points[i][0] - points[0][0], points[i][1] - points[0][1]);
+      if (distance > maxDistance) {
+        maxDistance = distance;
+        splitIndex = i;
+      }
+    }
+
+    if (maxDistance <= tolerance) return points;
+
+    const firstHalf = simplifyOpenPolyline(points.slice(0, splitIndex + 1), tolerance);
+    const secondHalf = simplifyOpenPolyline([...points.slice(splitIndex), points[0]], tolerance);
+    const simplified = [...firstHalf, ...secondHalf.slice(1, -1)];
+    return simplified.length >= 3 ? simplified : points;
+  };
+
+  const optimizeDxfContourPoints = (points, closed) => {
+    const cleaned = cleanDxfPoints(points, closed, {
+      pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
+      colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
+    });
+
+    const simplified = closed
+      ? simplifyClosedPolyline(cleaned, DXF_OPTIMIZE_SIMPLIFY_TOLERANCE)
+      : simplifyOpenPolyline(cleaned, DXF_OPTIMIZE_SIMPLIFY_TOLERANCE);
+
+    return cleanDxfPoints(simplified, closed, {
+      pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
+      colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
+    });
+  };
+
+  const getCanonicalContourKey = (contour) => {
+    const points = contour.points || [];
+    const tokens = points.map(([x, y]) => (
+      `${Math.round(x / DXF_OPTIMIZE_DEDUPE_PRECISION)},${Math.round(y / DXF_OPTIMIZE_DEDUPE_PRECISION)}`
+    ));
+    if (!tokens.length) return `${contour.closed ? 'C' : 'O'}|empty`;
+
+    const rotateFromSmallest = (items) => {
+      let startIndex = 0;
+      for (let i = 1; i < items.length; i++) {
+        if (items[i] < items[startIndex]) startIndex = i;
+      }
+      return [...items.slice(startIndex), ...items.slice(0, startIndex)].join('|');
+    };
+
+    if (!contour.closed) {
+      const forward = tokens.join('|');
+      const reverse = [...tokens].reverse().join('|');
+      return `O|${forward < reverse ? forward : reverse}`;
+    }
+
+    const forward = rotateFromSmallest(tokens);
+    const reverse = rotateFromSmallest([...tokens].reverse());
+    return `C|${forward < reverse ? forward : reverse}`;
+  };
+
+  const getContourCircleFit = (points, closed = true) => {
+    if (!closed || points.length < 12) return null;
+
+    const xs = points.map(point => point[0]);
+    const ys = points.map(point => point[1]);
+    const bounds = {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys)
+    };
+    const diameter = Math.max(bounds.width, bounds.height);
+    if (diameter <= 0.5) return null;
+
+    const center = [
+      points.reduce((sum, point) => sum + point[0], 0) / points.length,
+      points.reduce((sum, point) => sum + point[1], 0) / points.length
+    ];
+    const radii = points.map(point => Math.hypot(point[0] - center[0], point[1] - center[1]));
+    const radius = radii.reduce((sum, value) => sum + value, 0) / radii.length;
+    if (radius <= 0.25) return null;
+
+    const maxDeviation = Math.max(...radii.map(value => Math.abs(value - radius)));
+    const radialTolerance = Math.max(0.12, radius * 0.006);
+    if (maxDeviation > radialTolerance) return null;
+
+    const aspect = Math.abs(bounds.width - bounds.height) / Math.max(bounds.width, bounds.height);
+    if (aspect > 0.02) return null;
+
+    const area = Math.abs(signedPolygonArea(points));
+    const expectedArea = Math.PI * radius * radius;
+    if (Math.abs(area - expectedArea) / expectedArea > 0.04) return null;
+
+    return { center, radius, clockwise: signedPolygonArea(points) < 0 };
+  };
+
+  const getContourEllipseFit = (points, closed = true) => {
+    if (!closed || points.length < 18) return null;
+
+    const center = [
+      points.reduce((sum, point) => sum + point[0], 0) / points.length,
+      points.reduce((sum, point) => sum + point[1], 0) / points.length
+    ];
+
+    let xx = 0;
+    let xy = 0;
+    let yy = 0;
+    points.forEach(point => {
+      const dx = point[0] - center[0];
+      const dy = point[1] - center[1];
+      xx += dx * dx;
+      xy += dx * dy;
+      yy += dy * dy;
+    });
+
+    const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const vx = -uy;
+    const vy = ux;
+    const projectionsU = points.map(point => (point[0] - center[0]) * ux + (point[1] - center[1]) * uy);
+    const projectionsV = points.map(point => (point[0] - center[0]) * vx + (point[1] - center[1]) * vy);
+    const ru = (Math.max(...projectionsU) - Math.min(...projectionsU)) / 2;
+    const rv = (Math.max(...projectionsV) - Math.min(...projectionsV)) / 2;
+    const rx = Math.max(ru, rv);
+    const ry = Math.min(ru, rv);
+
+    if (ry <= 0.5 || rx / ry < 1.08) return null;
+
+    const axisUIsMajor = ru >= rv;
+    const majorUx = axisUIsMajor ? ux : vx;
+    const majorUy = axisUIsMajor ? uy : vy;
+    const minorUx = axisUIsMajor ? vx : ux;
+    const minorUy = axisUIsMajor ? vy : uy;
+
+    let maxEquationError = 0;
+    points.forEach(point => {
+      const dx = point[0] - center[0];
+      const dy = point[1] - center[1];
+      const px = dx * majorUx + dy * majorUy;
+      const py = dx * minorUx + dy * minorUy;
+      const equation = (px * px) / (rx * rx) + (py * py) / (ry * ry);
+      maxEquationError = Math.max(maxEquationError, Math.abs(equation - 1));
+    });
+
+    if (maxEquationError > 0.08) return null;
+
+    const area = Math.abs(signedPolygonArea(points));
+    const expectedArea = Math.PI * rx * ry;
+    if (Math.abs(area - expectedArea) / expectedArea > 0.08) return null;
+
+    return {
+      center,
+      rx,
+      ry,
+      majorAxis: [majorUx, majorUy],
+      minorAxis: [minorUx, minorUy],
+      clockwise: signedPolygonArea(points) < 0
+    };
+  };
+
+  const getContourCapsuleFit = (points, closed = true) => {
+    if (!closed || points.length < 12) return null;
+
+    let farthest = { distance: 0, a: points[0], b: points[1] };
+    for (let i = 0; i < points.length; i++) {
+      for (let j = i + 1; j < points.length; j++) {
+        const distance = Math.hypot(points[j][0] - points[i][0], points[j][1] - points[i][1]);
+        if (distance > farthest.distance) farthest = { distance, a: points[i], b: points[j] };
+      }
+    }
+
+    if (farthest.distance <= 1) return null;
+
+    const ux = (farthest.b[0] - farthest.a[0]) / farthest.distance;
+    const uy = (farthest.b[1] - farthest.a[1]) / farthest.distance;
+    const nx = -uy;
+    const ny = ux;
+    const projections = points.map(point => point[0] * ux + point[1] * uy);
+    const normals = points.map(point => point[0] * nx + point[1] * ny);
+    const minProjection = Math.min(...projections);
+    const maxProjection = Math.max(...projections);
+    const minNormal = Math.min(...normals);
+    const maxNormal = Math.max(...normals);
+    const length = maxProjection - minProjection;
+    const thickness = maxNormal - minNormal;
+
+    if (thickness <= 0.5 || length <= thickness * 1.35) return null;
+
+    const radius = thickness / 2;
+    const centerNormal = (minNormal + maxNormal) / 2;
+    const leftCenterProjection = minProjection + radius;
+    const rightCenterProjection = maxProjection - radius;
+    const straightLength = rightCenterProjection - leftCenterProjection;
+    if (straightLength <= radius * 0.5) return null;
+
+    const expectedArea = straightLength * thickness + Math.PI * radius * radius;
+    const area = Math.abs(signedPolygonArea(points));
+    if (Math.abs(area - expectedArea) / expectedArea > 0.08) return null;
+
+    const tolerance = Math.max(0.18, radius * 0.06);
+    let maxError = 0;
+    points.forEach(point => {
+      const projection = point[0] * ux + point[1] * uy;
+      const normal = point[0] * nx + point[1] * ny;
+      let error;
+
+      if (projection < leftCenterProjection) {
+        error = Math.abs(Math.hypot(projection - leftCenterProjection, normal - centerNormal) - radius);
+      } else if (projection > rightCenterProjection) {
+        error = Math.abs(Math.hypot(projection - rightCenterProjection, normal - centerNormal) - radius);
+      } else {
+        error = Math.abs(Math.abs(normal - centerNormal) - radius);
+      }
+
+      maxError = Math.max(maxError, error);
+    });
+
+    if (maxError > tolerance) return null;
+
+    const pointFromProjectionNormalLocal = (projection, normal) => [
+      ux * projection + nx * normal,
+      uy * projection + ny * normal
+    ];
+
+    return {
+      leftTop: pointFromProjectionNormalLocal(leftCenterProjection, centerNormal - radius),
+      rightTop: pointFromProjectionNormalLocal(rightCenterProjection, centerNormal - radius),
+      rightBottom: pointFromProjectionNormalLocal(rightCenterProjection, centerNormal + radius),
+      leftBottom: pointFromProjectionNormalLocal(leftCenterProjection, centerNormal + radius),
+      clockwise: signedPolygonArea(points) < 0
+    };
+  };
+
+  const optimizeDxfContours = (contours) => {
+    const seen = new Set();
+    const optimized = [];
+
+    contours.forEach(contour => {
+      const preCleaned = cleanDxfPoints(contour.points || [], contour.closed, {
+        pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
+        colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
+      });
+      const arcFit = contour.arcFit || getContourCircleFit(preCleaned, contour.closed);
+      const ellipseFit = arcFit ? null : (contour.ellipseFit || getContourEllipseFit(preCleaned, contour.closed));
+      const capsuleFit = (arcFit || ellipseFit) ? null : (contour.capsuleFit || getContourCapsuleFit(preCleaned, contour.closed));
+      const points = optimizeDxfContourPoints(contour.points || [], contour.closed);
+      if (points.length < (contour.closed ? 3 : 2)) return;
+
+      const nextContour = {
+        ...contour,
+        points,
+        arcFit,
+        ellipseFit,
+        capsuleFit,
+        area: contour.closed ? Math.abs(signedPolygonArea(points)) : contour.area
+      };
+      const key = getCanonicalContourKey(nextContour);
+      if (seen.has(key)) return;
+
+      seen.add(key);
+      optimized.push(nextContour);
+    });
+
+    return optimized;
   };
 
   const dxfPolylineEntity = (points, closed = true, layer = '0') => {
@@ -5295,6 +5816,192 @@ export default function App() {
       entity += dxfLine('10', x, '20', y, '30', '0.0');
     });
     return entity;
+  };
+
+  const getArcFitThroughRun = (points) => {
+    if (points.length < 5) return null;
+
+    const p0 = points[0];
+    const pm = points[Math.floor(points.length / 2)];
+    const p1 = points[points.length - 1];
+    const d = 2 * (
+      p0[0] * (pm[1] - p1[1])
+      + pm[0] * (p1[1] - p0[1])
+      + p1[0] * (p0[1] - pm[1])
+    );
+
+    if (Math.abs(d) < 0.000001) return null;
+
+    const p0Sq = p0[0] * p0[0] + p0[1] * p0[1];
+    const pmSq = pm[0] * pm[0] + pm[1] * pm[1];
+    const p1Sq = p1[0] * p1[0] + p1[1] * p1[1];
+    const cx = (
+      p0Sq * (pm[1] - p1[1])
+      + pmSq * (p1[1] - p0[1])
+      + p1Sq * (p0[1] - pm[1])
+    ) / d;
+    const cy = (
+      p0Sq * (p1[0] - pm[0])
+      + pmSq * (p0[0] - p1[0])
+      + p1Sq * (pm[0] - p0[0])
+    ) / d;
+    const radius = Math.hypot(p0[0] - cx, p0[1] - cy);
+    if (!Number.isFinite(radius) || radius <= 0.5) return null;
+
+    const angles = points.map(point => Math.atan2(point[1] - cy, point[0] - cx));
+    const ccwSpanRaw = (angles[angles.length - 1] - angles[0] + Math.PI * 2) % (Math.PI * 2);
+    const ccwMid = (angles[Math.floor(angles.length / 2)] - angles[0] + Math.PI * 2) % (Math.PI * 2);
+    const useCcw = ccwMid <= ccwSpanRaw;
+    const span = useCcw ? ccwSpanRaw : -((angles[0] - angles[angles.length - 1] + Math.PI * 2) % (Math.PI * 2));
+    const absSpan = Math.abs(span);
+    if (absSpan < 0.18 || absSpan > Math.PI * 1.35) return null;
+
+    const radialTolerance = Math.max(0.08, radius * 0.006);
+    const maxRadialError = Math.max(...points.map(point => Math.abs(Math.hypot(point[0] - cx, point[1] - cy) - radius)));
+    if (maxRadialError > radialTolerance) return null;
+
+    const chord = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+    if (chord <= 0.5 || radius / chord > 35) return null;
+
+    return {
+      start: p0,
+      end: p1,
+      bulge: roundDXF(-Math.tan(span / 4))
+    };
+  };
+
+  const buildBulgedPolylineVertices = (points, closed = true) => {
+    const cleaned = cleanDxfPoints(points, closed, {
+      pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
+      colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
+    });
+    const minLength = closed ? 3 : 2;
+    if (cleaned.length < minLength) return [];
+
+    const source = closed ? [...cleaned, cleaned[0]] : cleaned;
+    const vertices = [];
+    let i = 0;
+
+    while (i < source.length - 1) {
+      let best = null;
+      const maxEnd = Math.min(source.length - 1, i + 18);
+      for (let end = maxEnd; end >= i + 4; end--) {
+        const fit = getArcFitThroughRun(source.slice(i, end + 1));
+        if (fit && Math.abs(fit.bulge) > 0.0001) {
+          best = { end, fit };
+          break;
+        }
+      }
+
+      if (best) {
+        vertices.push({ point: source[i], bulge: best.fit.bulge });
+        i = best.end;
+      } else {
+        vertices.push({ point: source[i], bulge: 0 });
+        i++;
+      }
+    }
+
+    if (!closed) vertices.push({ point: source[source.length - 1], bulge: 0 });
+
+    const finalVertices = closed ? vertices.slice(0, cleaned.length) : vertices;
+    return finalVertices.length >= minLength ? finalVertices : [];
+  };
+
+  const dxfBulgedPolylineEntity = (points, closed = true, layer = '0') => {
+    const vertices = buildBulgedPolylineVertices(points, closed);
+    if (vertices.length < (closed ? 3 : 2)) return '';
+
+    let entity = dxfLwPolylineHeader(layer, vertices.length, closed);
+    vertices.forEach(({ point, bulge }) => {
+      const [x, y] = toRawDXFPoint(point);
+      entity += dxfLine('10', x, '20', y, '30', '0.0');
+      if (Math.abs(bulge) > 0.0000001) entity += dxfLine('42', bulge);
+    });
+    return entity;
+  };
+
+  const dxfBulgedCircleEntity = (arcFit, layer = '0') => {
+    if (!arcFit?.center || !Number.isFinite(arcFit.radius) || arcFit.radius <= 0) return '';
+
+    const [cx, cy] = arcFit.center;
+    const r = arcFit.radius;
+    const sourceVertices = arcFit.clockwise
+      ? [[cx + r, cy], [cx, cy - r], [cx - r, cy], [cx, cy + r]]
+      : [[cx + r, cy], [cx, cy + r], [cx - r, cy], [cx, cy - r]];
+    const vertices = sourceVertices.map(point => toRawDXFPoint(point));
+    const bulge = arcFit.clockwise ? 1 : -1;
+
+    let entity = dxfLwPolylineHeader(layer, vertices.length, true);
+    vertices.forEach(([x, y]) => {
+      entity += dxfLine('10', x, '20', y, '30', '0.0', '42', bulge);
+    });
+    return entity;
+  };
+
+  const dxfOptimizedEllipseEntity = (ellipseFit, layer = '0') => {
+    if (!ellipseFit?.center || !ellipseFit?.majorAxis || !ellipseFit?.minorAxis) return '';
+    if (!Number.isFinite(ellipseFit.rx) || !Number.isFinite(ellipseFit.ry) || ellipseFit.rx <= 0 || ellipseFit.ry <= 0) return '';
+
+    const segmentCount = clamp(Math.ceil(Math.max(24, Math.min(64, ellipseFit.rx / 3))), 24, 64);
+    const direction = ellipseFit.clockwise ? -1 : 1;
+    const points = Array.from({ length: segmentCount }, (_, index) => {
+      const theta = direction * (index / segmentCount) * Math.PI * 2;
+      const cos = Math.cos(theta);
+      const sin = Math.sin(theta);
+      return [
+        ellipseFit.center[0] + ellipseFit.majorAxis[0] * cos * ellipseFit.rx + ellipseFit.minorAxis[0] * sin * ellipseFit.ry,
+        ellipseFit.center[1] + ellipseFit.majorAxis[1] * cos * ellipseFit.rx + ellipseFit.minorAxis[1] * sin * ellipseFit.ry
+      ];
+    });
+
+    return dxfPolylineEntity(points, true, layer);
+  };
+
+  const dxfBulgedCapsuleEntity = (capsuleFit, layer = '0') => {
+    if (!capsuleFit?.leftTop || !capsuleFit?.rightTop || !capsuleFit?.rightBottom || !capsuleFit?.leftBottom) return '';
+
+    const sourceVertices = capsuleFit.clockwise
+      ? [
+          { point: capsuleFit.leftTop, bulge: 0 },
+          { point: capsuleFit.leftBottom, bulge: -1 },
+          { point: capsuleFit.rightBottom, bulge: 0 },
+          { point: capsuleFit.rightTop, bulge: -1 }
+        ]
+      : [
+          { point: capsuleFit.leftTop, bulge: 0 },
+          { point: capsuleFit.rightTop, bulge: 1 },
+          { point: capsuleFit.rightBottom, bulge: 0 },
+          { point: capsuleFit.leftBottom, bulge: 1 }
+        ];
+
+    let entity = dxfLwPolylineHeader(layer, sourceVertices.length, true);
+    sourceVertices.forEach(({ point, bulge }) => {
+      const [x, y] = toRawDXFPoint(point);
+      entity += dxfLine('10', x, '20', y, '30', '0.0');
+      if (Math.abs(bulge) > 0.0000001) entity += dxfLine('42', bulge);
+    });
+    return entity;
+  };
+
+  const dxfContourEntity = (contour) => {
+    if (contour.arcFit) {
+      const arcEntity = dxfBulgedCircleEntity(contour.arcFit, contour.layer);
+      if (arcEntity) return arcEntity;
+    }
+
+    if (contour.ellipseFit) {
+      const ellipseEntity = dxfOptimizedEllipseEntity(contour.ellipseFit, contour.layer);
+      if (ellipseEntity) return ellipseEntity;
+    }
+
+    if (contour.capsuleFit) {
+      const capsuleEntity = dxfBulgedCapsuleEntity(contour.capsuleFit, contour.layer);
+      if (capsuleEntity) return capsuleEntity;
+    }
+
+    const bulgedEntity = dxfBulgedPolylineEntity(contour.points, contour.closed, contour.layer);
+    return bulgedEntity || dxfPolylineEntity(contour.points, contour.closed, contour.layer);
   };
 
   const parseSvgNumberList = (value) => (value || '')
@@ -6106,6 +6813,150 @@ export default function App() {
     return cleanClipperPaths(solution).map(fromClipperPath);
   };
 
+  const getImportedSvgHitContours = (design) => {
+    if (!isImportedInteriorSvg(design) || !design.svgText) return [];
+
+    const cacheKey = JSON.stringify({
+      svgText: design.svgText,
+      sourceBox: design.sourceBox
+    });
+    let localContours = importedSvgHitCacheRef.current.get(cacheKey);
+    let sourceBox = design.sourceBox;
+
+    if (!localContours) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(design.svgText, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+      if (!svg || doc.querySelector('parsererror')) return [];
+
+      const rootBox = getSvgRootBox(svg);
+      sourceBox = sourceBox || rootBox;
+      const pathTolerance = 0.12;
+      const cssRules = parseSvgCssRules(svg);
+      const contours = [];
+
+      const addContour = (points, closed = true) => {
+        const cleaned = cleanDxfPoints(points, closed);
+        if (cleaned.length >= (closed ? 3 : 2)) contours.push({ points: cleaned, closed });
+      };
+
+      const walk = (node, parentMatrix = [1, 0, 0, 1, 0, 0], parentStyle = getDefaultSvgStyle(), visitedUses = new Set()) => {
+        if (node.nodeType !== 1) return;
+
+        const matrix = multiplyMatrix(parentMatrix, parseSvgTransform(node.getAttribute('transform')));
+        const tag = node.tagName.toLowerCase();
+        const style = resolveSvgNodeStyle(node, parentStyle, cssRules);
+
+        if (isHiddenSvgStyle(style) || tag === 'defs' || tag === 'style' || tag === 'title' || tag === 'desc') return;
+
+        if (tag === 'use') {
+          const rawHref = node.getAttribute('href') || node.getAttribute('xlink:href') || '';
+          const id = rawHref.startsWith('#') ? rawHref.slice(1) : '';
+          const target = getSvgElementById(svg, id);
+          if (target && !visitedUses.has(id)) {
+            const x = parseFloat(node.getAttribute('x')) || 0;
+            const y = parseFloat(node.getAttribute('y')) || 0;
+            walk(target, multiplyMatrix(matrix, [1, 0, 0, 1, x, y]), style, new Set([...visitedUses, id]));
+          }
+          return;
+        }
+
+        const fillVisible = hasVisibleFill(style, tag);
+        const strokeVisible = hasBlackStroke(style);
+        const strokeWidth = getStrokeWidth(style, matrix);
+
+        if (tag === 'path' && (fillVisible || strokeVisible)) {
+          const d = node.getAttribute('d');
+          if (d) {
+            try {
+              splitSvgPathSubpaths(d).forEach(subpath => {
+                const points = sampleSvgPathCommands(subpath.commands, matrix, pathTolerance);
+                if (fillVisible) addContour(points, shouldClosePathSubpath(style, subpath.closed));
+                if (strokeVisible && strokeWidth > 0) {
+                  const strokeContours = subpath.closed
+                    ? offsetClosedStrokeContours(points, strokeWidth)
+                    : offsetOpenStrokeContours(points, strokeWidth, style['stroke-linecap']);
+                  strokeContours.forEach(outline => addContour(outline, true));
+                }
+              });
+            } catch {
+              // Skip unsupported path data for hit testing.
+            }
+          }
+        } else if (tag === 'rect' && (fillVisible || strokeVisible)) {
+          const x = parseFloat(node.getAttribute('x')) || 0;
+          const y = parseFloat(node.getAttribute('y')) || 0;
+          const w = parseFloat(node.getAttribute('width')) || 0;
+          const h = parseFloat(node.getAttribute('height')) || 0;
+          const rawRx = node.hasAttribute('rx') ? parseFloat(node.getAttribute('rx')) : parseFloat(node.getAttribute('ry')) || 0;
+          const rawRy = node.hasAttribute('ry') ? parseFloat(node.getAttribute('ry')) : rawRx;
+          const points = buildRoundedRectPoints(x, y, w, h, rawRx, rawRy, matrix);
+          if (fillVisible) addContour(points, true);
+          if (strokeVisible && strokeWidth > 0) offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true));
+        } else if ((tag === 'circle' || tag === 'ellipse') && (fillVisible || strokeVisible)) {
+          const cx = parseFloat(node.getAttribute('cx')) || 0;
+          const cy = parseFloat(node.getAttribute('cy')) || 0;
+          const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
+          const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
+          const points = [];
+          for (let i = 0; i < 160; i++) {
+            const angle = i * Math.PI * 2 / 160;
+            points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
+          }
+          if (fillVisible) addContour(points, true);
+          if (strokeVisible && strokeWidth > 0) offsetClosedStrokeContours(points, strokeWidth).forEach(outline => addContour(outline, true));
+        } else if ((tag === 'polygon' || tag === 'polyline') && (fillVisible || strokeVisible)) {
+          const points = parseSvgPoints(node.getAttribute('points')).map(point => applyMatrix(matrix, point));
+          if (fillVisible) addContour(points, tag === 'polygon');
+          if (strokeVisible && strokeWidth > 0) {
+            const strokeContours = tag === 'polygon'
+              ? offsetClosedStrokeContours(points, strokeWidth)
+              : offsetOpenStrokeContours(points, strokeWidth, style['stroke-linecap']);
+            strokeContours.forEach(outline => addContour(outline, true));
+          }
+        } else if (tag === 'line' && strokeVisible && strokeWidth > 0) {
+          const p1 = [parseFloat(node.getAttribute('x1')) || 0, parseFloat(node.getAttribute('y1')) || 0];
+          const p2 = [parseFloat(node.getAttribute('x2')) || 0, parseFloat(node.getAttribute('y2')) || 0];
+          offsetOpenStrokeContours([applyMatrix(matrix, p1), applyMatrix(matrix, p2)], strokeWidth, style['stroke-linecap']).forEach(outline => addContour(outline, true));
+        }
+
+        Array.from(node.children).forEach(child => walk(child, matrix, style, visitedUses));
+      };
+
+      walk(svg);
+      localContours = contours.filter(contour => contour.points.length >= (contour.closed ? 3 : 2));
+      if (importedSvgHitCacheRef.current.size > 40) importedSvgHitCacheRef.current.clear();
+      importedSvgHitCacheRef.current.set(cacheKey, localContours);
+    }
+
+    const bounds = getInteriorObjectBounds(design);
+    const safeSourceBox = sourceBox || design.sourceBox || { x: 0, y: 0, width: bounds.width, height: bounds.height };
+    const scaleX = bounds.width / Math.max(0.0001, safeSourceBox.width);
+    const scaleY = bounds.height / Math.max(0.0001, safeSourceBox.height);
+    const placePoint = ([px, py]) => [
+      bounds.x + (px - safeSourceBox.x) * scaleX,
+      bounds.y + (py - safeSourceBox.y) * scaleY
+    ];
+
+    return localContours.map(contour => ({
+      ...contour,
+      points: cleanDxfPoints(contour.points.map(placePoint), contour.closed)
+    }));
+  };
+
+  const isPointNearImportedSvgVisibleSurface = (design, point, toleranceMm = 0) => {
+    const contours = getImportedSvgHitContours(design);
+    if (!contours.length) return true;
+
+    const testPoint = [point.x, point.y];
+    const closedContours = contours.filter(contour => contour.closed && contour.points.length >= 3);
+    const containingCount = closedContours.filter(contour => pointInPolygon(testPoint, contour.points)).length;
+    if (containingCount % 2 === 1) return true;
+
+    if (toleranceMm <= 0) return false;
+    return contours.some(contour => distancePointToPolyline(testPoint, contour.points, contour.closed) <= toleranceMm);
+  };
+
   const intersectClosedContourWithMargin = (points) => {
     if (!interiorClipEnabled || interiorMarginBoundarySets.length === 0 || points.length < 3) return [points];
 
@@ -6165,6 +7016,26 @@ export default function App() {
       if (intersects) inside = !inside;
     }
     return inside;
+  };
+
+  const distancePointToSegment = (point, start, end) => {
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 0.000001) return Math.hypot(point[0] - start[0], point[1] - start[1]);
+
+    const t = clamp(((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / lengthSq, 0, 1);
+    return Math.hypot(point[0] - (start[0] + dx * t), point[1] - (start[1] + dy * t));
+  };
+
+  const distancePointToPolyline = (point, points, closed = true) => {
+    if (!points.length) return Infinity;
+    let best = Infinity;
+    const segmentCount = closed ? points.length : points.length - 1;
+    for (let i = 0; i < segmentCount; i++) {
+      best = Math.min(best, distancePointToSegment(point, points[i], points[(i + 1) % points.length]));
+    }
+    return best;
   };
 
   const analyzeInteriorContours = (contours) => {
@@ -6458,14 +7329,15 @@ export default function App() {
       }
 
       const rootBox = getSvgRootBox(svg);
+      const sourceBox = design.sourceBox || rootBox;
       const designWidth = Math.max(10, n(design.width, 10));
       const designHeight = Math.max(10, n(design.height, 10));
-      const scaleX = designWidth / (rootBox.width || 1);
-      const scaleY = designHeight / (rootBox.height || 1);
+      const scaleX = designWidth / (sourceBox.width || 1);
+      const scaleY = designHeight / (sourceBox.height || 1);
       const pathTolerance = Math.max(0.02, 0.08 / Math.max(scaleX, scaleY));
       const placePoint = ([x, y]) => [
-        n(design.x, 0) + (x - rootBox.x) * scaleX,
-        n(design.y, 0) + (y - rootBox.y) * scaleY
+        n(design.x, 0) + (x - sourceBox.x) * scaleX,
+        n(design.y, 0) + (y - sourceBox.y) * scaleY
       ];
       const layer = `DESIGN_${designIndex + 1}`;
       const cssRules = parseSvgCssRules(svg);
@@ -6621,9 +7493,10 @@ export default function App() {
     }));
 
     const booleanContours = buildBooleanInteriorContours([...withAnalysis, ...clearanceContours, ...patternContours]);
+    const optimizedContours = optimizeDxfContours(booleanContours);
 
     return {
-      contours: booleanContours,
+      contours: optimizedContours,
       skipped
     };
   };
@@ -6667,7 +7540,7 @@ export default function App() {
     const { contours } = exportData;
     return contours
       .sort((a, b) => (a.depth - b.depth) || (b.area - a.area))
-      .map(contour => dxfPolylineEntity(contour.points, contour.closed, contour.layer))
+      .map(contour => dxfContourEntity(contour))
       .join('');
   };
 
@@ -7295,10 +8168,58 @@ export default function App() {
     }
 
     ctx.putImageData(imageData, 0, 0);
+    let minX = imageWidth;
+    let minY = imageHeight;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < imageHeight; y++) {
+      for (let x = 0; x < imageWidth; x++) {
+        const alpha = data[(y * imageWidth + x) * 4 + 3];
+        if (alpha <= 8) continue;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+
+    if (maxX >= minX && maxY >= minY) {
+      const cropWidth = maxX - minX + 1;
+      const cropHeight = maxY - minY + 1;
+      const cropCanvas = document.createElement('canvas');
+      cropCanvas.width = cropWidth;
+      cropCanvas.height = cropHeight;
+      const cropCtx = cropCanvas.getContext('2d');
+      cropCtx.putImageData(ctx.getImageData(minX, minY, cropWidth, cropHeight), 0, 0);
+
+      return {
+        imageUrl: cropCanvas.toDataURL('image/png'),
+        naturalWidth: cropWidth,
+        naturalHeight: cropHeight,
+        trim: {
+          x: minX,
+          y: minY,
+          width: cropWidth,
+          height: cropHeight,
+          originalWidth: imageWidth,
+          originalHeight: imageHeight
+        }
+      };
+    }
+
     return {
       imageUrl: canvas.toDataURL('image/png'),
       naturalWidth: imageWidth,
-      naturalHeight: imageHeight
+      naturalHeight: imageHeight,
+      trim: {
+        x: 0,
+        y: 0,
+        width: imageWidth,
+        height: imageHeight,
+        originalWidth: imageWidth,
+        originalHeight: imageHeight
+      }
     };
   };
 
@@ -7502,16 +8423,39 @@ export default function App() {
     });
   };
 
-  const getPresentationPoint = (e) => {
+  const getPresentationPointFromClient = (clientX, clientY, allowOutside = false) => {
     const svg = presentationSvgRef.current;
-    if (!svg) return { x: 0, y: 0 };
+    if (!svg) return null;
 
     const rect = svg.getBoundingClientRect();
+    if (!allowOutside && (
+      clientX < rect.left ||
+      clientX > rect.right ||
+      clientY < rect.top ||
+      clientY > rect.bottom
+    )) {
+      return null;
+    }
+
+    const matrix = svg.getScreenCTM?.();
+    if (matrix) {
+      const determinant = matrix.a * matrix.d - matrix.b * matrix.c;
+      if (Math.abs(determinant) > 0.000001) {
+        const localX = clientX - matrix.e;
+        const localY = clientY - matrix.f;
+        const x = (matrix.d * localX - matrix.c * localY) / determinant;
+        const y = (-matrix.b * localX + matrix.a * localY) / determinant;
+        return { x: x / scale, y: y / scale };
+      }
+    }
+
     const viewBox = getPresentationViewBox();
-    const x = viewBox.x + ((e.clientX - rect.left) / rect.width) * viewBox.width;
-    const y = viewBox.y + ((e.clientY - rect.top) / rect.height) * viewBox.height;
+    const x = viewBox.x + ((clientX - rect.left) / rect.width) * viewBox.width;
+    const y = viewBox.y + ((clientY - rect.top) / rect.height) * viewBox.height;
     return { x: x / scale, y: y / scale };
   };
+
+  const getPresentationPoint = (e) => getPresentationPointFromClient(e.clientX, e.clientY, true) || { x: 0, y: 0 };
 
   const setPresentationSelection = (ids) => {
     const uniqueIds = [...new Set(ids.filter(Boolean))];
@@ -7612,9 +8556,62 @@ export default function App() {
     };
   };
 
-  const addDecorationToPresentation = (decoration, point = null) => {
+  const fitPresentationItemToImageTrim = (item, trim) => {
+    if (!trim?.originalWidth || !trim?.originalHeight) return item;
+
+    const currentWidth = getPresentationItemWidth(item);
+    const currentHeight = getPresentationItemHeight(item);
+    const nextWidth = currentWidth * (trim.width / trim.originalWidth);
+    const nextHeight = currentHeight * (trim.height / trim.originalHeight);
+
+    return {
+      ...item,
+      x: n(item.x, 0) + currentWidth * (trim.x / trim.originalWidth),
+      y: n(item.y, 0) + currentHeight * (trim.y / trim.originalHeight),
+      width: Math.max(1, nextWidth),
+      height: Math.max(1, nextHeight)
+    };
+  };
+
+  const getFittedPresentationDecoration = async (decoration) => {
+    if (!decoration?.imageUrl) return decoration;
+    const existingOverride = presentationDecorationOverrides[decoration.id];
+    if (existingOverride?.imageUrl) return { ...decoration, ...existingOverride };
+    if (decoration.trim) return decoration;
+
+    const cleaned = await removeLightImageBackground(decoration.imageUrl);
+    const fittedDecoration = {
+      ...decoration,
+      imageUrl: cleaned.imageUrl,
+      naturalWidth: cleaned.naturalWidth,
+      naturalHeight: cleaned.naturalHeight,
+      trim: cleaned.trim
+    };
+
+    if (!decoration.builtIn) {
+      setPresentationDecorations(prev => prev.map(item => (
+        item.id === decoration.id ? fittedDecoration : item
+      )));
+      return fittedDecoration;
+    }
+
+    setPresentationDecorationOverrides(prev => ({
+      ...prev,
+      [decoration.id]: {
+        imageUrl: cleaned.imageUrl,
+        naturalWidth: cleaned.naturalWidth,
+        naturalHeight: cleaned.naturalHeight,
+        trim: cleaned.trim
+      }
+    }));
+
+    return fittedDecoration;
+  };
+
+  const addDecorationToPresentation = async (decoration, point = null) => {
     const targetPoint = point || presentationMousePointRef.current || { x: 0, y: 0 };
-    const next = createPresentationDecorationItem(decoration, targetPoint);
+    const fittedDecoration = await getFittedPresentationDecoration(decoration).catch(() => decoration);
+    const next = createPresentationDecorationItem(fittedDecoration, targetPoint);
     applyPresentationItems(prev => [next, ...prev], { selectedId: next.id });
   };
 
@@ -7679,18 +8676,17 @@ export default function App() {
           [decoration.id]: {
             imageUrl: cleaned.imageUrl,
             naturalWidth: cleaned.naturalWidth,
-            naturalHeight: cleaned.naturalHeight
+            naturalHeight: cleaned.naturalHeight,
+            trim: cleaned.trim
           }
         }));
         setPresentationItems(prev => prev.map(item => (
           item.sourceDecorationId === decoration.id || item.imageType === 'stone-pillar'
-            ? {
+            ? fitPresentationItemToImageTrim({
                 ...item,
                 sourceDecorationId: decoration.id,
-                imageType: 'stone-pillar',
-                width: getPresentationItemWidth(item),
-                height: getPresentationItemHeight(item)
-              }
+                imageType: 'stone-pillar'
+              }, cleaned.trim)
             : item
         )));
         return;
@@ -7702,17 +8698,14 @@ export default function App() {
               ...item,
               imageUrl: cleaned.imageUrl,
               naturalWidth: cleaned.naturalWidth,
-              naturalHeight: cleaned.naturalHeight
+              naturalHeight: cleaned.naturalHeight,
+              trim: cleaned.trim
             }
           : item
       )));
       setPresentationItems(prev => prev.map(item => (
         item.sourceDecorationId === decoration.id
-          ? {
-              ...item,
-              width: getPresentationItemWidth(item),
-              height: getPresentationItemHeight(item)
-            }
+          ? fitPresentationItemToImageTrim(item, cleaned.trim)
           : item
       )));
     } catch {
@@ -7738,6 +8731,9 @@ export default function App() {
   };
 
   const handlePresentationMouseDown = (e) => {
+    presentationClientMouseRef.current = { x: e.clientX, y: e.clientY };
+    presentationMousePointRef.current = getPresentationPoint(e);
+
     if (e.button === 1) {
       e.preventDefault();
       e.stopPropagation();
@@ -7751,6 +8747,7 @@ export default function App() {
   };
 
   const handlePresentationMouseMove = (e) => {
+    presentationClientMouseRef.current = { x: e.clientX, y: e.clientY };
     const point = getPresentationPoint(e);
     presentationMousePointRef.current = point;
 
@@ -7857,7 +8854,9 @@ export default function App() {
     if (!source) return;
     const sourceItems = Array.isArray(source) ? source : [source];
     const firstSource = sourceItems[0];
-    const point = presentationMousePointRef.current || { x: n(firstSource?.x, 0) + 40, y: n(firstSource?.y, 0) + 40 };
+    const clientMouse = presentationClientMouseRef.current;
+    const livePoint = clientMouse ? getPresentationPointFromClient(clientMouse.x, clientMouse.y) : null;
+    const point = livePoint || presentationMousePointRef.current || { x: n(firstSource?.x, 0) + 40, y: n(firstSource?.y, 0) + 40 };
     const sourceBounds = getBoundsFromPointSets(sourceItems.flatMap(item => getPresentationItemCornerPoints(item)));
     const dx = point.x - (sourceBounds.x + sourceBounds.width / 2);
     const dy = point.y - (sourceBounds.y + sourceBounds.height / 2);
@@ -8118,14 +9117,25 @@ export default function App() {
     if (isImportedInteriorSvg(design)) {
       const svgRenderData = getInlineSvgRenderData(design.svgText);
       if (svgRenderData) {
-        const rootBox = svgRenderData.rootBox;
-        const sx = itemWidth / (rootBox.width || 1);
-        const sy = itemHeight / (rootBox.height || 1);
-        const tx = (x - rootBox.x * sx) * scale;
-        const ty = (y - rootBox.y * sy) * scale;
+        const sourceBox = design.sourceBox || svgRenderData.rootBox;
+        const sx = itemWidth / (sourceBox.width || 1);
+        const sy = itemHeight / (sourceBox.height || 1);
+        const tx = (x - sourceBox.x * sx) * scale;
+        const ty = (y - sourceBox.y * sy) * scale;
+        const hitPadding = IMPORTED_SVG_HIT_TOLERANCE_PX / Math.max(0.0001, scale * viewZoom);
 
         return (
           <g clipPath={commonClipPath}>
+            <rect
+              x={(x - hitPadding) * scale}
+              y={(y - hitPadding) * scale}
+              width={(itemWidth + hitPadding * 2) * scale}
+              height={(itemHeight + hitPadding * 2) * scale}
+              fill="transparent"
+              pointerEvents="all"
+              {...eventProps}
+              style={cursorStyle}
+            />
             <g
               transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
               pointerEvents="visiblePainted"
