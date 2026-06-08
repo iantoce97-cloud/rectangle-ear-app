@@ -29,8 +29,48 @@ import {
   Square,
   Circle,
   Minus,
-  Eraser
+  Eraser,
+  RotateCcw,
+  RotateCw,
+  FlipHorizontal,
+  FlipVertical
 } from 'lucide-react';
+
+const projectSvgLibraryModules = import.meta.glob('./assets/svg-library/**/*.svg', {
+  query: '?raw',
+  import: 'default'
+});
+
+const projectSvgLibraryItems = Object.entries(projectSvgLibraryModules)
+  .map(([path, loader]) => {
+    const fileName = path.split('/').pop() || 'SVG design.svg';
+    const relativePath = path.replace(/^\.\/assets\/svg-library\//, '');
+    const parts = relativePath.split('/');
+    const folder = parts.length > 1 ? parts[0] : 'General';
+    return {
+      id: path,
+      name: fileName.replace(/\.svg$/i, '').replace(/[-_]+/g, ' '),
+      folder,
+      path,
+      loader
+    };
+  })
+  .sort((a, b) => a.name.localeCompare(b.name));
+
+const projectSvgLibraryFolders = Array.from(new Set(projectSvgLibraryItems.map(item => item.folder)))
+  .sort((a, b) => a.localeCompare(b));
+
+const INTERIOR_SVG_LIBRARY_DRAG_TYPE = 'application/x-interior-svg-library';
+const SVG_LIBRARY_THUMB_SIZE = 96;
+const projectSvgLibraryTextCache = new Map();
+
+const loadProjectSvgLibraryItemText = async (item) => {
+  if (!item) return '';
+  if (projectSvgLibraryTextCache.has(item.id)) return projectSvgLibraryTextCache.get(item.id);
+  const svgText = String(await item.loader() || '');
+  projectSvgLibraryTextCache.set(item.id, svgText);
+  return svgText;
+};
 
 export default function App() {
   const [width, setWidth] = useState(1000);
@@ -95,6 +135,9 @@ export default function App() {
   const [interiorClipEnabled, setInteriorClipEnabled] = useState(false);
   const [interiorMarginInput, setInteriorMarginInput] = useState(30);
   const [showInteriorMarginGuide, setShowInteriorMarginGuide] = useState(false);
+  const [interiorOverlayPanel, setInteriorOverlayPanel] = useState(null);
+  const [selectedInteriorSvgLibraryFolder, setSelectedInteriorSvgLibraryFolder] = useState(projectSvgLibraryFolders[0] || 'General');
+  const [svgLibraryThumbnails, setSvgLibraryThumbnails] = useState({});
   const [patternEnabled, setPatternEnabled] = useState(false);
   const [patternMode, setPatternMode] = useState('random');
   const [patternThickness, setPatternThickness] = useState(15);
@@ -180,6 +223,8 @@ export default function App() {
   const presentationSvgRef = useRef(null);
   const presentationDecorationFileInputRef = useRef(null);
   const importedSvgHitCacheRef = useRef(new Map());
+  const importedSvgHitMaskCacheRef = useRef(new Map());
+  const [, setImportedSvgHitMaskVersion] = useState(0);
 
   // MEASURE TOOL
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -382,6 +427,7 @@ export default function App() {
   const ARC_SEGMENTS = 64;
   const EAR_ARC_SEGMENTS = 12;
   const IMPORTED_SVG_HIT_TOLERANCE_PX = 8;
+  const IMPORTED_SVG_HIT_MASK_SIZE = 192;
 
   const topVisibleCornerMargin = Math.max(0, margin - topEarDepth);
   const MIN_VIEW_ZOOM = 0.1;
@@ -472,6 +518,7 @@ export default function App() {
 
   const transformPoints = (pointsArray) => pointsArray.map(transformPoint);
   const interiorMargin = Math.max(0, n(interiorMarginInput, 30));
+  const visibleProjectSvgLibraryItems = projectSvgLibraryItems.filter(item => item.folder === selectedInteriorSvgLibraryFolder);
   const eraserSize = Math.max(1, n(eraserSizeInput, 20));
 
   const angleFromOffset = (offset) => clamp(90 + Math.atan(offset / safeWidth) * 180 / Math.PI, 30, 150);
@@ -1153,9 +1200,6 @@ export default function App() {
     const arc = getActiveTopArcData();
     if (!arc || topEarDepth <= 0) return [];
 
-    const usable = arc.arcLength - 2 * topVisibleCornerMargin - topEarLength;
-    if (usable < 0) return [];
-
     const ranges = [];
 
     if (manualMode) {
@@ -1167,6 +1211,9 @@ export default function App() {
         return ranges;
       }
 
+      const usable = arc.arcLength - 2 * topVisibleCornerMargin - topEarLength;
+      if (usable < 0) return [];
+
       const spacing = usable / (count - 1);
 
       for (let i = 0; i < count; i++) {
@@ -1176,6 +1223,9 @@ export default function App() {
 
       return ranges;
     }
+
+    const usable = arc.arcLength - 2 * topVisibleCornerMargin - topEarLength;
+    if (usable < 0) return [];
 
     let gaps = 1;
     while (usable / gaps > MAX_SPACING) gaps++;
@@ -1212,13 +1262,14 @@ export default function App() {
 
     const addManualSide = (sideLength, orientation, count, length, depth, edgeMargin = margin) => {
       if (depth <= 0) return;
-      const usable = sideLength - 2 * edgeMargin - length;
-      if (usable < 0) return;
 
       if (count === 1) {
         ears.push({ orientation, pos: sideLength / 2 - length / 2 });
         return;
       }
+
+      const usable = sideLength - 2 * edgeMargin - length;
+      if (usable < 0) return;
 
       const spacing = usable / (count - 1);
       for (let i = 0; i < count; i++) {
@@ -1247,13 +1298,14 @@ export default function App() {
       if (depth <= 0) return;
       const sideLength = endY - startY;
       const visibleMargin = Math.max(0, margin - depth);
-      const usable = sideLength - 2 * visibleMargin - length;
-      if (usable < 0) return;
 
       if (count === 1) {
         ears.push({ orientation, pos: startY + sideLength / 2 - length / 2 });
         return;
       }
+
+      const usable = sideLength - 2 * visibleMargin - length;
+      if (usable < 0) return;
 
       const spacing = usable / (count - 1);
       for (let i = 0; i < count; i++) {
@@ -1352,10 +1404,6 @@ export default function App() {
     }
 
     const visibleMargin = Math.max(0, margin - depth);
-    const usable = sideLength - 2 * visibleMargin - length;
-    if (usable < 0) {
-      return [];
-    }
 
     const ranges = [];
     if (useManual) {
@@ -1364,6 +1412,11 @@ export default function App() {
         const start = minY + sideLength / 2 - length / 2;
         ranges.push({ start, end: start + length });
       } else {
+        const usable = sideLength - 2 * visibleMargin - length;
+        if (usable < 0) {
+          return [];
+        }
+
         const spacing = usable / (count - 1);
         for (let i = 0; i < count; i++) {
           const start = minY + visibleMargin + i * spacing;
@@ -1371,6 +1424,11 @@ export default function App() {
         }
       }
     } else {
+      const usable = sideLength - 2 * visibleMargin - length;
+      if (usable < 0) {
+        return [];
+      }
+
       let gaps = 1;
       while (usable / gaps > MAX_SPACING) gaps++;
       while (gaps > 1 && usable / gaps < MIN_SPACING) gaps--;
@@ -1451,8 +1509,6 @@ export default function App() {
     if (depth <= 0 || length <= 0) return [];
 
     const sideLength = endX - startX;
-    const usable = sideLength - 2 * edgeMargin - length;
-    if (usable < 0) return [];
 
     const ranges = [];
 
@@ -1464,6 +1520,9 @@ export default function App() {
         return ranges;
       }
 
+      const usable = sideLength - 2 * edgeMargin - length;
+      if (usable < 0) return [];
+
       const spacing = usable / (count - 1);
       for (let i = 0; i < count; i++) {
         const start = startX + edgeMargin + i * spacing;
@@ -1472,6 +1531,9 @@ export default function App() {
 
       return ranges;
     }
+
+    const usable = sideLength - 2 * edgeMargin - length;
+    if (usable < 0) return [];
 
     let gaps = 1;
     while (usable / gaps > MAX_SPACING) gaps++;
@@ -1490,8 +1552,6 @@ export default function App() {
     if (topEarDepth <= 0 || topEarLength <= 0) return [];
 
     const spanLength = endS - startS;
-    const usable = spanLength - 2 * topVisibleCornerMargin - topEarLength;
-    if (usable < 0) return [];
 
     const ranges = [];
 
@@ -1503,6 +1563,9 @@ export default function App() {
         return ranges;
       }
 
+      const usable = spanLength - 2 * topVisibleCornerMargin - topEarLength;
+      if (usable < 0) return [];
+
       const spacing = usable / (count - 1);
       for (let i = 0; i < count; i++) {
         const start = startS + topVisibleCornerMargin + i * spacing;
@@ -1511,6 +1574,9 @@ export default function App() {
 
       return ranges;
     }
+
+    const usable = spanLength - 2 * topVisibleCornerMargin - topEarLength;
+    if (usable < 0) return [];
 
     let gaps = 1;
     while (usable / gaps > MAX_SPACING) gaps++;
@@ -2703,7 +2769,10 @@ export default function App() {
   };
 
   const getSvgPoint = (e) => {
-    const svg = e.currentTarget.ownerSVGElement || e.target.ownerSVGElement || e.currentTarget;
+    const svg = e.currentTarget.ownerSVGElement
+      || e.target.ownerSVGElement
+      || (typeof e.currentTarget.querySelector === 'function' ? e.currentTarget.querySelector('svg') : null)
+      || e.currentTarget;
     const ctm = typeof svg.getScreenCTM === 'function' ? svg.getScreenCTM() : null;
 
     if (ctm && typeof svg.createSVGPoint === 'function') {
@@ -3036,8 +3105,6 @@ export default function App() {
       const maxY = Math.max(startY, endY);
       const sideLength = maxY - minY;
       const visibleMargin = Math.max(0, margin - depth);
-      const usable = sideLength - 2 * visibleMargin - length;
-      if (usable < 0) return [];
 
       const ranges = [];
       if (useManual) {
@@ -3048,6 +3115,9 @@ export default function App() {
           return ranges;
         }
 
+        const usable = sideLength - 2 * visibleMargin - length;
+        if (usable < 0) return [];
+
         const spacing = usable / (count - 1);
         for (let i = 0; i < count; i++) {
           const start = minY + visibleMargin + i * spacing;
@@ -3055,6 +3125,9 @@ export default function App() {
         }
         return ranges;
       }
+
+      const usable = sideLength - 2 * visibleMargin - length;
+      if (usable < 0) return [];
 
       let gaps = 1;
       while (usable / gaps > MAX_SPACING) gaps++;
@@ -3202,8 +3275,14 @@ export default function App() {
   const isImportedInteriorSvg = (design) => !design?.kind || design.kind === 'svg';
   const isPointEditedInteriorShape = (design) => design?.kind === 'line' || design?.kind === 'arc' || design?.kind === 'polygon';
   const isInteriorGroup = (design) => design?.kind === 'group';
-  const flattenInteriorDesigns = (designs) => (
-    designs.flatMap(design => isInteriorGroup(design) ? flattenInteriorDesigns(design.children || []) : [design])
+  const flattenInteriorDesigns = (designs, parentMatrix = null) => (
+    designs.flatMap(design => {
+      const inheritedDesign = parentMatrix ? { ...design, __parentMatrix: parentMatrix } : design;
+      if (!isInteriorGroup(inheritedDesign)) return [inheritedDesign];
+
+      const groupMatrix = getInteriorDesignTransformMatrix(inheritedDesign);
+      return flattenInteriorDesigns(inheritedDesign.children || [], groupMatrix);
+    })
   );
 
   const getInteriorObjectBounds = (design) => {
@@ -3306,6 +3385,47 @@ export default function App() {
     return { x: minX, y: minY, width: Math.max(10, maxX - minX), height: Math.max(10, maxY - minY) };
   };
 
+  const getInteriorTransformCenter = (bounds) => [
+    bounds.x + bounds.width / 2,
+    bounds.y + bounds.height / 2
+  ];
+
+  const getInteriorDesignTransformMatrix = (design, bounds = getInteriorObjectBounds(design)) => {
+    const [cx, cy] = getInteriorTransformCenter(bounds);
+    const angle = n(design?.rotation, 0) * Math.PI / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const sx = design?.mirrorX ? -1 : 1;
+    const sy = design?.mirrorY ? -1 : 1;
+    const localMatrix = [
+      cos * sx,
+      sin * sx,
+      -sin * sy,
+      cos * sy,
+      cx - cos * sx * cx + sin * sy * cy,
+      cy - sin * sx * cx - cos * sy * cy
+    ];
+    return design?.__parentMatrix ? multiplyMatrix(design.__parentMatrix, localMatrix) : localMatrix;
+  };
+
+  const transformInteriorDesignPoint = (design, point, bounds = getInteriorObjectBounds(design)) => (
+    applyMatrix(getInteriorDesignTransformMatrix(design, bounds), point)
+  );
+
+  const transformInteriorDesignPoints = (design, points, bounds = getInteriorObjectBounds(design)) => (
+    (points || []).map(point => transformInteriorDesignPoint(design, point, bounds))
+  );
+
+  const getInteriorSvgTransform = (design, bounds = getInteriorObjectBounds(design)) => {
+    const [cx, cy] = getInteriorTransformCenter(bounds);
+    const transforms = [];
+    if (n(design?.rotation, 0)) transforms.push(`rotate(${n(design.rotation, 0)} ${cx * scale} ${cy * scale})`);
+    if (design?.mirrorX || design?.mirrorY) {
+      transforms.push(`translate(${cx * scale} ${cy * scale}) scale(${design.mirrorX ? -1 : 1} ${design.mirrorY ? -1 : 1}) translate(${-cx * scale} ${-cy * scale})`);
+    }
+    return transforms.join(' ');
+  };
+
   const applyInteriorObjectBounds = (design, nextBounds) => {
     const current = getInteriorObjectBounds(design);
     const next = {
@@ -3394,6 +3514,7 @@ export default function App() {
     const cy = y + itemHeight / 2;
 
     return [
+      { id: 'rotate', x: cx, y: y - 32 / (scale * viewZoom), cursor: 'grab' },
       { id: 'nw', x, y, cursor: 'nwse-resize' },
       { id: 'n', x: cx, y, cursor: 'ns-resize' },
       { id: 'ne', x: x + itemWidth, y, cursor: 'nesw-resize' },
@@ -3453,6 +3574,9 @@ export default function App() {
       exportable: true,
       warnings: [],
       aspectLocked: false,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false,
       aspectRatio: draft.kind === 'rect' || draft.kind === 'ellipse' || draft.kind === 'text'
         ? Math.max(10, Math.abs(draft.x2 - draft.x1)) / Math.max(10, Math.abs(draft.y2 - draft.y1))
         : 1
@@ -3658,6 +3782,7 @@ export default function App() {
 
       const tag = node.tagName?.toLowerCase();
       if (!tag || ignoredTags.has(tag)) return;
+      if (isSvgCanvasBackgroundRect(node, svg)) return;
 
       const matrix = multiplyMatrix(parentMatrix, parseSvgTransform(node.getAttribute('transform')));
       const style = resolveSvgNodeStyle(node, parentStyle, cssRules);
@@ -3815,7 +3940,7 @@ export default function App() {
     Array.from(svg.children)
       .filter(node => {
         const tag = node.tagName?.toLowerCase();
-        return tag && !ignoredTags.has(tag);
+        return tag && !ignoredTags.has(tag) && !isSvgCanvasBackgroundRect(node, svg);
       })
       .forEach(node => testSvg.appendChild(node.cloneNode(true)));
 
@@ -4217,15 +4342,17 @@ export default function App() {
     return flattenInteriorDesigns(interiorDesignsRef.current).some(design => {
       if ((design.color || 'white') !== 'white') return false;
 
+      if (isImportedInteriorSvg(design)) {
+        return isPointNearImportedSvgVisibleSurface(design, point, importedSvgToleranceMm);
+      }
+
       const bounds = getInteriorObjectBounds(design);
-      const tolerance = isImportedInteriorSvg(design) ? importedSvgToleranceMm : 0;
+      const tolerance = 0;
       const inBounds = px >= bounds.x - tolerance
         && px <= bounds.x + bounds.width + tolerance
         && py >= bounds.y - tolerance
         && py <= bounds.y + bounds.height + tolerance;
       if (!inBounds) return false;
-
-      if (isImportedInteriorSvg(design)) return isPointNearImportedSvgVisibleSurface(design, point, tolerance);
 
       if (design.kind === 'rect' || design.kind === 'text') return true;
 
@@ -4384,6 +4511,31 @@ export default function App() {
     const selected = getSelectedInteriorMovableDesigns();
     if (!selected.length) {
       showInteriorPositionMessage('Select a design first.');
+      return;
+    }
+
+    if (selected.length > 1 && (mode === 'center-x' || mode === 'center-y')) {
+      const selectedBounds = getInteriorSelectionBounds(selected);
+      const targetCenterX = selectedBounds.x + selectedBounds.width / 2;
+      const targetCenterY = selectedBounds.y + selectedBounds.height / 2;
+
+      applyInteriorDesigns(prev => prev.map(item => {
+        if (!selectedInteriorDesignIdsRef.current.includes(item.id)) return item;
+
+        const bounds = getInteriorObjectBounds(item);
+        const itemCenterX = bounds.x + bounds.width / 2;
+        const itemCenterY = bounds.y + bounds.height / 2;
+
+        return {
+          ...item,
+          ...applyInteriorObjectBounds(item, {
+            x: bounds.x + (mode === 'center-x' ? targetCenterX - itemCenterX : 0),
+            y: bounds.y + (mode === 'center-y' ? targetCenterY - itemCenterY : 0),
+            width: bounds.width,
+            height: bounds.height
+          })
+        };
+      }), { history: true });
       return;
     }
 
@@ -4634,6 +4786,73 @@ export default function App() {
     return `data:image/svg+xml;base64,${btoa(binary)}`;
   };
 
+  const createSvgLibraryThumbnail = (rawSvgText) => new Promise((resolve) => {
+    const svgText = removeSvgCanvasBackground(String(rawSvgText || ''));
+    const image = new window.Image();
+    const sourceUrl = svgTextToDataUrl(svgText);
+
+    image.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = SVG_LIBRARY_THUMB_SIZE;
+        canvas.height = SVG_LIBRARY_THUMB_SIZE;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(sourceUrl);
+          return;
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const imageWidth = image.naturalWidth || SVG_LIBRARY_THUMB_SIZE;
+        const imageHeight = image.naturalHeight || SVG_LIBRARY_THUMB_SIZE;
+        const fit = Math.min(
+          (SVG_LIBRARY_THUMB_SIZE - 12) / Math.max(1, imageWidth),
+          (SVG_LIBRARY_THUMB_SIZE - 12) / Math.max(1, imageHeight)
+        );
+        const drawWidth = imageWidth * fit;
+        const drawHeight = imageHeight * fit;
+        ctx.drawImage(
+          image,
+          (SVG_LIBRARY_THUMB_SIZE - drawWidth) / 2,
+          (SVG_LIBRARY_THUMB_SIZE - drawHeight) / 2,
+          drawWidth,
+          drawHeight
+        );
+        resolve(canvas.toDataURL('image/png'));
+      } catch {
+        resolve(sourceUrl);
+      }
+    };
+
+    image.onerror = () => resolve(sourceUrl);
+    image.src = sourceUrl;
+  });
+
+  useEffect(() => {
+    if (interiorOverlayPanel !== 'svgLibrary') return;
+    const missingItems = visibleProjectSvgLibraryItems.filter(item => !svgLibraryThumbnails[item.id]);
+    if (!missingItems.length) return;
+
+    let cancelled = false;
+
+    const generate = async () => {
+      for (const item of missingItems) {
+        const svgText = await loadProjectSvgLibraryItemText(item);
+        const thumbnail = await createSvgLibraryThumbnail(svgText);
+        if (cancelled) return;
+        setSvgLibraryThumbnails(prev => (
+          prev[item.id] ? prev : { ...prev, [item.id]: thumbnail }
+        ));
+      }
+    };
+
+    generate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [interiorOverlayPanel, selectedInteriorSvgLibraryFolder, visibleProjectSvgLibraryItems, svgLibraryThumbnails]);
+
   const validateInteriorSvg = (svgText) => {
     const warnings = [];
     const parser = new DOMParser();
@@ -4718,44 +4937,71 @@ export default function App() {
     };
   };
 
+  const createInteriorSvgDesignFromText = (rawSvgText, name = 'SVG design', point = null) => {
+    const svgText = removeSvgCanvasBackground(String(rawSvgText || ''));
+    const validation = validateInteriorSvg(svgText);
+    const defaultSize = Math.max(80, Math.min(safeWidth, safeHeight) * 0.25);
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText, 'image/svg+xml');
+    const svg = doc.querySelector('svg');
+    const rootBox = svg && !doc.querySelector('parsererror') ? getSvgRootBox(svg) : { x: 0, y: 0, width: 100, height: 100 };
+    const sourceBox = svg && !doc.querySelector('parsererror') ? (getSvgArtworkBBox(svg) || rootBox) : rootBox;
+    const aspectRatio = sourceBox.width / Math.max(0.0001, sourceBox.height);
+    const fittedWidth = aspectRatio >= 1 ? defaultSize : defaultSize * aspectRatio;
+    const fittedHeight = aspectRatio >= 1 ? defaultSize / aspectRatio : defaultSize;
+    const targetPoint = point || { x: safeWidth / 2, y: safeHeight / 2 };
+
+    return {
+      id: crypto.randomUUID(),
+      name: name.replace(/\.svg$/i, '') || 'SVG design',
+      href: svgTextToDataUrl(svgText),
+      svgText,
+      exportable: validation.exportable,
+      warnings: validation.warnings,
+      color: 'white',
+      x: targetPoint.x - fittedWidth / 2,
+      y: targetPoint.y - fittedHeight / 2,
+      width: fittedWidth,
+      height: fittedHeight,
+      sourceBox,
+      aspectLocked: false,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false,
+      aspectRatio
+    };
+  };
+
+  const addInteriorSvgDesignFromText = (rawSvgText, name = 'SVG design', point = null) => {
+    const nextDesign = createInteriorSvgDesignFromText(rawSvgText, name, point);
+    applyInteriorDesigns(prev => [...prev, nextDesign], { selectedId: nextDesign.id });
+  };
+
   const handleInteriorDesignFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const reader = new FileReader();
     reader.onload = () => {
-      const svgText = String(reader.result || '');
-      const validation = validateInteriorSvg(svgText);
-      const defaultSize = Math.max(80, Math.min(safeWidth, safeHeight) * 0.25);
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(svgText, 'image/svg+xml');
-      const svg = doc.querySelector('svg');
-      const rootBox = svg && !doc.querySelector('parsererror') ? getSvgRootBox(svg) : { x: 0, y: 0, width: 100, height: 100 };
-      const sourceBox = svg && !doc.querySelector('parsererror') ? (getSvgArtworkBBox(svg) || rootBox) : rootBox;
-      const aspectRatio = sourceBox.width / Math.max(0.0001, sourceBox.height);
-      const fittedWidth = aspectRatio >= 1 ? defaultSize : defaultSize * aspectRatio;
-      const fittedHeight = aspectRatio >= 1 ? defaultSize / aspectRatio : defaultSize;
-      const nextDesign = {
-        id: crypto.randomUUID(),
-        name: file.name.replace(/\.svg$/i, '') || 'SVG design',
-        href: svgTextToDataUrl(svgText),
-        svgText,
-        exportable: validation.exportable,
-        warnings: validation.warnings,
-        color: 'white',
-        x: safeWidth / 2 - fittedWidth / 2,
-        y: safeHeight / 2 - fittedHeight / 2,
-        width: fittedWidth,
-        height: fittedHeight,
-        sourceBox,
-        aspectLocked: false,
-        aspectRatio
-      };
-
-      applyInteriorDesigns(prev => [...prev, nextDesign], { selectedId: nextDesign.id });
+      addInteriorSvgDesignFromText(String(reader.result || ''), file.name);
     };
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  const handleInteriorSvgLibraryDrop = async (e) => {
+    const libraryId = e.dataTransfer.getData(INTERIOR_SVG_LIBRARY_DRAG_TYPE)
+      || e.dataTransfer.getData('text/plain');
+    if (!libraryId) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const libraryItem = projectSvgLibraryItems.find(item => item.id === libraryId);
+    if (!libraryItem) return;
+
+    const svgText = await loadProjectSvgLibraryItemText(libraryItem);
+    addInteriorSvgDesignFromText(svgText, libraryItem.name, getSvgPoint(e));
   };
 
   const startInteriorDesignDrag = (e, design, mode, handle = null) => {
@@ -4775,6 +5021,7 @@ export default function App() {
     e.stopPropagation();
 
     const bounds = getInteriorObjectBounds(design);
+    const [centerX, centerY] = getInteriorTransformCenter(bounds);
     const selectedIds = selectedInteriorDesignIdsRef.current;
     if (!(selectedIds.includes(design.id) && selectedIds.length > 1)) setInteriorSelection([design.id]);
     interiorDragStartSnapshotRef.current = cloneInteriorDesigns(interiorDesignsRef.current);
@@ -4789,11 +5036,29 @@ export default function App() {
       return;
     }
 
+    if (mode === 'rotate' && selectedIds.includes(design.id) && selectedIds.length > 1) {
+      const selected = interiorDesignsRef.current.filter(item => selectedIds.includes(item.id));
+      const group = getInteriorSelectionBounds(selected);
+      const [gcx, gcy] = getInteriorTransformCenter(group);
+      setInteriorDrag({
+        id: design.id,
+        ids: selectedIds,
+        mode: 'multi-rotate',
+        startMouse: [point.x, point.y],
+        startAngle: Math.atan2(point.y - gcy, point.x - gcx),
+        startGroup: group,
+        startDesigns: selected.map(item => ({ ...item, ...getInteriorObjectBounds(item) }))
+      });
+      return;
+    }
+
     setInteriorDrag({
       id: design.id,
       mode,
       handle,
       startMouse: [point.x, point.y],
+      startAngle: Math.atan2(point.y - centerY, point.x - centerX),
+      transformCenter: [centerX, centerY],
       startDesign: {
         ...design,
         ...bounds,
@@ -4934,6 +5199,38 @@ export default function App() {
       return;
     }
 
+    if (interiorDrag.mode === 'multi-rotate') {
+      const group = interiorDrag.startGroup;
+      const [gcx, gcy] = getInteriorTransformCenter(group);
+      const nextAngle = Math.atan2(point.y - gcy, point.x - gcx);
+      const rotationDelta = (nextAngle - interiorDrag.startAngle) * 180 / Math.PI;
+      const angle = rotationDelta * Math.PI / 180;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+
+      applyInteriorDesigns(prev => prev.map(item => {
+        const startItem = interiorDrag.startDesigns.find(design => design.id === item.id);
+        if (!startItem) return item;
+        const [cx, cy] = getInteriorTransformCenter(startItem);
+        const centerDx = cx - gcx;
+        const centerDy = cy - gcy;
+        const nextCx = gcx + centerDx * cos - centerDy * sin;
+        const nextCy = gcy + centerDx * sin + centerDy * cos;
+        const moved = applyInteriorObjectBounds(startItem, {
+          x: nextCx - startItem.width / 2,
+          y: nextCy - startItem.height / 2,
+          width: startItem.width,
+          height: startItem.height
+        });
+        return {
+          ...item,
+          ...moved,
+          rotation: n(startItem.rotation, 0) + rotationDelta
+        };
+      }), { history: false });
+      return;
+    }
+
     if (interiorDrag.mode === 'move') {
       updateInteriorDesign(interiorDrag.id, applyInteriorObjectBounds(start, {
         x: start.x + dx,
@@ -4941,6 +5238,15 @@ export default function App() {
         width: start.width,
         height: start.height
       }), { history: false });
+      return;
+    }
+
+    if (interiorDrag.mode === 'rotate') {
+      const [cx, cy] = interiorDrag.transformCenter;
+      const nextAngle = Math.atan2(point.y - cy, point.x - cx);
+      updateInteriorDesign(interiorDrag.id, {
+        rotation: n(start.rotation, 0) + (nextAngle - interiorDrag.startAngle) * 180 / Math.PI
+      }, { history: false });
       return;
     }
 
@@ -5099,6 +5405,80 @@ export default function App() {
     clearInteriorDimensionDraft(field);
   };
 
+  const getActiveInteriorTransformIds = () => (
+    selectedInteriorDesignIds.length ? selectedInteriorDesignIds : [selectedInteriorDesignId].filter(Boolean)
+  );
+
+  const transformInteriorSelection = ({ rotationDelta = 0, mirrorX = false, mirrorY = false }) => {
+    const ids = getActiveInteriorTransformIds();
+    if (!ids.length) return;
+
+    const selected = interiorDesignsRef.current.filter(item => ids.includes(item.id));
+    const groupBounds = getInteriorSelectionBounds(selected);
+    const [gcx, gcy] = getInteriorTransformCenter(groupBounds);
+    const angle = rotationDelta * Math.PI / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    applyInteriorDesigns(prev => prev.map(item => {
+      if (!ids.includes(item.id)) return item;
+
+      const bounds = getInteriorObjectBounds(item);
+      const [cx, cy] = getInteriorTransformCenter(bounds);
+      let nextCx = cx;
+      let nextCy = cy;
+
+      if (mirrorX) nextCx = gcx - (nextCx - gcx);
+      if (mirrorY) nextCy = gcy - (nextCy - gcy);
+
+      if (rotationDelta) {
+        const dx = nextCx - gcx;
+        const dy = nextCy - gcy;
+        nextCx = gcx + dx * cos - dy * sin;
+        nextCy = gcy + dx * sin + dy * cos;
+      }
+
+      const moved = applyInteriorObjectBounds(item, {
+        x: nextCx - bounds.width / 2,
+        y: nextCy - bounds.height / 2,
+        width: bounds.width,
+        height: bounds.height
+      });
+
+      return {
+        ...item,
+        ...moved,
+        rotation: n(item.rotation, 0) + rotationDelta,
+        mirrorX: mirrorX ? !item.mirrorX : Boolean(item.mirrorX),
+        mirrorY: mirrorY ? !item.mirrorY : Boolean(item.mirrorY)
+      };
+    }));
+  };
+
+  const setInteriorSelectionRotation = (value) => {
+    setInteriorDimensionDrafts(prev => ({ ...prev, rotation: value }));
+    if (value === '') return;
+    const target = Number(value);
+    if (!Number.isFinite(target)) return;
+    const current = n(selectedInteriorDesign?.rotation, 0);
+    transformInteriorSelection({ rotationDelta: target - current });
+  };
+
+  const handleInteriorRotationBlur = () => {
+    const ids = getActiveInteriorTransformIds();
+    if (!ids.length) {
+      clearInteriorDimensionDraft('rotation');
+      return;
+    }
+
+    const selected = interiorDesignsRef.current.find(item => item.id === ids[ids.length - 1]);
+    const value = n(selected?.rotation, 0);
+    applyInteriorDesigns(prev => prev.map(item => (
+      ids.includes(item.id) ? { ...item, rotation: n(item.rotation, value) } : item
+    )));
+    clearInteriorDimensionDraft('rotation');
+  };
+
   const handleInteriorMarginBlur = () => {
     const panelBounds = getCleanMainBodyPanelVertexSets().map(panel => {
       const transformed = transformPoints(panel);
@@ -5128,12 +5508,14 @@ export default function App() {
     const point = getSvgPoint(e);
     const selected = interiorDesignsRef.current.filter(item => selectedInteriorDesignIdsRef.current.includes(item.id));
     const bounds = getInteriorSelectionBounds(selected);
+    const [cx, cy] = getInteriorTransformCenter(bounds);
     interiorDragStartSnapshotRef.current = cloneInteriorDesigns(interiorDesignsRef.current);
     setInteriorDrag({
       mode,
       handle,
       ids: selectedInteriorDesignIdsRef.current,
       startMouse: [point.x, point.y],
+      startAngle: Math.atan2(point.y - cy, point.x - cx),
       startGroup: bounds,
       startDesigns: selected.map(item => ({ ...item, ...getInteriorObjectBounds(item) }))
     });
@@ -5782,18 +6164,15 @@ export default function App() {
         pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
         colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
       });
-      const arcFit = contour.arcFit || getContourCircleFit(preCleaned, contour.closed);
-      const ellipseFit = arcFit ? null : (contour.ellipseFit || getContourEllipseFit(preCleaned, contour.closed));
-      const capsuleFit = (arcFit || ellipseFit) ? null : (contour.capsuleFit || getContourCapsuleFit(preCleaned, contour.closed));
       const points = optimizeDxfContourPoints(contour.points || [], contour.closed);
       if (points.length < (contour.closed ? 3 : 2)) return;
 
       const nextContour = {
         ...contour,
         points,
-        arcFit,
-        ellipseFit,
-        capsuleFit,
+        arcFit: null,
+        ellipseFit: null,
+        capsuleFit: null,
         area: contour.closed ? Math.abs(signedPolygonArea(points)) : contour.area
       };
       const key = getCanonicalContourKey(nextContour);
@@ -5985,23 +6364,7 @@ export default function App() {
   };
 
   const dxfContourEntity = (contour) => {
-    if (contour.arcFit) {
-      const arcEntity = dxfBulgedCircleEntity(contour.arcFit, contour.layer);
-      if (arcEntity) return arcEntity;
-    }
-
-    if (contour.ellipseFit) {
-      const ellipseEntity = dxfOptimizedEllipseEntity(contour.ellipseFit, contour.layer);
-      if (ellipseEntity) return ellipseEntity;
-    }
-
-    if (contour.capsuleFit) {
-      const capsuleEntity = dxfBulgedCapsuleEntity(contour.capsuleFit, contour.layer);
-      if (capsuleEntity) return capsuleEntity;
-    }
-
-    const bulgedEntity = dxfBulgedPolylineEntity(contour.points, contour.closed, contour.layer);
-    return bulgedEntity || dxfPolylineEntity(contour.points, contour.closed, contour.layer);
+    return dxfPolylineEntity(contour.points, contour.closed, contour.layer);
   };
 
   const parseSvgNumberList = (value) => (value || '')
@@ -6032,6 +6395,20 @@ export default function App() {
     matrix[0] * x + matrix[2] * y + matrix[4],
     matrix[1] * x + matrix[3] * y + matrix[5]
   ]);
+
+  const invertMatrix = (matrix) => {
+    const determinant = matrix[0] * matrix[3] - matrix[1] * matrix[2];
+    if (Math.abs(determinant) < 0.000001) return null;
+
+    return [
+      matrix[3] / determinant,
+      -matrix[1] / determinant,
+      -matrix[2] / determinant,
+      matrix[0] / determinant,
+      (matrix[2] * matrix[5] - matrix[3] * matrix[4]) / determinant,
+      (matrix[1] * matrix[4] - matrix[0] * matrix[5]) / determinant
+    ];
+  };
 
   const parseSvgTransform = (value) => {
     let matrix = [1, 0, 0, 1, 0, 0];
@@ -6230,6 +6607,50 @@ export default function App() {
     const widthValue = parseFloat(svg.getAttribute('width')) || 100;
     const heightValue = parseFloat(svg.getAttribute('height')) || 100;
     return { x: 0, y: 0, width: widthValue, height: heightValue };
+  };
+
+  const parseSvgLengthValue = (value, reference, fallback = 0) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return fallback;
+    if (raw.endsWith('%')) {
+      const percent = parseFloat(raw);
+      return Number.isFinite(percent) ? reference * percent / 100 : fallback;
+    }
+
+    const parsed = parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  const isSvgCanvasBackgroundRect = (node, svg) => {
+    if (!node || node.tagName?.toLowerCase() !== 'rect') return false;
+
+    const rootBox = getSvgRootBox(svg);
+    const x = parseSvgLengthValue(node.getAttribute('x'), rootBox.width, rootBox.x);
+    const y = parseSvgLengthValue(node.getAttribute('y'), rootBox.height, rootBox.y);
+    const widthValue = parseSvgLengthValue(node.getAttribute('width'), rootBox.width, 0);
+    const heightValue = parseSvgLengthValue(node.getAttribute('height'), rootBox.height, 0);
+    const coversRoot = Math.abs(x - rootBox.x) <= 0.01
+      && Math.abs(y - rootBox.y) <= 0.01
+      && Math.abs(widthValue - rootBox.width) <= 0.01
+      && Math.abs(heightValue - rootBox.height) <= 0.01;
+    if (!coversRoot) return false;
+
+    const fill = (node.getAttribute('fill') || parseStyleDeclaration(node.getAttribute('style') || '').fill || '').trim().toLowerCase();
+    const stroke = (node.getAttribute('stroke') || parseStyleDeclaration(node.getAttribute('style') || '').stroke || '').trim().toLowerCase();
+    return Boolean(fill) && fill !== 'none' && (!stroke || stroke === 'none');
+  };
+
+  const removeSvgCanvasBackground = (svgText) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText || '', 'image/svg+xml');
+    const svg = doc.querySelector('svg');
+    if (!svg || doc.querySelector('parsererror')) return svgText;
+
+    Array.from(svg.children).forEach(child => {
+      if (isSvgCanvasBackgroundRect(child, svg)) child.remove();
+    });
+
+    return new XMLSerializer().serializeToString(svg);
   };
 
   const splitSvgPathSubpaths = (d) => {
@@ -6813,6 +7234,137 @@ export default function App() {
     return cleanClipperPaths(solution).map(fromClipperPath);
   };
 
+  const getImportedSvgHitMaskCacheKey = (design) => JSON.stringify({
+    svgText: design.svgText || '',
+    sourceBox: design.sourceBox || null
+  });
+
+  const getImportedSvgHitMaskSvgText = (design) => {
+    const cleanedSvgText = removeSvgCanvasBackground(String(design.svgText || ''));
+
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(cleanedSvgText, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+      if (!svg || doc.querySelector('parsererror')) return cleanedSvgText;
+
+      const rootBox = getSvgRootBox(svg);
+      const sourceBox = design.sourceBox || rootBox;
+      svg.setAttribute('viewBox', `${sourceBox.x} ${sourceBox.y} ${sourceBox.width} ${sourceBox.height}`);
+      svg.setAttribute('width', String(sourceBox.width));
+      svg.setAttribute('height', String(sourceBox.height));
+      svg.setAttribute('preserveAspectRatio', 'none');
+      return new XMLSerializer().serializeToString(svg);
+    } catch {
+      return cleanedSvgText;
+    }
+  };
+
+  const createImportedSvgHitMask = (design) => new Promise((resolve, reject) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      reject(new Error('Browser APIs are not available.'));
+      return;
+    }
+
+    const bounds = getInteriorObjectBounds(design);
+    const aspect = Math.max(0.05, Math.min(20, bounds.width / Math.max(0.0001, bounds.height)));
+    const maskWidth = aspect >= 1
+      ? IMPORTED_SVG_HIT_MASK_SIZE
+      : Math.max(24, Math.round(IMPORTED_SVG_HIT_MASK_SIZE * aspect));
+    const maskHeight = aspect >= 1
+      ? Math.max(24, Math.round(IMPORTED_SVG_HIT_MASK_SIZE / aspect))
+      : IMPORTED_SVG_HIT_MASK_SIZE;
+    const image = new window.Image();
+
+    image.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = maskWidth;
+        canvas.height = maskHeight;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) {
+          reject(new Error('Could not create hit-test canvas.'));
+          return;
+        }
+
+        ctx.clearRect(0, 0, maskWidth, maskHeight);
+        ctx.drawImage(image, 0, 0, maskWidth, maskHeight);
+        const rgba = ctx.getImageData(0, 0, maskWidth, maskHeight).data;
+        const alpha = new Uint8Array(maskWidth * maskHeight);
+        for (let i = 0; i < alpha.length; i++) alpha[i] = rgba[i * 4 + 3];
+        resolve({ status: 'ready', width: maskWidth, height: maskHeight, alpha });
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    image.onerror = () => reject(new Error('Could not load SVG hit-test image.'));
+    image.src = svgTextToDataUrl(getImportedSvgHitMaskSvgText(design));
+  });
+
+  const ensureImportedSvgHitMask = (design) => {
+    if (!isImportedInteriorSvg(design) || !design.svgText) return null;
+
+    const cacheKey = getImportedSvgHitMaskCacheKey(design);
+    const cached = importedSvgHitMaskCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    const loadingRecord = { status: 'loading' };
+    importedSvgHitMaskCacheRef.current.set(cacheKey, loadingRecord);
+
+    createImportedSvgHitMask(design)
+      .then(mask => {
+        if (importedSvgHitMaskCacheRef.current.size > 60) importedSvgHitMaskCacheRef.current.clear();
+        importedSvgHitMaskCacheRef.current.set(cacheKey, mask);
+        setImportedSvgHitMaskVersion(version => version + 1);
+      })
+      .catch(() => {
+        importedSvgHitMaskCacheRef.current.set(cacheKey, { status: 'failed' });
+        setImportedSvgHitMaskVersion(version => version + 1);
+      });
+
+    return loadingRecord;
+  };
+
+  const hitTestImportedSvgMask = (design, point, toleranceMm = 0) => {
+    const mask = ensureImportedSvgHitMask(design);
+    const bounds = getInteriorObjectBounds(design);
+    const inverseMatrix = invertMatrix(getInteriorDesignTransformMatrix(design, bounds));
+    if (!inverseMatrix) return null;
+
+    const [localX, localY] = applyMatrix(inverseMatrix, [point.x, point.y]);
+    if (
+      localX < bounds.x - toleranceMm
+      || localX > bounds.x + bounds.width + toleranceMm
+      || localY < bounds.y - toleranceMm
+      || localY > bounds.y + bounds.height + toleranceMm
+    ) {
+      return false;
+    }
+
+    if (!mask || mask.status === 'loading') return true;
+    if (mask.status !== 'ready') return null;
+
+    const u = (localX - bounds.x) / Math.max(0.0001, bounds.width);
+    const v = (localY - bounds.y) / Math.max(0.0001, bounds.height);
+    const maskX = Math.round(u * (mask.width - 1));
+    const maskY = Math.round(v * (mask.height - 1));
+    const mmPerMaskPixel = Math.max(
+      bounds.width / Math.max(1, mask.width),
+      bounds.height / Math.max(1, mask.height)
+    );
+    const radius = Math.max(0, Math.ceil(toleranceMm / Math.max(0.0001, mmPerMaskPixel)));
+
+    for (let y = Math.max(0, maskY - radius); y <= Math.min(mask.height - 1, maskY + radius); y++) {
+      for (let x = Math.max(0, maskX - radius); x <= Math.min(mask.width - 1, maskX + radius); x++) {
+        if (radius > 0 && Math.hypot(x - maskX, y - maskY) > radius) continue;
+        if (mask.alpha[y * mask.width + x] > 8) return true;
+      }
+    }
+
+    return false;
+  };
+
   const getImportedSvgHitContours = (design) => {
     if (!isImportedInteriorSvg(design) || !design.svgText) return [];
 
@@ -6847,6 +7399,7 @@ export default function App() {
         const tag = node.tagName.toLowerCase();
         const style = resolveSvgNodeStyle(node, parentStyle, cssRules);
 
+        if (isSvgCanvasBackgroundRect(node, svg)) return;
         if (isHiddenSvgStyle(style) || tag === 'defs' || tag === 'style' || tag === 'title' || tag === 'desc') return;
 
         if (tag === 'use') {
@@ -6933,10 +7486,10 @@ export default function App() {
     const safeSourceBox = sourceBox || design.sourceBox || { x: 0, y: 0, width: bounds.width, height: bounds.height };
     const scaleX = bounds.width / Math.max(0.0001, safeSourceBox.width);
     const scaleY = bounds.height / Math.max(0.0001, safeSourceBox.height);
-    const placePoint = ([px, py]) => [
+    const placePoint = ([px, py]) => transformInteriorDesignPoint(design, [
       bounds.x + (px - safeSourceBox.x) * scaleX,
       bounds.y + (py - safeSourceBox.y) * scaleY
-    ];
+    ], bounds);
 
     return localContours.map(contour => ({
       ...contour,
@@ -6945,6 +7498,9 @@ export default function App() {
   };
 
   const isPointNearImportedSvgVisibleSurface = (design, point, toleranceMm = 0) => {
+    const maskHit = hitTestImportedSvgMask(design, point, toleranceMm);
+    if (maskHit !== null) return maskHit;
+
     const contours = getImportedSvgHitContours(design);
     if (!contours.length) return true;
 
@@ -7185,48 +7741,51 @@ export default function App() {
   const getInteriorShapeContours = (design) => {
     const bounds = getInteriorObjectBounds(design);
     const thickness = Math.max(0.5, n(design.thickness, 8));
+    const applyDesignTransform = (contours) => contours
+      .map(points => transformInteriorDesignPoints(design, points, bounds))
+      .filter(points => points.length >= 2);
 
     if (design.kind === 'rect') {
-      return [[
+      return applyDesignTransform([[
         [bounds.x, bounds.y],
         [bounds.x + bounds.width, bounds.y],
         [bounds.x + bounds.width, bounds.y + bounds.height],
         [bounds.x, bounds.y + bounds.height]
-      ]];
+      ]]);
     }
 
     if (design.kind === 'ellipse') {
-      return [Array.from({ length: 160 }, (_, index) => {
+      return applyDesignTransform([Array.from({ length: 160 }, (_, index) => {
         const angle = index * Math.PI * 2 / 160;
         return [
           bounds.x + bounds.width / 2 + Math.cos(angle) * bounds.width / 2,
           bounds.y + bounds.height / 2 + Math.sin(angle) * bounds.height / 2
         ];
-      })];
+      })]);
     }
 
     if (design.kind === 'polygon') {
-      return [design.points || []];
+      return applyDesignTransform([design.points || []]);
     }
 
     if (design.kind === 'line') {
-      return offsetOpenStrokeContours(
+      return applyDesignTransform(offsetOpenStrokeContours(
         [[n(design.x1, 0), n(design.y1, 0)], [n(design.x2, 0), n(design.y2, 0)]],
         thickness,
         'butt'
-      );
+      ));
     }
 
     if (design.kind === 'arc') {
-      return offsetOpenStrokeContours(sampleInteriorThreePointArc(design), thickness, 'butt');
+      return applyDesignTransform(offsetOpenStrokeContours(sampleInteriorThreePointArc(design), thickness, 'butt'));
     }
 
     if (design.kind === 'eraser') {
-      return offsetOpenStrokeContours(design.points || [], thickness, 'round');
+      return applyDesignTransform(offsetOpenStrokeContours(design.points || [], thickness, 'round'));
     }
 
     if (design.kind === 'text') {
-      return flattenInteriorTextPath(design, 0.12);
+      return applyDesignTransform(flattenInteriorTextPath(design, 0.12));
     }
 
     return [];
@@ -7249,7 +7808,7 @@ export default function App() {
           const textContours = getInteriorTextBooleanContours(design);
 
           textContours.forEach((textContour) => {
-            const cleaned = cleanDxfPoints(textContour.points, true);
+            const cleaned = cleanDxfPoints(transformInteriorDesignPoints(design, textContour.points), true);
             if (cleaned.length < 3) return;
             const isHole = textContour.role === 'hole';
             const materialColor = design.color === 'black' || isHole ? 'black' : 'white';
@@ -7275,7 +7834,7 @@ export default function App() {
           });
 
           getInteriorTextBridgeContours(design, textContours).forEach((bridgePoints, bridgeIndex) => {
-            const cleaned = cleanDxfPoints(bridgePoints, true);
+            const cleaned = cleanDxfPoints(transformInteriorDesignPoints(design, bridgePoints), true);
             if (cleaned.length < 3) return;
 
             contours.push({
@@ -7335,10 +7894,11 @@ export default function App() {
       const scaleX = designWidth / (sourceBox.width || 1);
       const scaleY = designHeight / (sourceBox.height || 1);
       const pathTolerance = Math.max(0.02, 0.08 / Math.max(scaleX, scaleY));
-      const placePoint = ([x, y]) => [
+      const bounds = getInteriorObjectBounds(design);
+      const placePoint = ([x, y]) => transformInteriorDesignPoint(design, [
         n(design.x, 0) + (x - sourceBox.x) * scaleX,
         n(design.y, 0) + (y - sourceBox.y) * scaleY
-      ];
+      ], bounds);
       const layer = `DESIGN_${designIndex + 1}`;
       const cssRules = parseSvgCssRules(svg);
 
@@ -7373,6 +7933,7 @@ export default function App() {
         const tag = node.tagName.toLowerCase();
         const style = resolveSvgNodeStyle(node, parentStyle, cssRules);
 
+        if (isSvgCanvasBackgroundRect(node, svg)) return;
         if (isHiddenSvgStyle(style) || tag === 'defs' || tag === 'style' || tag === 'title' || tag === 'desc') return;
 
         if (tag === 'use') {
@@ -9036,7 +9597,7 @@ export default function App() {
 
   const getInlineSvgRenderData = (svgText) => {
     const parser = new DOMParser();
-    const doc = parser.parseFromString(svgText || '', 'image/svg+xml');
+    const doc = parser.parseFromString(removeSvgCanvasBackground(svgText || ''), 'image/svg+xml');
     const svg = doc.querySelector('svg');
     if (!svg || doc.querySelector('parsererror')) return null;
 
@@ -9089,11 +9650,17 @@ export default function App() {
 
   const renderInteriorDesignBody = (design, interactiveDesign = null) => {
     if (isInteriorGroup(design)) {
-      return (design.children || []).map(child => (
-        <g key={child.id} pointerEvents={interactiveDesign ? 'auto' : 'none'}>
-          {renderInteriorDesignBody(child, interactiveDesign)}
+      const bounds = getInteriorObjectBounds(design);
+      const objectTransform = getInteriorSvgTransform(design, bounds);
+      return (
+        <g transform={objectTransform || undefined}>
+          {(design.children || []).map(child => (
+            <g key={child.id} pointerEvents={interactiveDesign ? 'auto' : 'none'}>
+              {renderInteriorDesignBody(child, interactiveDesign)}
+            </g>
+          ))}
         </g>
-      ));
+      );
     }
 
     const bounds = getInteriorObjectBounds(design);
@@ -9104,6 +9671,7 @@ export default function App() {
     const commonClipPath = getInteriorClipPolygonsForDesign(design).length
       ? `url(#${getInteriorDesignClipPathId(design.id)})`
       : undefined;
+    const objectTransform = getInteriorSvgTransform(design, bounds);
     const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
     const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
     const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
@@ -9125,7 +9693,7 @@ export default function App() {
         const hitPadding = IMPORTED_SVG_HIT_TOLERANCE_PX / Math.max(0.0001, scale * viewZoom);
 
         return (
-          <g clipPath={commonClipPath}>
+          <g clipPath={commonClipPath} transform={objectTransform || undefined}>
             <rect
               x={(x - hitPadding) * scale}
               y={(y - hitPadding) * scale}
@@ -9159,6 +9727,7 @@ export default function App() {
           height={itemHeight * scale}
           preserveAspectRatio="none"
           clipPath={commonClipPath}
+          transform={objectTransform || undefined}
           {...eventProps}
           style={{
             ...(cursorStyle || {}),
@@ -9169,23 +9738,23 @@ export default function App() {
     }
 
     if (design.kind === 'rect') {
-      return <rect x={x * scale} y={y * scale} width={itemWidth * scale} height={itemHeight * scale} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+      return <rect x={x * scale} y={y * scale} width={itemWidth * scale} height={itemHeight * scale} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'ellipse') {
-      return <ellipse cx={(x + itemWidth / 2) * scale} cy={(y + itemHeight / 2) * scale} rx={(itemWidth / 2) * scale} ry={(itemHeight / 2) * scale} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+      return <ellipse cx={(x + itemWidth / 2) * scale} cy={(y + itemHeight / 2) * scale} rx={(itemWidth / 2) * scale} ry={(itemHeight / 2) * scale} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'polygon') {
-      return <polygon points={polygonPoints(design.points || [])} fill={shapeFill} clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+      return <polygon points={polygonPoints(design.points || [])} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'line') {
-      return <line x1={n(design.x1, 0) * scale} y1={n(design.y1, 0) * scale} x2={n(design.x2, 0) * scale} y2={n(design.y2, 0) * scale} stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+      return <line x1={n(design.x1, 0) * scale} y1={n(design.y1, 0) * scale} x2={n(design.x2, 0) * scale} y2={n(design.y2, 0) * scale} stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'arc') {
-      return <path d={arcPath} fill="none" stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" strokeLinejoin="round" clipPath={commonClipPath} {...eventProps} style={cursorStyle} />;
+      return <path d={arcPath} fill="none" stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" strokeLinejoin="round" clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'eraser') {
@@ -9202,6 +9771,7 @@ export default function App() {
           strokeLinecap="round"
           strokeLinejoin="round"
           clipPath={commonClipPath}
+          transform={objectTransform || undefined}
           {...eventProps}
           style={cursorStyle}
         />
@@ -9213,7 +9783,7 @@ export default function App() {
       const outlineMarkup = getInteriorTextPreviewPath(design);
       const bridgeContours = getInteriorTextBridgeContours(design);
       return (
-        <g clipPath={commonClipPath} {...eventProps} style={cursorStyle}>
+        <g clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle}>
           <rect
             x={x * scale}
             y={y * scale}
@@ -9774,6 +10344,63 @@ export default function App() {
                   </label>
                 ))}
 
+                <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                  R
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={interiorDimensionDrafts.rotation ?? formatInteriorDimensionInput(n(selectedInteriorDesign.rotation, 0))}
+                    onFocus={() => {
+                      setInteriorDimensionDrafts(prev => ({
+                        ...prev,
+                        rotation: formatInteriorDimensionInput(n(selectedInteriorDesign.rotation, 0))
+                      }));
+                    }}
+                    onChange={e => setInteriorSelectionRotation(e.target.value)}
+                    onBlur={handleInteriorRotationBlur}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') e.currentTarget.blur();
+                    }}
+                    className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                    title="Rotation angle"
+                  />
+                </label>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => transformInteriorSelection({ rotationDelta: -90 })}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    title="Rotate 90 degrees counter-clockwise"
+                  >
+                    <RotateCcw size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => transformInteriorSelection({ rotationDelta: 90 })}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    title="Rotate 90 degrees clockwise"
+                  >
+                    <RotateCw size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => transformInteriorSelection({ mirrorX: true })}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    title="Mirror horizontally"
+                  >
+                    <FlipHorizontal size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => transformInteriorSelection({ mirrorY: true })}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    title="Mirror vertically"
+                  >
+                    <FlipVertical size={14} />
+                  </button>
+                </div>
+
                 {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc' || selectedInteriorDesign.kind === 'eraser') && (
                   <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
                     T
@@ -9954,15 +10581,28 @@ export default function App() {
                 e.preventDefault();
                 e.stopPropagation();
               }}
+              onDragOver={(e) => {
+                if (Array.from(e.dataTransfer.types || []).includes(INTERIOR_SVG_LIBRARY_DRAG_TYPE)) {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                }
+              }}
+              onDrop={handleInteriorSvgLibraryDrop}
             >
               <svg
                 width="100%"
                 height="100%"
                 viewBox={`${currentViewBox.x} ${currentViewBox.y} ${currentViewBox.width} ${currentViewBox.height}`}
                 className="h-full w-full"
-              onWheel={handleViewportWheel}
-              onMouseDown={handleInteriorCanvasMouseDown}
+                onWheel={handleViewportWheel}
+                onMouseDown={handleInteriorCanvasMouseDown}
                 onMouseMove={handleInteriorPreviewMouseMove}
+                onDragOver={(e) => {
+                  if (Array.from(e.dataTransfer.types || []).includes(INTERIOR_SVG_LIBRARY_DRAG_TYPE)) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'copy';
+                  }
+                }}
                 onMouseUp={() => {
                   finishInteriorInteraction();
                   finishInteriorSelectionBox();
@@ -10052,6 +10692,7 @@ export default function App() {
                   const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
                   const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
                   const arcPath = arcPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ');
+                  const objectTransform = getInteriorSvgTransform(design, bounds);
 
                   return (
                     <g key={design.id} pointerEvents={activeInteriorShapeTool ? 'none' : 'auto'}>
@@ -10073,6 +10714,7 @@ export default function App() {
                           height={itemHeight * scale}
                           fill={shapeFill}
                           clipPath={commonClipPath}
+                          transform={objectTransform || undefined}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
                           onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
                           style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
@@ -10087,6 +10729,7 @@ export default function App() {
                           ry={(itemHeight / 2) * scale}
                           fill={shapeFill}
                           clipPath={commonClipPath}
+                          transform={objectTransform || undefined}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
                           onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
                           style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
@@ -10098,6 +10741,7 @@ export default function App() {
                           points={polygonPoints(design.points || [])}
                           fill={shapeFill}
                           clipPath={commonClipPath}
+                          transform={objectTransform || undefined}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
                           onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
                           style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
@@ -10114,6 +10758,7 @@ export default function App() {
                           strokeWidth={strokeWidth}
                           strokeLinecap="butt"
                           clipPath={commonClipPath}
+                          transform={objectTransform || undefined}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
                           onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
                           style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
@@ -10129,6 +10774,7 @@ export default function App() {
                           strokeLinecap="butt"
                           strokeLinejoin="round"
                           clipPath={commonClipPath}
+                          transform={objectTransform || undefined}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
                           onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
                           style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
@@ -10163,10 +10809,10 @@ export default function App() {
                               y={handle.y * scale - 5 / viewZoom}
                               width={10 / viewZoom}
                               height={10 / viewZoom}
-                              fill="#2563eb"
+                              fill={handle.id === 'rotate' ? '#ffffff' : '#2563eb'}
                               stroke="white"
                               strokeWidth={1 / viewZoom}
-                              onMouseDown={(e) => startInteriorDesignDrag(e, design, 'resize', handle.id)}
+                              onMouseDown={(e) => startInteriorDesignDrag(e, design, handle.id === 'rotate' ? 'rotate' : 'resize', handle.id)}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 if (activeInteriorShapeTool) return;
@@ -10229,10 +10875,10 @@ export default function App() {
                         y={handle.y * scale - 5 / viewZoom}
                         width={10 / viewZoom}
                         height={10 / viewZoom}
-                        fill="#2563eb"
+                        fill={handle.id === 'rotate' ? '#ffffff' : '#2563eb'}
                         stroke="white"
                         strokeWidth={1 / viewZoom}
-                        onMouseDown={(e) => startInteriorSelectionTransform(e, 'multi-resize', handle.id)}
+                        onMouseDown={(e) => startInteriorSelectionTransform(e, handle.id === 'rotate' ? 'multi-rotate' : 'multi-resize', handle.id)}
                         onClick={(e) => e.stopPropagation()}
                         style={{ cursor: handle.cursor }}
                       />
@@ -10469,152 +11115,237 @@ export default function App() {
               </svg>
 
               <div
-                className="absolute left-3 top-3 z-30 flex max-w-[calc(100%-1.5rem)] items-start gap-2"
+                className="absolute left-3 top-3 z-30 max-w-[calc(100%-1.5rem)]"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
                 onWheel={(e) => e.stopPropagation()}
+                onWheelCapture={(e) => e.stopPropagation()}
               >
-                <details className="relative">
-                  <summary className="list-none cursor-pointer select-none rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-white">
-                    Margin
-                  </summary>
-                  <div className="absolute left-0 top-10 z-40 w-52 rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg">
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2 font-medium">
-                        <input
-                          type="checkbox"
-                          checked={interiorClipEnabled}
-                          onChange={e => setInteriorClipEnabled(e.target.checked)}
-                        />
-                        Clip white designs
-                      </label>
-                      <div>
-                        <label className="text-[11px] text-slate-500">Distance (mm)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          value={interiorMarginInput}
-                          onFocus={() => setShowInteriorMarginGuide(true)}
-                          onChange={e => {
-                            setShowInteriorMarginGuide(true);
-                            setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
-                          }}
-                          onBlur={handleInteriorMarginBlur}
-                          className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </details>
+                <div className="flex items-start gap-2">
+                  {[
+                    ['margin', 'Margin'],
+                    ['pattern', 'Pattern'],
+                    ['svgLibrary', 'SVG Library']
+                  ].map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setInteriorOverlayPanel(prev => prev === id ? null : id)}
+                      className={[
+                        'rounded-lg border px-3 py-2 text-xs font-semibold shadow-sm transition',
+                        interiorOverlayPanel === id
+                          ? 'border-blue-200 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 bg-white/95 text-slate-700 hover:bg-white'
+                      ].join(' ')}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
 
-                <details className="relative">
-                  <summary className="list-none cursor-pointer select-none rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-white">
-                    Pattern
-                  </summary>
-                  <div className="absolute left-0 top-10 z-40 max-h-[calc(100vh-11rem)] w-64 overflow-y-auto rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg">
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2 font-medium">
-                        <input
-                          type="checkbox"
-                          checked={patternEnabled}
-                          onChange={e => setPatternEnabled(e.target.checked)}
-                        />
-                        Enable pattern
-                      </label>
-                      <div>
-                        <label className="text-[11px] text-slate-500">Mode</label>
-                        <select
-                          value={patternMode}
-                          onChange={e => setPatternMode(e.target.value)}
-                          className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                        >
-                          <option value="random">Random slots</option>
-                          <option value="alignedSlots">Aligned slots</option>
-                        </select>
-                      </div>
-                      {patternMode === 'alignedSlots' && (
-                        <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-medium text-slate-700">
+                {interiorOverlayPanel && (
+                  <div className="mt-2 max-h-[calc(100vh-11rem)] overflow-y-auto rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg">
+                    {interiorOverlayPanel === 'margin' && (
+                      <div className="w-52 space-y-2">
+                        <label className="flex items-center gap-2 font-medium">
                           <input
                             type="checkbox"
-                            checked={alignedSlotStaggerBreaks}
-                            onChange={e => setAlignedSlotStaggerBreaks(e.target.checked)}
+                            checked={interiorClipEnabled}
+                            onChange={e => setInteriorClipEnabled(e.target.checked)}
                           />
-                          Stagger breaks
+                          Clip white designs
                         </label>
-                      )}
-                      {(patternMode === 'random'
-                        ? [
-                          ['Thickness', patternThickness, setPatternThickness, 1, null, null],
-                          ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
-                          ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
-                          ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
-                          ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
-                          ['Seed', patternSeed, setPatternSeed, 1, null, null]
-                        ]
-                        : [
-                          ['Rows count', alignedSlotRows, setAlignedSlotRows, 1, null, null],
-                          ...(bottomPanelEnabled ? [['Bottom panel rows', alignedSlotBottomRows, setAlignedSlotBottomRows, 1, null, null]] : []),
-                          ['Thickness', patternThickness, setPatternThickness, 1, null, null],
-                          ['Break width', alignedSlotBreakWidth, setAlignedSlotBreakWidth, 0, null, null],
-                          ['Left inset', alignedSlotLeftInset, setAlignedSlotLeftInset, 0, null, null],
-                          ['Right inset', alignedSlotRightInset, setAlignedSlotRightInset, 0, null, null],
-                          ['Min segment', alignedSlotMinLength, setAlignedSlotMinLength, 1, null, null],
-                          ['Row spacing', alignedSlotUseRowSpacing ? alignedSlotRowSpacing : formatPositionDistance(getAlignedSlotEqualRowSpacing()), setAlignedSlotRowSpacing, 0, alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing, !alignedSlotUseRowSpacing]
-                        ]).map(([label, value, setter, min, randomEnabled, setRandomEnabled, readOnly = false]) => (
-                          <div key={label}>
-                            <div className="flex items-center justify-between gap-2">
-                              <label className="text-[11px] text-slate-500">{label}{label === 'Rows count' || label === 'Bottom panel rows' ? '' : ' (mm)'}</label>
-                              {setRandomEnabled && (
-                                <label className="flex items-center gap-1 text-[10px] text-slate-500">
-                                  <input
-                                    type="checkbox"
-                                    checked={randomEnabled}
-                                    onChange={e => {
-                                      const checked = e.target.checked;
-                                      if (patternMode === 'alignedSlots' && label === 'Row spacing' && checked) {
-                                        const displayedSpacing = n(value, getAlignedSlotEqualRowSpacing());
-                                        setAlignedSlotRowSpacing(displayedSpacing);
-                                      }
-                                      setRandomEnabled(checked);
-                                    }}
-                                  />
-                                  {patternMode === 'alignedSlots' && label === 'Row spacing' ? 'Use fixed spacing' : 'Random'}
-                                </label>
-                              )}
-                            </div>
+                        <div>
+                          <label className="text-[11px] text-slate-500">Distance (mm)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={interiorMarginInput}
+                            onFocus={() => setShowInteriorMarginGuide(true)}
+                            onChange={e => {
+                              setShowInteriorMarginGuide(true);
+                              setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
+                            }}
+                            onBlur={handleInteriorMarginBlur}
+                            className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {interiorOverlayPanel === 'pattern' && (
+                      <div className="w-64 space-y-2">
+                        <label className="flex items-center gap-2 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={patternEnabled}
+                            onChange={e => setPatternEnabled(e.target.checked)}
+                          />
+                          Enable pattern
+                        </label>
+                        <div>
+                          <label className="text-[11px] text-slate-500">Mode</label>
+                          <select
+                            value={patternMode}
+                            onChange={e => setPatternMode(e.target.value)}
+                            className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                          >
+                            <option value="random">Random slots</option>
+                            <option value="alignedSlots">Aligned slots</option>
+                          </select>
+                        </div>
+                        {patternMode === 'alignedSlots' && (
+                          <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-medium text-slate-700">
                             <input
-                              type="number"
-                              min={min}
-                              value={value}
-                              readOnly={readOnly}
-                              onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
-                              onBlur={() => {
-                                if (!readOnly) handleNumberBlur(setter, value, min, Infinity, min);
-                              }}
-                              className={['mt-1 w-full rounded-md border p-1.5 text-sm text-slate-900', readOnly ? 'bg-slate-100' : 'bg-white'].join(' ')}
+                              type="checkbox"
+                              checked={alignedSlotStaggerBreaks}
+                              onChange={e => setAlignedSlotStaggerBreaks(e.target.checked)}
                             />
-                          </div>
-                        ))}
-                      <label className="flex items-center gap-2 font-medium">
-                        <input
-                          type="checkbox"
-                          checked={patternRoundedEnds}
-                          onChange={e => setPatternRoundedEnds(e.target.checked)}
-                        />
-                        Rounded ends
-                      </label>
-                      {patternMode === 'random' && (
-                        <button
-                          type="button"
-                          onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
-                          className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            Stagger breaks
+                          </label>
+                        )}
+                        {(patternMode === 'random'
+                          ? [
+                            ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                            ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
+                            ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
+                            ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
+                            ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
+                            ['Seed', patternSeed, setPatternSeed, 1, null, null]
+                          ]
+                          : [
+                            ['Rows count', alignedSlotRows, setAlignedSlotRows, 1, null, null],
+                            ...(bottomPanelEnabled ? [['Bottom panel rows', alignedSlotBottomRows, setAlignedSlotBottomRows, 1, null, null]] : []),
+                            ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                            ['Break width', alignedSlotBreakWidth, setAlignedSlotBreakWidth, 0, null, null],
+                            ['Left inset', alignedSlotLeftInset, setAlignedSlotLeftInset, 0, null, null],
+                            ['Right inset', alignedSlotRightInset, setAlignedSlotRightInset, 0, null, null],
+                            ['Min segment', alignedSlotMinLength, setAlignedSlotMinLength, 1, null, null],
+                            ['Row spacing', alignedSlotUseRowSpacing ? alignedSlotRowSpacing : formatPositionDistance(getAlignedSlotEqualRowSpacing()), setAlignedSlotRowSpacing, 0, alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing, !alignedSlotUseRowSpacing]
+                          ]).map(([label, value, setter, min, randomEnabled, setRandomEnabled, readOnly = false]) => (
+                            <div key={label}>
+                              <div className="flex items-center justify-between gap-2">
+                                <label className="text-[11px] text-slate-500">{label}{label === 'Rows count' || label === 'Bottom panel rows' ? '' : ' (mm)'}</label>
+                                {setRandomEnabled && (
+                                  <label className="flex items-center gap-1 text-[10px] text-slate-500">
+                                    <input
+                                      type="checkbox"
+                                      checked={randomEnabled}
+                                      onChange={e => {
+                                        const checked = e.target.checked;
+                                        if (patternMode === 'alignedSlots' && label === 'Row spacing' && checked) {
+                                          const displayedSpacing = n(value, getAlignedSlotEqualRowSpacing());
+                                          setAlignedSlotRowSpacing(displayedSpacing);
+                                        }
+                                        setRandomEnabled(checked);
+                                      }}
+                                    />
+                                    {patternMode === 'alignedSlots' && label === 'Row spacing' ? 'Use fixed spacing' : 'Random'}
+                                  </label>
+                                )}
+                              </div>
+                              <input
+                                type="number"
+                                min={min}
+                                value={value}
+                                readOnly={readOnly}
+                                onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
+                                onBlur={() => {
+                                  if (!readOnly) handleNumberBlur(setter, value, min, Infinity, min);
+                                }}
+                                className={['mt-1 w-full rounded-md border p-1.5 text-sm text-slate-900', readOnly ? 'bg-slate-100' : 'bg-white'].join(' ')}
+                              />
+                            </div>
+                          ))}
+                        <label className="flex items-center gap-2 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={patternRoundedEnds}
+                            onChange={e => setPatternRoundedEnds(e.target.checked)}
+                          />
+                          Rounded ends
+                        </label>
+                        {patternMode === 'random' && (
+                          <button
+                            type="button"
+                            onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
+                            className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          >
+                            Regenerate
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {interiorOverlayPanel === 'svgLibrary' && (
+                      <div className="w-72 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-[11px] font-medium text-slate-500">Folder</label>
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                            {visibleProjectSvgLibraryItems.length}
+                          </span>
+                        </div>
+                        <select
+                          value={selectedInteriorSvgLibraryFolder}
+                          onChange={e => setSelectedInteriorSvgLibraryFolder(e.target.value)}
+                          className="w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
                         >
-                          Regenerate
-                        </button>
-                      )}
-                    </div>
+                          {projectSvgLibraryFolders.map(folder => (
+                            <option key={folder} value={folder}>{folder}</option>
+                          ))}
+                        </select>
+
+                        {visibleProjectSvgLibraryItems.length ? (
+                          <div
+                            className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-1"
+                            onWheel={(e) => e.stopPropagation()}
+                            onWheelCapture={(e) => e.stopPropagation()}
+                          >
+                            {visibleProjectSvgLibraryItems.map(item => {
+                              const thumbnail = svgLibraryThumbnails[item.id];
+                              return (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  draggable
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.setData(INTERIOR_SVG_LIBRARY_DRAG_TYPE, item.id);
+                                    e.dataTransfer.setData('text/plain', item.id);
+                                    e.dataTransfer.effectAllowed = 'copy';
+                                  }}
+                                  onClick={async () => {
+                                    const svgText = await loadProjectSvgLibraryItemText(item);
+                                    addInteriorSvgDesignFromText(svgText, item.name);
+                                  }}
+                                  className="rounded-md border border-slate-200 bg-slate-50 p-1.5 text-left text-[11px] text-slate-700 transition hover:border-blue-200 hover:bg-blue-50"
+                                  title="Click to insert centered, or drag into the workspace"
+                                >
+                                  <span className="flex h-16 w-full items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
+                                    {thumbnail ? (
+                                      <img
+                                        src={thumbnail}
+                                        alt=""
+                                        className="h-full w-full object-contain"
+                                        draggable={false}
+                                      />
+                                    ) : (
+                                      <span className="text-[10px] font-medium text-slate-400">Loading</span>
+                                    )}
+                                  </span>
+                                  <span className="mt-1 block truncate font-medium">{item.name}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-500">
+                            Add SVG files to <span className="font-mono text-slate-600">src/assets/svg-library</span>.
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </details>
+                )}
               </div>
 
               <div
@@ -11403,12 +12134,9 @@ export default function App() {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-2">
             <button onClick={downloadDXF} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-lg transition shadow-sm">
               Export DXF
-            </button>
-            <button onClick={downloadFusionDXF} className="w-full bg-blue-700 hover:bg-blue-600 text-white font-semibold py-2.5 rounded-lg transition shadow-sm">
-              Export Fusion DXF
             </button>
           </div>
 
