@@ -11,15 +11,10 @@ import {
 import { interiorFontOptions } from './interiorFonts';
 import {
   Ruler,
-  MousePointer2,
-  Move,
   Plus,
   Trash2,
-  Image,
-  Type,
-  Grid3X3,
-  Upload,
   Wrench,
+  MousePointer2,
   ArrowUp,
   ArrowDown,
   PenLine,
@@ -28,6 +23,9 @@ import {
   Unlock,
   Square,
   Circle,
+  Type,
+  Grid3X3,
+  Upload,
   Minus,
   Eraser,
   RotateCcw,
@@ -61,7 +59,9 @@ const projectSvgLibraryFolders = Array.from(new Set(projectSvgLibraryItems.map(i
   .sort((a, b) => a.localeCompare(b));
 
 const INTERIOR_SVG_LIBRARY_DRAG_TYPE = 'application/x-interior-svg-library';
+const INTERIOR_BOARD_DRAG_TYPE = 'application/x-interior-saved-board';
 const SVG_LIBRARY_THUMB_SIZE = 96;
+const INTERIOR_IMPORTED_SVG_INITIAL_SCALE = 4;
 const projectSvgLibraryTextCache = new Map();
 
 const loadProjectSvgLibraryItemText = async (item) => {
@@ -138,6 +138,17 @@ export default function App() {
   const [interiorOverlayPanel, setInteriorOverlayPanel] = useState(null);
   const [selectedInteriorSvgLibraryFolder, setSelectedInteriorSvgLibraryFolder] = useState(projectSvgLibraryFolders[0] || 'General');
   const [svgLibraryThumbnails, setSvgLibraryThumbnails] = useState({});
+  const [expandedSvgLibraryThumbnail, setExpandedSvgLibraryThumbnail] = useState(null);
+  const [savedInteriorBoards, setSavedInteriorBoards] = useState(() => {
+    if (typeof localStorage === 'undefined') return [];
+    try {
+      const saved = JSON.parse(localStorage.getItem('rectangle-ear-saved-interior-boards') || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showInteriorBoardsMenu, setShowInteriorBoardsMenu] = useState(false);
   const [patternEnabled, setPatternEnabled] = useState(false);
   const [patternMode, setPatternMode] = useState('random');
   const [patternThickness, setPatternThickness] = useState(15);
@@ -193,6 +204,7 @@ export default function App() {
   const [loadedInteriorFonts, setLoadedInteriorFonts] = useState({});
 
   const [activeTool, setActiveTool] = useState(null);
+  const [manualFrameEars, setManualFrameEars] = useState({ added: [], deleted: [] });
 
   // VIEWPORT / CAD CAMERA
   const [viewZoom, setViewZoom] = useState(1);
@@ -211,6 +223,9 @@ export default function App() {
   const interiorMousePointRef = useRef(null);
   const interiorSelectionJustFinishedRef = useRef(false);
   const interiorSuppressNextObjectClickRef = useRef(false);
+  const interiorSvgLibraryDragRef = useRef(false);
+  const interiorSvgLibraryDragItemRef = useRef(null);
+  const interiorBoardDragItemRef = useRef(null);
   const positionMessageTimeoutRef = useRef(null);
   const presentationItemsRef = useRef([]);
   const selectedPresentationItemIdRef = useRef(null);
@@ -604,6 +619,16 @@ export default function App() {
   }, [interiorDesigns]);
 
   useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('rectangle-ear-saved-interior-boards', JSON.stringify(savedInteriorBoards));
+      } catch {
+        // Avoid crashing when browser storage is full.
+      }
+    }
+  }, [savedInteriorBoards]);
+
+  useEffect(() => {
     presentationItemsRef.current = presentationItems;
     if (typeof localStorage !== 'undefined') {
       try {
@@ -891,6 +916,7 @@ export default function App() {
     };
 
     const handleMouseUp = () => {
+      setExpandedSvgLibraryThumbnail(null);
       finishInteriorInteraction();
       setPresentationDrag(prev => {
         if (prev?.startItems && samePresentationItems(prev.startItems, presentationItemsRef.current)) {
@@ -1196,6 +1222,38 @@ export default function App() {
     return [safeWidth - rightEarDepth, topEarDepth];
   };
 
+  const isManualEarDeleted = (orientation, pos, tolerance = 0.5) => (
+    manualFrameEars.deleted.some(ear => (
+      ear.orientation === orientation && Math.abs(n(ear.pos, 0) - pos) <= tolerance
+    ))
+  );
+
+  const getAddedManualEarsForOrientation = (orientation) => (
+    manualFrameEars.added.filter(ear => ear.orientation === orientation)
+  );
+
+  const normalizeEarStart = (start, min, max) => clamp(start, Math.min(min, max), Math.max(min, max));
+
+  const applyManualTopArcEarEdits = (ranges, arc) => {
+    if (!arc) return ranges;
+
+    const filtered = ranges.filter(range => !isManualEarDeleted('top-arc', (range.start + range.end) / 2, 1));
+    const added = getAddedManualEarsForOrientation('top-arc')
+      .map(ear => {
+        const center = clamp(n(ear.pos, 0), 0, arc.arcLength);
+        const start = normalizeEarStart(center - topEarLength / 2, 0, Math.max(0, arc.arcLength - topEarLength));
+        return {
+          start,
+          end: Math.min(arc.arcLength, start + topEarLength),
+          id: ear.id,
+          custom: true
+        };
+      })
+      .filter(range => range.end - range.start > 0.001);
+
+    return [...filtered, ...added].sort((a, b) => a.start - b.start);
+  };
+
   const getTopArcEarRanges = () => {
     const arc = getActiveTopArcData();
     if (!arc || topEarDepth <= 0) return [];
@@ -1208,11 +1266,11 @@ export default function App() {
       if (count === 1) {
         const start = arc.arcLength / 2 - topEarLength / 2;
         ranges.push({ start, end: start + topEarLength });
-        return ranges;
+        return applyManualTopArcEarEdits(ranges, arc);
       }
 
       const usable = arc.arcLength - 2 * topVisibleCornerMargin - topEarLength;
-      if (usable < 0) return [];
+      if (usable < 0) return applyManualTopArcEarEdits([], arc);
 
       const spacing = usable / (count - 1);
 
@@ -1221,11 +1279,11 @@ export default function App() {
         ranges.push({ start, end: start + topEarLength });
       }
 
-      return ranges;
+      return applyManualTopArcEarEdits(ranges, arc);
     }
 
     const usable = arc.arcLength - 2 * topVisibleCornerMargin - topEarLength;
-    if (usable < 0) return [];
+    if (usable < 0) return applyManualTopArcEarEdits([], arc);
 
     let gaps = 1;
     while (usable / gaps > MAX_SPACING) gaps++;
@@ -1238,7 +1296,7 @@ export default function App() {
       ranges.push({ start, end: start + topEarLength });
     }
 
-    return ranges;
+    return applyManualTopArcEarEdits(ranges, arc);
   };
 
   const points = useMemo(() => {
@@ -1337,7 +1395,17 @@ export default function App() {
       }
     }
 
-    return ears;
+    const filteredGeneratedEars = ears.filter(ear => !isManualEarDeleted(ear.orientation, ear.pos));
+    const addedEars = manualFrameEars.added
+      .filter(ear => ['top', 'right', 'bottom', 'left'].includes(ear.orientation))
+      .map(ear => ({
+        orientation: ear.orientation,
+        pos: n(ear.pos, 0),
+        id: ear.id,
+        custom: true
+      }));
+
+    return [...filteredGeneratedEars, ...addedEars];
   }, [
     safeWidth,
     safeHeight,
@@ -1358,6 +1426,7 @@ export default function App() {
     leftEarLength,
     leftEarDepth,
     manualMode,
+    manualFrameEars,
     hEars,
     vEars,
     leftVEars,
@@ -2809,6 +2878,231 @@ export default function App() {
     return bestDist <= snapToleranceMm ? best : null;
   };
 
+  const distanceCanvasPointToSegment = (point, a, b) => {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 0.000001) {
+      return { distance: Math.hypot(point.x - a[0], point.y - a[1]), t: 0 };
+    }
+
+    const t = clamp(((point.x - a[0]) * dx + (point.y - a[1]) * dy) / lengthSq, 0, 1);
+    const px = a[0] + dx * t;
+    const py = a[1] + dy * t;
+    return { distance: Math.hypot(point.x - px, point.y - py), t };
+  };
+
+  const getFrameEarToolTolerance = () => 22 / Math.max(0.0001, scale * viewZoom);
+
+  const getNearestTransformedArcPoint = (arc, point) => {
+    let best = { s: 0, distance: Infinity };
+
+    for (let i = 0; i <= 256; i++) {
+      const s = arc.arcLength * (i / 256);
+      const transformed = transformPoint(arc.pointAt(s, 0));
+      const distance = Math.hypot(point.x - transformed[0], point.y - transformed[1]);
+      if (distance < best.distance) best = { s, distance };
+    }
+
+    return best;
+  };
+
+  const getFrameEarAddTarget = (point) => {
+    const candidates = [];
+
+    const getClearGaps = (edgeStart, edgeEnd, ears, length) => {
+      const sorted = [...ears]
+        .map(ear => ({ start: n(ear.pos, 0), end: n(ear.pos, 0) + length }))
+        .sort((a, b) => a.start - b.start);
+      const gaps = [];
+      let cursor = edgeStart;
+
+      sorted.forEach(ear => {
+        if (ear.start - cursor > 0.001) gaps.push({ start: cursor, end: ear.start });
+        cursor = Math.max(cursor, ear.end);
+      });
+
+      if (edgeEnd - cursor > 0.001) gaps.push({ start: cursor, end: edgeEnd });
+      return gaps;
+    };
+
+    const addLineGapCandidates = (orientation, edgeStart, edgeEnd, fixedAxis, length) => {
+      const edgeMin = Math.min(edgeStart, edgeEnd);
+      const edgeMax = Math.max(edgeStart, edgeEnd);
+      const ears = [...(grouped[orientation] || [])].sort((a, b) => a.pos - b.pos);
+      const gaps = getClearGaps(edgeMin, edgeMax, ears, length);
+
+      gaps.forEach(gap => {
+        const start = orientation === 'top' || orientation === 'bottom'
+          ? [gap.start, fixedAxis]
+          : [fixedAxis, gap.start];
+        const end = orientation === 'top' || orientation === 'bottom'
+          ? [gap.end, fixedAxis]
+          : [fixedAxis, gap.end];
+        const hit = distanceCanvasPointToSegment(point, transformPoint(start), transformPoint(end));
+        const center = (gap.start + gap.end) / 2;
+        candidates.push({
+          orientation,
+          distance: hit.distance,
+          pos: center - length / 2
+        });
+      });
+    };
+
+    const addArcGapCandidates = (arc) => {
+      const sorted = getTopArcEarRanges().sort((a, b) => a.start - b.start);
+      const gaps = [];
+      let cursor = 0;
+
+      sorted.forEach(ear => {
+        if (ear.start - cursor > 0.001) gaps.push({ start: cursor, end: ear.start });
+        cursor = Math.max(cursor, ear.end);
+      });
+
+      if (arc.arcLength - cursor > 0.001) gaps.push({ start: cursor, end: arc.arcLength });
+
+      gaps.forEach(gap => {
+        const center = (gap.start + gap.end) / 2;
+        const hitPoint = transformPoint(arc.pointAt(center, 0));
+        const distance = Math.hypot(point.x - hitPoint[0], point.y - hitPoint[1]);
+        candidates.push({
+          orientation: 'top-arc',
+          distance,
+          pos: center
+        });
+      });
+    };
+
+    const addWholeLineCandidate = (orientation, start, end, length) => {
+      const hit = distanceCanvasPointToSegment(point, transformPoint(start), transformPoint(end));
+      const center = orientation === 'top' || orientation === 'bottom'
+        ? (start[0] + end[0]) / 2
+        : (start[1] + end[1]) / 2;
+      candidates.push({
+        orientation,
+        distance: hit.distance,
+        pos: center - length / 2
+      });
+    };
+
+    if (hasArcTop) {
+      const arc = getActiveTopArcData();
+      if (arc && topEarDepth > 0 && topEarLength > 0) {
+        addArcGapCandidates(arc);
+      }
+    } else if (topEarDepth > 0 && topEarLengthForLayout > 0) {
+      addLineGapCandidates('top', leftEarDepth, safeWidth - rightEarDepth, topEarDepth, topEarLengthForLayout);
+    }
+
+    if (bottomEarDepth > 0 && bottomEarLengthForLayout > 0) {
+      addLineGapCandidates('bottom', leftEarDepth, safeWidth - rightEarDepth, bottomBaseY, bottomEarLengthForLayout);
+    }
+    if (leftEarDepth > 0 && leftEarLength > 0) {
+      const start = getStartPoint();
+      const end = [leftEarDepth, bottomBaseY];
+      if (Math.abs(end[1] - start[1]) >= leftEarLength) {
+        addLineGapCandidates('left', start[1], end[1], leftEarDepth, leftEarLength);
+      } else {
+        addWholeLineCandidate('left', start, end, leftEarLength);
+      }
+    }
+    if (rightEarDepth > 0 && rightEarLength > 0) {
+      const start = getRightTopBasePoint();
+      const end = [safeWidth - rightEarDepth, bottomBaseY];
+      if (Math.abs(end[1] - start[1]) >= rightEarLength) {
+        addLineGapCandidates('right', start[1], end[1], safeWidth - rightEarDepth, rightEarLength);
+      } else {
+        addWholeLineCandidate('right', start, end, rightEarLength);
+      }
+    }
+
+    const best = candidates.sort((a, b) => a.distance - b.distance)[0];
+    return best && best.distance <= getFrameEarToolTolerance() ? best : null;
+  };
+
+  const addManualFrameEar = (target) => {
+    setManualFrameEars(prev => ({
+      added: [...prev.added, { id: crypto.randomUUID(), orientation: target.orientation, pos: target.pos }],
+      deleted: prev.deleted.filter(ear => (
+        ear.orientation !== target.orientation || Math.abs(n(ear.pos, 0) - target.pos) > 1
+      ))
+    }));
+  };
+
+  const getFrameEarDescriptors = () => {
+    const descriptors = [];
+
+    if (hasArcTop) {
+      const arc = getActiveTopArcData();
+      if (arc) {
+        getTopArcEarRanges().forEach(ear => {
+          const centerS = (ear.start + ear.end) / 2;
+          descriptors.push({
+            orientation: 'top-arc',
+            pos: centerS,
+            id: ear.id,
+            custom: Boolean(ear.custom),
+            center: transformPoint(arc.pointAt(centerS, topEarDepth / 2))
+          });
+        });
+      }
+    } else {
+      grouped.top.forEach(ear => {
+        descriptors.push({
+          orientation: 'top',
+          pos: ear.pos,
+          id: ear.id,
+          custom: Boolean(ear.custom),
+          center: transformPoint([ear.pos + topEarLengthForLayout / 2, topEarDepth / 2])
+        });
+      });
+    }
+
+    grouped.right.forEach(ear => descriptors.push({
+      orientation: 'right',
+      pos: ear.pos,
+      id: ear.id,
+      custom: Boolean(ear.custom),
+      center: transformPoint([safeWidth - rightEarDepth / 2, ear.pos + rightEarLength / 2])
+    }));
+
+    grouped.bottom.forEach(ear => descriptors.push({
+      orientation: 'bottom',
+      pos: ear.pos,
+      id: ear.id,
+      custom: Boolean(ear.custom),
+      center: transformPoint([ear.pos + bottomEarLengthForLayout / 2, safeHeight - bottomEarDepth / 2])
+    }));
+
+    grouped.left.forEach(ear => descriptors.push({
+      orientation: 'left',
+      pos: ear.pos,
+      id: ear.id,
+      custom: Boolean(ear.custom),
+      center: transformPoint([leftEarDepth / 2, ear.pos + leftEarLength / 2])
+    }));
+
+    return descriptors;
+  };
+
+  const getFrameEarDeleteTarget = (point) => {
+    const tolerance = Math.max(getFrameEarToolTolerance(), 34 / Math.max(0.0001, scale * viewZoom));
+    const best = getFrameEarDescriptors()
+      .map(ear => ({ ...ear, distance: Math.hypot(point.x - ear.center[0], point.y - ear.center[1]) }))
+      .sort((a, b) => a.distance - b.distance)[0];
+
+    return best && best.distance <= tolerance ? best : null;
+  };
+
+  const deleteManualFrameEar = (target) => {
+    setManualFrameEars(prev => ({
+      added: target.custom ? prev.added.filter(ear => ear.id !== target.id) : prev.added,
+      deleted: target.custom
+        ? prev.deleted
+        : [...prev.deleted, { id: crypto.randomUUID(), orientation: target.orientation, pos: target.pos }]
+    }));
+  };
+
   const getInteriorMeasureSnapPoints = () => {
     const points = [];
     const addPoint = (point) => {
@@ -3315,6 +3609,7 @@ export default function App() {
     }
 
     if (design.kind === 'arc') {
+      const thickness = Math.max(0.5, n(design.thickness, 8));
       const points = [
         [n(design.x1, n(design.x, 0)), n(design.y1, n(design.y, 0))],
         [n(design.x2, n(design.x, 0) + n(design.width, 10) / 2), n(design.y2, n(design.y, 0) - 60)],
@@ -3322,11 +3617,15 @@ export default function App() {
       ];
       const xs = points.map(point => point[0]);
       const ys = points.map(point => point[1]);
+      const minX = Math.min(...xs) - thickness;
+      const minY = Math.min(...ys) - thickness;
+      const maxX = Math.max(...xs) + thickness;
+      const maxY = Math.max(...ys) + thickness;
       return {
-        x: Math.min(...xs),
-        y: Math.min(...ys),
-        width: Math.max(10, Math.max(...xs) - Math.min(...xs)),
-        height: Math.max(10, Math.max(...ys) - Math.min(...ys))
+        x: minX,
+        y: minY,
+        width: Math.max(10, maxX - minX),
+        height: Math.max(10, maxY - minY)
       };
     }
 
@@ -4182,6 +4481,16 @@ export default function App() {
       .filter(points => points.length >= 3);
   };
 
+  const getInteriorClipContoursFromSource = (source) => (
+    getInteriorShapeContours(source)
+      .map(points => cleanDxfPoints(points, true))
+      .filter(points => points.length >= 3)
+  );
+
+  const canUseInteriorDesignAsClipSource = (design) => (
+    (design?.color || 'white') === 'black' && getInteriorClipContoursFromSource(design).length > 0
+  );
+
   const intersectClosedContourWithPaths = (points, clipPolygons) => {
     if (!clipPolygons.length || points.length < 3) return [points];
 
@@ -4209,7 +4518,7 @@ export default function App() {
     const clipSourceContours = getInteriorClipSourceContours(design);
     if (clipSourceContours.length) clipGroups.push(clipSourceContours);
 
-    if (interiorClipEnabled && design.color === 'white' && interiorMarginBoundarySets.length) {
+    if (interiorClipEnabled && interiorMarginBoundarySets.length) {
       clipGroups.push(interiorMarginBoundarySets);
     }
 
@@ -4245,11 +4554,11 @@ export default function App() {
 
   const applyInteriorClipFromSelection = () => {
     const selected = interiorDesignsRef.current.filter(design => selectedInteriorDesignIdsRef.current.includes(design.id));
-    const clipSource = selected.find(design => (design.color || 'white') === 'black' && design.kind === 'rect');
+    const clipSource = selected.find(canUseInteriorDesignAsClipSource);
     const clippedTargets = selected.filter(design => design.id !== clipSource?.id && (design.color || 'white') === 'white');
 
     if (!clipSource || !clippedTargets.length) {
-      showInteriorPositionMessage('Select one black rectangle and at least one white design.');
+      showInteriorPositionMessage('Select one black shape and at least one white design.');
       return;
     }
 
@@ -4947,8 +5256,8 @@ export default function App() {
     const rootBox = svg && !doc.querySelector('parsererror') ? getSvgRootBox(svg) : { x: 0, y: 0, width: 100, height: 100 };
     const sourceBox = svg && !doc.querySelector('parsererror') ? (getSvgArtworkBBox(svg) || rootBox) : rootBox;
     const aspectRatio = sourceBox.width / Math.max(0.0001, sourceBox.height);
-    const fittedWidth = aspectRatio >= 1 ? defaultSize : defaultSize * aspectRatio;
-    const fittedHeight = aspectRatio >= 1 ? defaultSize / aspectRatio : defaultSize;
+    const fittedWidth = (aspectRatio >= 1 ? defaultSize : defaultSize * aspectRatio) * INTERIOR_IMPORTED_SVG_INITIAL_SCALE;
+    const fittedHeight = (aspectRatio >= 1 ? defaultSize / aspectRatio : defaultSize) * INTERIOR_IMPORTED_SVG_INITIAL_SCALE;
     const targetPoint = point || { x: safeWidth / 2, y: safeHeight / 2 };
 
     return {
@@ -4989,9 +5298,36 @@ export default function App() {
     e.target.value = '';
   };
 
+  const getInteriorDropPoint = (e) => {
+    const directSvg = e.currentTarget?.tagName?.toLowerCase() === 'svg'
+      ? e.currentTarget
+      : e.target?.ownerSVGElement;
+    const svg = directSvg || previewWheelBlockerRef.current?.querySelector('svg');
+
+    if (!svg?.viewBox?.baseVal) return { x: safeWidth / 2, y: safeHeight / 2 };
+
+    const rect = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox.baseVal;
+    return {
+      x: (viewBox.x + ((e.clientX - rect.left) / Math.max(1, rect.width)) * viewBox.width) / scale,
+      y: (viewBox.y + ((e.clientY - rect.top) / Math.max(1, rect.height)) * viewBox.height) / scale
+    };
+  };
+
   const handleInteriorSvgLibraryDrop = async (e) => {
+    const boardId = e.dataTransfer.getData(INTERIOR_BOARD_DRAG_TYPE)
+      || interiorBoardDragItemRef.current;
+    if (boardId) {
+      e.preventDefault();
+      e.stopPropagation();
+      importSavedInteriorBoard(boardId, getInteriorDropPoint(e));
+      interiorBoardDragItemRef.current = null;
+      return;
+    }
+
     const libraryId = e.dataTransfer.getData(INTERIOR_SVG_LIBRARY_DRAG_TYPE)
-      || e.dataTransfer.getData('text/plain');
+      || e.dataTransfer.getData('text/plain')
+      || interiorSvgLibraryDragItemRef.current;
     if (!libraryId) return;
 
     e.preventDefault();
@@ -5001,7 +5337,178 @@ export default function App() {
     if (!libraryItem) return;
 
     const svgText = await loadProjectSvgLibraryItemText(libraryItem);
-    addInteriorSvgDesignFromText(svgText, libraryItem.name, getSvgPoint(e));
+    addInteriorSvgDesignFromText(svgText, libraryItem.name, getInteriorDropPoint(e));
+    interiorSvgLibraryDragItemRef.current = null;
+  };
+
+  const getInteriorViewportCenterPoint = () => {
+    const viewBox = getCurrentViewBox();
+    return {
+      x: (viewBox.x + viewBox.width / 2) / scale,
+      y: (viewBox.y + viewBox.height / 2) / scale
+    };
+  };
+
+  const cloneInteriorDesignTreeWithNewIds = (design, idMap) => {
+    const nextId = crypto.randomUUID();
+    idMap.set(design.id, nextId);
+    return {
+      ...design,
+      id: nextId,
+      children: (design.children || []).map(child => cloneInteriorDesignTreeWithNewIds(child, idMap))
+    };
+  };
+
+  const remapInteriorClipSourceIds = (design, idMap) => ({
+    ...design,
+    clipSourceId: design.clipSourceId && idMap.has(design.clipSourceId)
+      ? idMap.get(design.clipSourceId)
+      : design.clipSourceId,
+    children: (design.children || []).map(child => remapInteriorClipSourceIds(child, idMap))
+  });
+
+  const shiftInteriorDesignTree = (design, dx, dy) => {
+    const shiftPoint = (point) => [point[0] + dx, point[1] + dy];
+    const next = { ...design };
+
+    if (next.clipBounds) {
+      next.clipBounds = { ...next.clipBounds, x: n(next.clipBounds.x, 0) + dx, y: n(next.clipBounds.y, 0) + dy };
+    }
+
+    if (isInteriorGroup(next)) {
+      return {
+        ...next,
+        children: (next.children || []).map(child => shiftInteriorDesignTree(child, dx, dy))
+      };
+    }
+
+    if (next.kind === 'line') {
+      return {
+        ...next,
+        x1: n(next.x1, 0) + dx,
+        y1: n(next.y1, 0) + dy,
+        x2: n(next.x2, 0) + dx,
+        y2: n(next.y2, 0) + dy
+      };
+    }
+
+    if (next.kind === 'arc') {
+      return {
+        ...next,
+        x1: n(next.x1, 0) + dx,
+        y1: n(next.y1, 0) + dy,
+        x2: n(next.x2, 0) + dx,
+        y2: n(next.y2, 0) + dy,
+        x3: n(next.x3, 0) + dx,
+        y3: n(next.y3, 0) + dy
+      };
+    }
+
+    if (next.kind === 'polygon') {
+      return { ...next, points: (next.points || []).map(shiftPoint) };
+    }
+
+    if (next.kind === 'eraser') {
+      return { ...next, points: (next.points || []).map(shiftPoint) };
+    }
+
+    return {
+      ...next,
+      x: n(next.x, 0) + dx,
+      y: n(next.y, 0) + dy
+    };
+  };
+
+  const getSavedInteriorBoardImportItems = (board) => {
+    const idMap = new Map();
+    return [...(board.designs || []), ...(board.patternShapes || [])]
+      .map(design => cloneInteriorDesignTreeWithNewIds(design, idMap))
+      .map(design => remapInteriorClipSourceIds(design, idMap));
+  };
+
+  const getInteriorBoardThumbnail = () => {
+    const svg = previewWheelBlockerRef.current?.querySelector('svg');
+    if (!svg) return '';
+
+    const clone = svg.cloneNode(true);
+    const base = getBaseViewBox();
+    clone.setAttribute('viewBox', `${base.x} ${base.y} ${base.width} ${base.height}`);
+    clone.setAttribute('width', '360');
+    clone.setAttribute('height', '220');
+    return svgTextToDataUrl(new XMLSerializer().serializeToString(clone));
+  };
+
+  const saveCurrentInteriorBoard = () => {
+    const patternShapes = getPatternContours().map((contour, index) => ({
+      id: crypto.randomUUID(),
+      kind: 'polygon',
+      name: `Saved pattern ${index + 1}`,
+      color: 'white',
+      points: contour.points,
+      aspectLocked: false,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false
+    }));
+
+    const board = {
+      id: crypto.randomUUID(),
+      createdAt: Date.now(),
+      thumbnail: getInteriorBoardThumbnail(),
+      designs: cloneInteriorDesigns(interiorDesignsRef.current),
+      patternShapes,
+      settings: {
+        interiorClipEnabled,
+        interiorMarginInput,
+        patternEnabled,
+        patternMode,
+        patternThickness,
+        patternMinLength,
+        patternMaxLength,
+        patternRowSpacing,
+        patternGap,
+        patternSeed,
+        patternRoundedEnds,
+        patternRandomRowSpacing,
+        patternRandomGap,
+        alignedSlotRows,
+        alignedSlotBottomRows,
+        alignedSlotBreakWidth,
+        alignedSlotLeftInset,
+        alignedSlotRightInset,
+        alignedSlotMinLength,
+        alignedSlotUseRowSpacing,
+        alignedSlotRowSpacing,
+        alignedSlotStaggerBreaks
+      }
+    };
+
+    setSavedInteriorBoards(prev => [board, ...prev]);
+    setShowInteriorBoardsMenu(true);
+    showInteriorPositionMessage('Board saved.');
+  };
+
+  const importSavedInteriorBoard = (boardId, point = getInteriorViewportCenterPoint()) => {
+    const board = savedInteriorBoards.find(item => item.id === boardId);
+    if (!board) return;
+
+    const items = getSavedInteriorBoardImportItems(board);
+    if (!items.length) return;
+
+    const bounds = getInteriorSelectionBounds(items);
+    const dx = point.x - (bounds.x + bounds.width / 2);
+    const dy = point.y - (bounds.y + bounds.height / 2);
+    const shifted = items.map(item => shiftInteriorDesignTree(item, dx, dy));
+
+    applyInteriorDesigns(prev => [...prev, ...shifted], {
+      history: true,
+      selectedId: shifted[shifted.length - 1]?.id
+    });
+    setSelectedInteriorDesignIds(shifted.map(item => item.id));
+  };
+
+  const deleteSavedInteriorBoard = (boardId) => {
+    setSavedInteriorBoards(prev => prev.filter(board => board.id !== boardId));
   };
 
   const startInteriorDesignDrag = (e, design, mode, handle = null) => {
@@ -5616,11 +6123,24 @@ export default function App() {
   };
 
   const handlePreviewClick = (e) => {
-    if (activeTool !== 'measure' && activeTool !== 'angle') return;
+    if (!['measure', 'angle', 'add-ear', 'delete-ear'].includes(activeTool)) return;
     e.stopPropagation();
     if (draggingMeasurement) return;
 
     const { x, y } = getSvgPoint(e);
+
+    if (activeTool === 'add-ear') {
+      const target = getFrameEarAddTarget({ x, y });
+      if (target) addManualFrameEar(target);
+      return;
+    }
+
+    if (activeTool === 'delete-ear') {
+      const target = getFrameEarDeleteTarget({ x, y });
+      if (target) deleteManualFrameEar(target);
+      return;
+    }
+
     const snapped = findNearestSnapPoint(x, y);
     if (!snapped) return;
 
@@ -7696,7 +8216,7 @@ export default function App() {
     return [...resultContours, ...passthrough];
   };
 
-  const sampleInteriorThreePointArc = (design, segments = 72) => {
+  const getInteriorThreePointArcData = (design, segments = 72) => {
     const p1 = [n(design.x1, 0), n(design.y1, 0)];
     const pm = [n(design.x2, 0), n(design.y2, 0)];
     const p2 = [n(design.x3, 0), n(design.y3, 0)];
@@ -7706,7 +8226,14 @@ export default function App() {
       + p2[0] * (p1[1] - pm[1])
     );
 
-    if (Math.abs(d) < 0.000001) return [p1, p2];
+    if (Math.abs(d) < 0.000001) {
+      return {
+        points: [p1, p2],
+        center: null,
+        radius: null,
+        degenerate: true
+      };
+    }
 
     const p1Sq = p1[0] * p1[0] + p1[1] * p1[1];
     const pmSq = pm[0] * pm[0] + pm[1] * pm[1];
@@ -7732,10 +8259,41 @@ export default function App() {
     const span = useCcw ? ccwEnd : -((a1 - a2 + twoPi) % twoPi);
     const pointCount = Math.max(8, segments);
 
-    return Array.from({ length: pointCount + 1 }, (_, index) => {
+    const points = Array.from({ length: pointCount + 1 }, (_, index) => {
       const angle = a1 + span * (index / pointCount);
       return [cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius];
     });
+
+    return {
+      points,
+      center: [cx, cy],
+      radius,
+      degenerate: false
+    };
+  };
+
+  const sampleInteriorThreePointArc = (design, segments = 72) => (
+    getInteriorThreePointArcData(design, segments).points
+  );
+
+  const getInteriorArcBandPoints = (design, segments = 96) => {
+    const thickness = Math.max(0.5, n(design.thickness, 8));
+    const arc = getInteriorThreePointArcData(design, segments);
+
+    if (arc.degenerate || !arc.center || !arc.radius || arc.radius <= 0.000001) {
+      return offsetOpenStrokeContours(arc.points, thickness, 'butt')[0] || arc.points;
+    }
+
+    const [cx, cy] = arc.center;
+    const outerPoints = arc.points.map(([x, y]) => {
+      const dx = x - cx;
+      const dy = y - cy;
+      const length = Math.hypot(dx, dy) || 1;
+      const scaleOut = (length + thickness) / length;
+      return [cx + dx * scaleOut, cy + dy * scaleOut];
+    });
+
+    return [...arc.points, ...outerPoints.reverse()];
   };
 
   const getInteriorShapeContours = (design) => {
@@ -7777,7 +8335,7 @@ export default function App() {
     }
 
     if (design.kind === 'arc') {
-      return applyDesignTransform(offsetOpenStrokeContours(sampleInteriorThreePointArc(design), thickness, 'butt'));
+      return applyDesignTransform([getInteriorArcBandPoints(design)]);
     }
 
     if (design.kind === 'eraser') {
@@ -7812,9 +8370,7 @@ export default function App() {
             if (cleaned.length < 3) return;
             const isHole = textContour.role === 'hole';
             const materialColor = design.color === 'black' || isHole ? 'black' : 'white';
-            const contourSets = materialColor === 'white'
-              ? intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design))
-              : [cleaned];
+            const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design));
 
             contourSets.forEach(clipped => {
               if (clipped.length < 3) return;
@@ -7856,9 +8412,7 @@ export default function App() {
         getInteriorShapeContours(design).forEach(points => {
           const cleaned = cleanDxfPoints(points, true);
           if (cleaned.length < 3) return;
-          const contourSets = design.color === 'white'
-            ? intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design))
-            : [cleaned];
+          const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design));
           contourSets.forEach(clipped => {
             if (clipped.length < 3) return;
             contours.push({
@@ -7907,7 +8461,7 @@ export default function App() {
         const placed = cleanDxfPoints(points.map(placePoint), closed);
         if (placed.length < (closed ? 3 : 2)) return;
         const clippedSets = closed
-          ? (design.color === 'white' ? intersectClosedContourWithPaths(placed, getInteriorClipPolygonsForDesign(design)) : [placed])
+          ? intersectClosedContourWithPaths(placed, getInteriorClipPolygonsForDesign(design))
           : (interiorClipEnabled ? [] : [placed]);
 
         clippedSets.forEach(clipped => {
@@ -9674,8 +10228,7 @@ export default function App() {
     const objectTransform = getInteriorSvgTransform(design, bounds);
     const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
     const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
-    const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
-    const arcPath = arcPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ');
+    const arcBandPoints = design.kind === 'arc' ? getInteriorArcBandPoints(design) : [];
     const eventProps = interactiveDesign ? {
       onMouseDown: (e) => startInteriorDesignDrag(e, interactiveDesign, 'move'),
       onClick: (e) => selectInteriorDesignFromCanvas(e, interactiveDesign.id)
@@ -9754,7 +10307,7 @@ export default function App() {
     }
 
     if (design.kind === 'arc') {
-      return <path d={arcPath} fill="none" stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" strokeLinejoin="round" clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
+      return <polygon points={polygonPoints(arcBandPoints)} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
     }
 
     if (design.kind === 'eraser') {
@@ -10229,6 +10782,98 @@ export default function App() {
             <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
               <button
                 type="button"
+                onClick={saveCurrentInteriorBoard}
+                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Save board
+              </button>
+              <div
+                className="relative"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => setShowInteriorBoardsMenu(prev => !prev)}
+                  className={[
+                    'rounded-md border px-3 py-2 text-xs font-semibold transition',
+                    showInteriorBoardsMenu
+                      ? 'border-blue-200 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  ].join(' ')}
+                >
+                  Boards
+                </button>
+                {showInteriorBoardsMenu && (
+                  <div className="absolute right-0 top-10 z-40 w-80 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700 shadow-xl">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div>
+                        <p className="font-semibold text-slate-800">Saved boards</p>
+                        <p className="text-[11px] text-slate-500">Click or drag into the workspace</p>
+                      </div>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                        {savedInteriorBoards.length}
+                      </span>
+                    </div>
+
+                    {savedInteriorBoards.length ? (
+                      <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                        {savedInteriorBoards.map((board, index) => (
+                          <div
+                            key={board.id}
+                            draggable
+                            onDragStart={(e) => {
+                              interiorBoardDragItemRef.current = board.id;
+                              e.dataTransfer.setData(INTERIOR_BOARD_DRAG_TYPE, board.id);
+                              e.dataTransfer.setData('text/plain', board.id);
+                              e.dataTransfer.effectAllowed = 'copy';
+                            }}
+                            onDragEnd={() => {
+                              window.setTimeout(() => {
+                                interiorBoardDragItemRef.current = null;
+                              }, 0);
+                            }}
+                            onClick={() => importSavedInteriorBoard(board.id, getInteriorViewportCenterPoint())}
+                            className="group rounded-md border border-slate-200 bg-slate-50 p-2 transition hover:border-blue-200 hover:bg-blue-50"
+                            title="Click to insert centered, or drag into the workspace"
+                          >
+                            <div className="flex items-start gap-2">
+                              <div className="flex h-24 flex-1 items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
+                                {board.thumbnail ? (
+                                  <img src={board.thumbnail} alt="" className="h-full w-full object-contain" draggable={false} />
+                                ) : (
+                                  <span className="text-[11px] font-medium text-slate-400">No preview</span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteSavedInteriorBoard(board.id);
+                                }}
+                                className="rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 opacity-80 hover:bg-red-100 group-hover:opacity-100"
+                                title="Delete saved board"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                              <span className="font-medium text-slate-600">Board {savedInteriorBoards.length - index}</span>
+                              <span>{new Date(board.createdAt || Date.now()).toLocaleDateString()}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-500">
+                        Press Save board to store the current interior design.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
                 onClick={sendCurrentDesignToPresentation}
                 className="rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600"
               >
@@ -10519,7 +11164,7 @@ export default function App() {
                   disabled={selectedInteriorDesignIds.length < 2}
                   onClick={applyInteriorClipFromSelection}
                   className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                  title="Clip selected white design to selected black rectangle"
+                  title="Clip selected white design to selected black shape"
                 >
                   Clip
                 </button>
@@ -10582,10 +11227,12 @@ export default function App() {
                 e.stopPropagation();
               }}
               onDragOver={(e) => {
-                if (Array.from(e.dataTransfer.types || []).includes(INTERIOR_SVG_LIBRARY_DRAG_TYPE)) {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = 'copy';
-                }
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+              }}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
               }}
               onDrop={handleInteriorSvgLibraryDrop}
             >
@@ -10598,11 +11245,14 @@ export default function App() {
                 onMouseDown={handleInteriorCanvasMouseDown}
                 onMouseMove={handleInteriorPreviewMouseMove}
                 onDragOver={(e) => {
-                  if (Array.from(e.dataTransfer.types || []).includes(INTERIOR_SVG_LIBRARY_DRAG_TYPE)) {
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = 'copy';
-                  }
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
                 }}
+                onDragEnter={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                }}
+                onDrop={handleInteriorSvgLibraryDrop}
                 onMouseUp={() => {
                   finishInteriorInteraction();
                   finishInteriorSelectionBox();
@@ -10690,8 +11340,7 @@ export default function App() {
                     : undefined;
                   const shapeFill = design.color === 'black' ? '#000000' : '#ffffff';
                   const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
-                  const arcPoints = design.kind === 'arc' ? sampleInteriorThreePointArc(design) : [];
-                  const arcPath = arcPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0] * scale} ${point[1] * scale}`).join(' ');
+                  const arcBandPoints = design.kind === 'arc' ? getInteriorArcBandPoints(design) : [];
                   const objectTransform = getInteriorSvgTransform(design, bounds);
 
                   return (
@@ -10766,13 +11415,9 @@ export default function App() {
                       )}
 
                       {design.kind === 'arc' && (
-                        <path
-                          d={arcPath}
-                          fill="none"
-                          stroke={shapeFill}
-                          strokeWidth={strokeWidth}
-                          strokeLinecap="butt"
-                          strokeLinejoin="round"
+                        <polygon
+                          points={polygonPoints(arcBandPoints)}
+                          fill={shapeFill}
                           clipPath={commonClipPath}
                           transform={objectTransform || undefined}
                           onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
@@ -11309,23 +11954,55 @@ export default function App() {
                                   type="button"
                                   draggable
                                   onDragStart={(e) => {
+                                    interiorSvgLibraryDragRef.current = true;
+                                    interiorSvgLibraryDragItemRef.current = item.id;
                                     e.dataTransfer.setData(INTERIOR_SVG_LIBRARY_DRAG_TYPE, item.id);
                                     e.dataTransfer.setData('text/plain', item.id);
                                     e.dataTransfer.effectAllowed = 'copy';
                                   }}
+                                  onDragEnd={() => {
+                                    window.setTimeout(() => {
+                                      interiorSvgLibraryDragRef.current = false;
+                                      interiorSvgLibraryDragItemRef.current = null;
+                                    }, 0);
+                                  }}
                                   onClick={async () => {
+                                    if (interiorSvgLibraryDragRef.current) return;
                                     const svgText = await loadProjectSvgLibraryItemText(item);
                                     addInteriorSvgDesignFromText(svgText, item.name);
                                   }}
+                                  onMouseDown={async (e) => {
+                                    if (e.button !== 1 || !thumbnail) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    const svgText = await loadProjectSvgLibraryItemText(item);
+                                    setExpandedSvgLibraryThumbnail({
+                                      src: svgTextToDataUrl(removeSvgCanvasBackground(svgText)),
+                                      name: item.name
+                                    });
+                                  }}
+                                  onMouseUp={(e) => {
+                                    if (e.button === 1) {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setExpandedSvgLibraryThumbnail(null);
+                                    }
+                                  }}
+                                  onAuxClick={(e) => {
+                                    if (e.button === 1) {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                    }
+                                  }}
                                   className="rounded-md border border-slate-200 bg-slate-50 p-1.5 text-left text-[11px] text-slate-700 transition hover:border-blue-200 hover:bg-blue-50"
-                                  title="Click to insert centered, or drag into the workspace"
+                                  title="Click to insert centered, drag into the workspace, or hold middle mouse for large preview"
                                 >
                                   <span className="flex h-16 w-full items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
                                     {thumbnail ? (
                                       <img
                                         src={thumbnail}
                                         alt=""
-                                        className="h-full w-full object-contain"
+                                        className="h-full w-full scale-125 object-contain"
                                         draggable={false}
                                       />
                                     ) : (
@@ -11347,6 +12024,22 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {expandedSvgLibraryThumbnail && (
+                <div className="pointer-events-none absolute left-1/2 top-1/2 z-50 flex h-[52vh] w-[52vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-slate-300 bg-white p-4 shadow-2xl">
+                  <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                    <img
+                      src={expandedSvgLibraryThumbnail.src}
+                      alt=""
+                      className="h-full w-full object-contain"
+                      draggable={false}
+                    />
+                  </div>
+                  <div className="mt-2 truncate text-center text-xs font-semibold text-slate-700">
+                    {expandedSvgLibraryThumbnail.name}
+                  </div>
+                </div>
+              )}
 
               <div
                 className="absolute left-3 bottom-3 rounded-lg border border-slate-200 bg-white/95 p-2 shadow-sm"
@@ -11619,6 +12312,30 @@ export default function App() {
 
         {/* LEFT PANEL - CONTROLS */}
         <div className="min-h-0 overflow-y-auto bg-white rounded-xl shadow-lg border border-slate-200 p-4 space-y-3">
+          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+            {[
+              ['Frame', 'frame'],
+              ['Interior', 'interior'],
+              ['Presentation', 'presentation']
+            ].map(([label, mode]) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  clearMeasureTool();
+                  cancelInteriorShapeTool();
+                  setWorkspaceMode(mode);
+                }}
+                className={[
+                  'rounded-md px-3 py-1.5 text-sm font-semibold transition',
+                  workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                ].join(' ')}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           <div>
             <h1 className="text-xl font-bold text-slate-800">Ear Pattern Generator</h1>
             <p className="text-slate-500 text-xs mt-0.5">Parametric CAD DXF generator</p>
@@ -12156,7 +12873,7 @@ export default function App() {
             ref={previewWheelBlockerRef}
             className={[
       'bg-slate-50 rounded-lg p-2 border flex-1 min-w-0 min-h-0 overflow-hidden flex items-center justify-center',
-      activeTool === 'measure' || activeTool === 'angle' ? 'cursor-crosshair' : ''
+      activeTool === 'measure' || activeTool === 'angle' || activeTool === 'add-ear' || activeTool === 'delete-ear' ? 'cursor-crosshair' : ''
             ].join(' ')}
             onWheel={(e) => {
               e.preventDefault();
@@ -12177,7 +12894,7 @@ export default function App() {
                 setDraggingMeasurement(null);
                 setPanState(null);
               }}
-              style={{ cursor: panState ? 'grabbing' : activeTool === 'measure' || activeTool === 'angle' ? 'crosshair' : 'default' }}
+              style={{ cursor: panState ? 'grabbing' : activeTool === 'measure' || activeTool === 'angle' || activeTool === 'add-ear' || activeTool === 'delete-ear' ? 'crosshair' : 'default' }}
             >
               <path d={buildOutlinePath()} fill="none" stroke="#0f172a" strokeWidth={2 / viewZoom} />
 
@@ -12365,14 +13082,8 @@ export default function App() {
             <div className="space-y-1.5">
               <ToolButton id="measure" icon={Ruler} label="Measure" shortcut="M" />
               <ToolButton id="angle" icon={DraftingCompass} label="Angle" shortcut="A" />
-              <ToolButton id="select" icon={MousePointer2} label="Select" disabled />
-              <ToolButton id="move" icon={Move} label="Move" disabled />
-              <ToolButton id="add-ear" icon={Plus} label="Add ear" disabled />
-              <ToolButton id="delete-ear" icon={Trash2} label="Delete ear" disabled />
-              <ToolButton id="trace" icon={Image} label="Import / Trace" disabled />
-              <ToolButton id="text" icon={Type} label="Text / Label" disabled />
-              <ToolButton id="grid" icon={Grid3X3} label="Grid / Snap" disabled />
-              <ToolButton id="export" icon={Upload} label="Export tools" disabled />
+              <ToolButton id="add-ear" icon={Plus} label="Add ear" />
+              <ToolButton id="delete-ear" icon={Trash2} label="Delete ear" />
             </div>
 
             {activeTool === 'measure' && (
