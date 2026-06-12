@@ -2192,8 +2192,12 @@ export default function App() {
     return [];
   };
 
-  const interiorMarginBoundarySets = getCleanMainBodyPanelVertexSets()
-    .flatMap(panel => offsetPolygonInward(transformPoints(panel), interiorMargin));
+  const getInteriorMarginBoundarySetsForDistance = (distance) => (
+    getCleanMainBodyPanelVertexSets()
+      .flatMap(panel => offsetPolygonInward(transformPoints(panel), Math.max(0, n(distance, 30))))
+  );
+
+  const interiorMarginBoundarySets = getInteriorMarginBoundarySetsForDistance(interiorMargin);
 
   const getActivePatternCleanPanelVertexSets = () => getCleanMainBodyPanelVertexSets();
 
@@ -4469,11 +4473,13 @@ export default function App() {
       : { ...design, color }
   );
 
-  const getInteriorDesignById = (id) => flattenInteriorDesigns(interiorDesigns).find(design => design.id === id) || null;
+  const getInteriorDesignById = (id, sourceDesigns = interiorDesigns) => (
+    flattenInteriorDesigns(sourceDesigns).find(design => design.id === id) || null
+  );
 
-  const getInteriorClipSourceContours = (design) => {
+  const getInteriorClipSourceContours = (design, sourceDesigns = interiorDesigns) => {
     if (!design?.clipSourceId) return [];
-    const source = getInteriorDesignById(design.clipSourceId);
+    const source = getInteriorDesignById(design.clipSourceId, sourceDesigns);
     if (!source || source.id === design.id) return [];
 
     return getInteriorShapeContours(source)
@@ -4513,13 +4519,16 @@ export default function App() {
     return cleanClipperPaths(solution).map(fromClipperPath);
   };
 
-  const getInteriorClipPolygonsForDesign = (design) => {
+  const getInteriorClipPolygonsForDesign = (design, options = {}) => {
+    const sourceDesigns = options.sourceDesigns || interiorDesigns;
+    const clipEnabled = options.clipEnabled ?? interiorClipEnabled;
+    const marginBoundarySets = options.marginBoundarySets ?? interiorMarginBoundarySets;
     const clipGroups = [];
-    const clipSourceContours = getInteriorClipSourceContours(design);
+    const clipSourceContours = getInteriorClipSourceContours(design, sourceDesigns);
     if (clipSourceContours.length) clipGroups.push(clipSourceContours);
 
-    if (interiorClipEnabled && interiorMarginBoundarySets.length) {
-      clipGroups.push(interiorMarginBoundarySets);
+    if (clipEnabled && marginBoundarySets.length) {
+      clipGroups.push(marginBoundarySets);
     }
 
     if (!clipGroups.length) return [];
@@ -5455,6 +5464,17 @@ export default function App() {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
       thumbnail: getInteriorBoardThumbnail(),
+      framePanelSets: getPanelVertexSets().map(panel => transformPoints(panel)),
+      marginBoundarySets: interiorMarginBoundarySets.map(panel => panel.map(point => [...point])),
+      frame: {
+        width: safeWidth,
+        height: safeHeight,
+        cornerAngle: safeCornerAngle,
+        exportStraightenAngleRad: isAngledPanel ? Math.atan2(shearOffset, angledRun) : 0,
+        topShape,
+        hasPanelSplit,
+        bottomPanelEnabled
+      },
       designs: cloneInteriorDesigns(interiorDesignsRef.current),
       patternShapes,
       settings: {
@@ -6501,198 +6521,17 @@ export default function App() {
     return `C|${forward < reverse ? forward : reverse}`;
   };
 
-  const getContourCircleFit = (points, closed = true) => {
-    if (!closed || points.length < 12) return null;
-
-    const xs = points.map(point => point[0]);
-    const ys = points.map(point => point[1]);
-    const bounds = {
-      x: Math.min(...xs),
-      y: Math.min(...ys),
-      width: Math.max(...xs) - Math.min(...xs),
-      height: Math.max(...ys) - Math.min(...ys)
-    };
-    const diameter = Math.max(bounds.width, bounds.height);
-    if (diameter <= 0.5) return null;
-
-    const center = [
-      points.reduce((sum, point) => sum + point[0], 0) / points.length,
-      points.reduce((sum, point) => sum + point[1], 0) / points.length
-    ];
-    const radii = points.map(point => Math.hypot(point[0] - center[0], point[1] - center[1]));
-    const radius = radii.reduce((sum, value) => sum + value, 0) / radii.length;
-    if (radius <= 0.25) return null;
-
-    const maxDeviation = Math.max(...radii.map(value => Math.abs(value - radius)));
-    const radialTolerance = Math.max(0.12, radius * 0.006);
-    if (maxDeviation > radialTolerance) return null;
-
-    const aspect = Math.abs(bounds.width - bounds.height) / Math.max(bounds.width, bounds.height);
-    if (aspect > 0.02) return null;
-
-    const area = Math.abs(signedPolygonArea(points));
-    const expectedArea = Math.PI * radius * radius;
-    if (Math.abs(area - expectedArea) / expectedArea > 0.04) return null;
-
-    return { center, radius, clockwise: signedPolygonArea(points) < 0 };
-  };
-
-  const getContourEllipseFit = (points, closed = true) => {
-    if (!closed || points.length < 18) return null;
-
-    const center = [
-      points.reduce((sum, point) => sum + point[0], 0) / points.length,
-      points.reduce((sum, point) => sum + point[1], 0) / points.length
-    ];
-
-    let xx = 0;
-    let xy = 0;
-    let yy = 0;
-    points.forEach(point => {
-      const dx = point[0] - center[0];
-      const dy = point[1] - center[1];
-      xx += dx * dx;
-      xy += dx * dy;
-      yy += dy * dy;
-    });
-
-    const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
-    const ux = Math.cos(angle);
-    const uy = Math.sin(angle);
-    const vx = -uy;
-    const vy = ux;
-    const projectionsU = points.map(point => (point[0] - center[0]) * ux + (point[1] - center[1]) * uy);
-    const projectionsV = points.map(point => (point[0] - center[0]) * vx + (point[1] - center[1]) * vy);
-    const ru = (Math.max(...projectionsU) - Math.min(...projectionsU)) / 2;
-    const rv = (Math.max(...projectionsV) - Math.min(...projectionsV)) / 2;
-    const rx = Math.max(ru, rv);
-    const ry = Math.min(ru, rv);
-
-    if (ry <= 0.5 || rx / ry < 1.08) return null;
-
-    const axisUIsMajor = ru >= rv;
-    const majorUx = axisUIsMajor ? ux : vx;
-    const majorUy = axisUIsMajor ? uy : vy;
-    const minorUx = axisUIsMajor ? vx : ux;
-    const minorUy = axisUIsMajor ? vy : uy;
-
-    let maxEquationError = 0;
-    points.forEach(point => {
-      const dx = point[0] - center[0];
-      const dy = point[1] - center[1];
-      const px = dx * majorUx + dy * majorUy;
-      const py = dx * minorUx + dy * minorUy;
-      const equation = (px * px) / (rx * rx) + (py * py) / (ry * ry);
-      maxEquationError = Math.max(maxEquationError, Math.abs(equation - 1));
-    });
-
-    if (maxEquationError > 0.08) return null;
-
-    const area = Math.abs(signedPolygonArea(points));
-    const expectedArea = Math.PI * rx * ry;
-    if (Math.abs(area - expectedArea) / expectedArea > 0.08) return null;
-
-    return {
-      center,
-      rx,
-      ry,
-      majorAxis: [majorUx, majorUy],
-      minorAxis: [minorUx, minorUy],
-      clockwise: signedPolygonArea(points) < 0
-    };
-  };
-
-  const getContourCapsuleFit = (points, closed = true) => {
-    if (!closed || points.length < 12) return null;
-
-    let farthest = { distance: 0, a: points[0], b: points[1] };
-    for (let i = 0; i < points.length; i++) {
-      for (let j = i + 1; j < points.length; j++) {
-        const distance = Math.hypot(points[j][0] - points[i][0], points[j][1] - points[i][1]);
-        if (distance > farthest.distance) farthest = { distance, a: points[i], b: points[j] };
-      }
-    }
-
-    if (farthest.distance <= 1) return null;
-
-    const ux = (farthest.b[0] - farthest.a[0]) / farthest.distance;
-    const uy = (farthest.b[1] - farthest.a[1]) / farthest.distance;
-    const nx = -uy;
-    const ny = ux;
-    const projections = points.map(point => point[0] * ux + point[1] * uy);
-    const normals = points.map(point => point[0] * nx + point[1] * ny);
-    const minProjection = Math.min(...projections);
-    const maxProjection = Math.max(...projections);
-    const minNormal = Math.min(...normals);
-    const maxNormal = Math.max(...normals);
-    const length = maxProjection - minProjection;
-    const thickness = maxNormal - minNormal;
-
-    if (thickness <= 0.5 || length <= thickness * 1.35) return null;
-
-    const radius = thickness / 2;
-    const centerNormal = (minNormal + maxNormal) / 2;
-    const leftCenterProjection = minProjection + radius;
-    const rightCenterProjection = maxProjection - radius;
-    const straightLength = rightCenterProjection - leftCenterProjection;
-    if (straightLength <= radius * 0.5) return null;
-
-    const expectedArea = straightLength * thickness + Math.PI * radius * radius;
-    const area = Math.abs(signedPolygonArea(points));
-    if (Math.abs(area - expectedArea) / expectedArea > 0.08) return null;
-
-    const tolerance = Math.max(0.18, radius * 0.06);
-    let maxError = 0;
-    points.forEach(point => {
-      const projection = point[0] * ux + point[1] * uy;
-      const normal = point[0] * nx + point[1] * ny;
-      let error;
-
-      if (projection < leftCenterProjection) {
-        error = Math.abs(Math.hypot(projection - leftCenterProjection, normal - centerNormal) - radius);
-      } else if (projection > rightCenterProjection) {
-        error = Math.abs(Math.hypot(projection - rightCenterProjection, normal - centerNormal) - radius);
-      } else {
-        error = Math.abs(Math.abs(normal - centerNormal) - radius);
-      }
-
-      maxError = Math.max(maxError, error);
-    });
-
-    if (maxError > tolerance) return null;
-
-    const pointFromProjectionNormalLocal = (projection, normal) => [
-      ux * projection + nx * normal,
-      uy * projection + ny * normal
-    ];
-
-    return {
-      leftTop: pointFromProjectionNormalLocal(leftCenterProjection, centerNormal - radius),
-      rightTop: pointFromProjectionNormalLocal(rightCenterProjection, centerNormal - radius),
-      rightBottom: pointFromProjectionNormalLocal(rightCenterProjection, centerNormal + radius),
-      leftBottom: pointFromProjectionNormalLocal(leftCenterProjection, centerNormal + radius),
-      clockwise: signedPolygonArea(points) < 0
-    };
-  };
-
   const optimizeDxfContours = (contours) => {
     const seen = new Set();
     const optimized = [];
 
     contours.forEach(contour => {
-      const preCleaned = cleanDxfPoints(contour.points || [], contour.closed, {
-        pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
-        colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
-      });
       const points = optimizeDxfContourPoints(contour.points || [], contour.closed);
       if (points.length < (contour.closed ? 3 : 2)) return;
 
       const nextContour = {
         ...contour,
         points,
-        arcFit: null,
-        ellipseFit: null,
-        capsuleFit: null,
         area: contour.closed ? Math.abs(signedPolygonArea(points)) : contour.area
       };
       const key = getCanonicalContourKey(nextContour);
@@ -6713,172 +6552,6 @@ export default function App() {
     let entity = dxfLwPolylineHeader(layer, cleaned.length, closed);
     cleaned.forEach(([x, y]) => {
       entity += dxfLine('10', x, '20', y, '30', '0.0');
-    });
-    return entity;
-  };
-
-  const getArcFitThroughRun = (points) => {
-    if (points.length < 5) return null;
-
-    const p0 = points[0];
-    const pm = points[Math.floor(points.length / 2)];
-    const p1 = points[points.length - 1];
-    const d = 2 * (
-      p0[0] * (pm[1] - p1[1])
-      + pm[0] * (p1[1] - p0[1])
-      + p1[0] * (p0[1] - pm[1])
-    );
-
-    if (Math.abs(d) < 0.000001) return null;
-
-    const p0Sq = p0[0] * p0[0] + p0[1] * p0[1];
-    const pmSq = pm[0] * pm[0] + pm[1] * pm[1];
-    const p1Sq = p1[0] * p1[0] + p1[1] * p1[1];
-    const cx = (
-      p0Sq * (pm[1] - p1[1])
-      + pmSq * (p1[1] - p0[1])
-      + p1Sq * (p0[1] - pm[1])
-    ) / d;
-    const cy = (
-      p0Sq * (p1[0] - pm[0])
-      + pmSq * (p0[0] - p1[0])
-      + p1Sq * (pm[0] - p0[0])
-    ) / d;
-    const radius = Math.hypot(p0[0] - cx, p0[1] - cy);
-    if (!Number.isFinite(radius) || radius <= 0.5) return null;
-
-    const angles = points.map(point => Math.atan2(point[1] - cy, point[0] - cx));
-    const ccwSpanRaw = (angles[angles.length - 1] - angles[0] + Math.PI * 2) % (Math.PI * 2);
-    const ccwMid = (angles[Math.floor(angles.length / 2)] - angles[0] + Math.PI * 2) % (Math.PI * 2);
-    const useCcw = ccwMid <= ccwSpanRaw;
-    const span = useCcw ? ccwSpanRaw : -((angles[0] - angles[angles.length - 1] + Math.PI * 2) % (Math.PI * 2));
-    const absSpan = Math.abs(span);
-    if (absSpan < 0.18 || absSpan > Math.PI * 1.35) return null;
-
-    const radialTolerance = Math.max(0.08, radius * 0.006);
-    const maxRadialError = Math.max(...points.map(point => Math.abs(Math.hypot(point[0] - cx, point[1] - cy) - radius)));
-    if (maxRadialError > radialTolerance) return null;
-
-    const chord = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
-    if (chord <= 0.5 || radius / chord > 35) return null;
-
-    return {
-      start: p0,
-      end: p1,
-      bulge: roundDXF(-Math.tan(span / 4))
-    };
-  };
-
-  const buildBulgedPolylineVertices = (points, closed = true) => {
-    const cleaned = cleanDxfPoints(points, closed, {
-      pointTolerance: DXF_OPTIMIZE_POINT_TOLERANCE,
-      colinearTolerance: DXF_OPTIMIZE_COLINEAR_TOLERANCE
-    });
-    const minLength = closed ? 3 : 2;
-    if (cleaned.length < minLength) return [];
-
-    const source = closed ? [...cleaned, cleaned[0]] : cleaned;
-    const vertices = [];
-    let i = 0;
-
-    while (i < source.length - 1) {
-      let best = null;
-      const maxEnd = Math.min(source.length - 1, i + 18);
-      for (let end = maxEnd; end >= i + 4; end--) {
-        const fit = getArcFitThroughRun(source.slice(i, end + 1));
-        if (fit && Math.abs(fit.bulge) > 0.0001) {
-          best = { end, fit };
-          break;
-        }
-      }
-
-      if (best) {
-        vertices.push({ point: source[i], bulge: best.fit.bulge });
-        i = best.end;
-      } else {
-        vertices.push({ point: source[i], bulge: 0 });
-        i++;
-      }
-    }
-
-    if (!closed) vertices.push({ point: source[source.length - 1], bulge: 0 });
-
-    const finalVertices = closed ? vertices.slice(0, cleaned.length) : vertices;
-    return finalVertices.length >= minLength ? finalVertices : [];
-  };
-
-  const dxfBulgedPolylineEntity = (points, closed = true, layer = '0') => {
-    const vertices = buildBulgedPolylineVertices(points, closed);
-    if (vertices.length < (closed ? 3 : 2)) return '';
-
-    let entity = dxfLwPolylineHeader(layer, vertices.length, closed);
-    vertices.forEach(({ point, bulge }) => {
-      const [x, y] = toRawDXFPoint(point);
-      entity += dxfLine('10', x, '20', y, '30', '0.0');
-      if (Math.abs(bulge) > 0.0000001) entity += dxfLine('42', bulge);
-    });
-    return entity;
-  };
-
-  const dxfBulgedCircleEntity = (arcFit, layer = '0') => {
-    if (!arcFit?.center || !Number.isFinite(arcFit.radius) || arcFit.radius <= 0) return '';
-
-    const [cx, cy] = arcFit.center;
-    const r = arcFit.radius;
-    const sourceVertices = arcFit.clockwise
-      ? [[cx + r, cy], [cx, cy - r], [cx - r, cy], [cx, cy + r]]
-      : [[cx + r, cy], [cx, cy + r], [cx - r, cy], [cx, cy - r]];
-    const vertices = sourceVertices.map(point => toRawDXFPoint(point));
-    const bulge = arcFit.clockwise ? 1 : -1;
-
-    let entity = dxfLwPolylineHeader(layer, vertices.length, true);
-    vertices.forEach(([x, y]) => {
-      entity += dxfLine('10', x, '20', y, '30', '0.0', '42', bulge);
-    });
-    return entity;
-  };
-
-  const dxfOptimizedEllipseEntity = (ellipseFit, layer = '0') => {
-    if (!ellipseFit?.center || !ellipseFit?.majorAxis || !ellipseFit?.minorAxis) return '';
-    if (!Number.isFinite(ellipseFit.rx) || !Number.isFinite(ellipseFit.ry) || ellipseFit.rx <= 0 || ellipseFit.ry <= 0) return '';
-
-    const segmentCount = clamp(Math.ceil(Math.max(24, Math.min(64, ellipseFit.rx / 3))), 24, 64);
-    const direction = ellipseFit.clockwise ? -1 : 1;
-    const points = Array.from({ length: segmentCount }, (_, index) => {
-      const theta = direction * (index / segmentCount) * Math.PI * 2;
-      const cos = Math.cos(theta);
-      const sin = Math.sin(theta);
-      return [
-        ellipseFit.center[0] + ellipseFit.majorAxis[0] * cos * ellipseFit.rx + ellipseFit.minorAxis[0] * sin * ellipseFit.ry,
-        ellipseFit.center[1] + ellipseFit.majorAxis[1] * cos * ellipseFit.rx + ellipseFit.minorAxis[1] * sin * ellipseFit.ry
-      ];
-    });
-
-    return dxfPolylineEntity(points, true, layer);
-  };
-
-  const dxfBulgedCapsuleEntity = (capsuleFit, layer = '0') => {
-    if (!capsuleFit?.leftTop || !capsuleFit?.rightTop || !capsuleFit?.rightBottom || !capsuleFit?.leftBottom) return '';
-
-    const sourceVertices = capsuleFit.clockwise
-      ? [
-          { point: capsuleFit.leftTop, bulge: 0 },
-          { point: capsuleFit.leftBottom, bulge: -1 },
-          { point: capsuleFit.rightBottom, bulge: 0 },
-          { point: capsuleFit.rightTop, bulge: -1 }
-        ]
-      : [
-          { point: capsuleFit.leftTop, bulge: 0 },
-          { point: capsuleFit.rightTop, bulge: 1 },
-          { point: capsuleFit.rightBottom, bulge: 0 },
-          { point: capsuleFit.leftBottom, bulge: 1 }
-        ];
-
-    let entity = dxfLwPolylineHeader(layer, sourceVertices.length, true);
-    sourceVertices.forEach(({ point, bulge }) => {
-      const [x, y] = toRawDXFPoint(point);
-      entity += dxfLine('10', x, '20', y, '30', '0.0');
-      if (Math.abs(bulge) > 0.0000001) entity += dxfLine('42', bulge);
     });
     return entity;
   };
@@ -8349,12 +8022,18 @@ export default function App() {
     return [];
   };
 
-  const collectInteriorDesignContours = () => {
+  const collectInteriorDesignContours = (sourceDesigns = interiorDesigns, options = {}) => {
+    const {
+      includeLivePattern = true,
+      clipEnabled = interiorClipEnabled,
+      marginBoundarySets = interiorMarginBoundarySets
+    } = options;
     const contours = [];
     const skipped = [];
     const parser = new DOMParser();
+    const clipOptions = { sourceDesigns, clipEnabled, marginBoundarySets };
 
-    flattenInteriorDesigns(interiorDesigns).forEach((design, designIndex) => {
+    flattenInteriorDesigns(sourceDesigns).forEach((design, designIndex) => {
       if (design.exportable === false && design.kind !== 'text') {
         skipped.push(design.name);
         return;
@@ -8370,7 +8049,7 @@ export default function App() {
             if (cleaned.length < 3) return;
             const isHole = textContour.role === 'hole';
             const materialColor = design.color === 'black' || isHole ? 'black' : 'white';
-            const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design));
+            const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design, clipOptions));
 
             contourSets.forEach(clipped => {
               if (clipped.length < 3) return;
@@ -8412,7 +8091,7 @@ export default function App() {
         getInteriorShapeContours(design).forEach(points => {
           const cleaned = cleanDxfPoints(points, true);
           if (cleaned.length < 3) return;
-          const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design));
+          const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design, clipOptions));
           contourSets.forEach(clipped => {
             if (clipped.length < 3) return;
             contours.push({
@@ -8461,8 +8140,8 @@ export default function App() {
         const placed = cleanDxfPoints(points.map(placePoint), closed);
         if (placed.length < (closed ? 3 : 2)) return;
         const clippedSets = closed
-          ? intersectClosedContourWithPaths(placed, getInteriorClipPolygonsForDesign(design))
-          : (interiorClipEnabled ? [] : [placed]);
+          ? intersectClosedContourWithPaths(placed, getInteriorClipPolygonsForDesign(design, clipOptions))
+          : (clipEnabled ? [] : [placed]);
 
         clippedSets.forEach(clipped => {
           if (clipped.length < (closed ? 3 : 2)) return;
@@ -8597,17 +8276,23 @@ export default function App() {
     }));
     const clearanceContours = getAlignedSlotClearanceContours().map((contour, index) => ({
       ...contour,
-      zIndex: interiorDesigns.length + 0.25,
+      zIndex: sourceDesigns.length + 0.25,
       contourOrder: contours.length + index
     }));
-    const patternContours = getPatternContours().map((contour, index) => ({
-      ...contour,
-      materialColor: 'white',
-      zIndex: -1,
-      contourOrder: contours.length + clearanceContours.length + index
-    }));
+    const patternContours = includeLivePattern
+      ? getPatternContours().map((contour, index) => ({
+          ...contour,
+          materialColor: 'white',
+          zIndex: -1,
+          contourOrder: contours.length + clearanceContours.length + index
+        }))
+      : [];
 
-    const booleanContours = buildBooleanInteriorContours([...withAnalysis, ...clearanceContours, ...patternContours]);
+    const booleanContours = buildBooleanInteriorContours([
+      ...withAnalysis,
+      ...(includeLivePattern ? clearanceContours : []),
+      ...patternContours
+    ]);
     const optimizedContours = optimizeDxfContours(booleanContours);
 
     return {
@@ -8662,6 +8347,202 @@ export default function App() {
   const getInteriorDesignDXFLayers = (exportData = collectInteriorDesignContours()) => (
     exportData.contours.map(contour => contour.layer)
   );
+
+  const rotateExportPointForStraightDXF = ([x, y], angleRad) => {
+    if (!Number.isFinite(angleRad) || Math.abs(angleRad) < 0.000001) return [x, y];
+
+    const cos = Math.cos(-angleRad);
+    const sin = Math.sin(-angleRad);
+    return [
+      x * cos - y * sin,
+      x * sin + y * cos
+    ];
+  };
+
+  const straightenPointSetsForDXF = (pointSets, angleRad) => (
+    pointSets.map(panel => panel.map(point => rotateExportPointForStraightDXF(point, angleRad)))
+  );
+
+  const straightenExportDataForDXF = (exportData, angleRad) => ({
+    ...exportData,
+    contours: (exportData.contours || []).map(contour => ({
+      ...contour,
+      points: (contour.points || []).map(point => rotateExportPointForStraightDXF(point, angleRad)),
+      area: contour.closed ? Math.abs(signedPolygonArea((contour.points || []).map(point => rotateExportPointForStraightDXF(point, angleRad)))) : contour.area
+    }))
+  });
+
+  const getCurrentExportStraightenAngleRad = () => (
+    isAngledPanel ? Math.atan2(shearOffset, angledRun) : 0
+  );
+
+  const estimateStraightenAngleFromPointSets = (pointSets) => {
+    let best = null;
+
+    pointSets.forEach(panel => {
+      for (let i = 0; i < panel.length; i++) {
+        const p1 = panel[i];
+        const p2 = panel[(i + 1) % panel.length];
+        const dx = p2[0] - p1[0];
+        const dy = p2[1] - p1[1];
+        const length = Math.hypot(dx, dy);
+        if (length < 1 || Math.abs(dx) < 1) continue;
+
+        const score = Math.abs(dx);
+        if (!best || score > best.score) {
+          let angle = Math.atan2(dy, dx);
+          while (angle > Math.PI / 2) angle -= Math.PI;
+          while (angle < -Math.PI / 2) angle += Math.PI;
+          best = { angle, score };
+        }
+      }
+    });
+
+    return best && Math.abs(best.angle) > 0.000001 ? best.angle : 0;
+  };
+
+  const getSavedBoardExportStraightenAngleRad = (board) => {
+    const savedAngle = Number(board.frame?.exportStraightenAngleRad);
+    if (Number.isFinite(savedAngle)) return savedAngle;
+
+    if (board.framePanelSets?.length) {
+      return estimateStraightenAngleFromPointSets(board.framePanelSets);
+    }
+
+    const savedCornerAngle = Number(board.frame?.cornerAngle);
+    const savedWidth = Math.max(1, n(board.frame?.width, safeWidth));
+    return Number.isFinite(savedCornerAngle) && Math.abs(savedCornerAngle - 90) > 0.000001
+      ? Math.atan(savedWidth * Math.tan((clamp(savedCornerAngle, 30, 150) - 90) * Math.PI / 180) / savedWidth)
+      : 0;
+  };
+
+  const translateExportData = (exportData, dx, dy, layerPrefix = '') => ({
+    skipped: exportData.skipped || [],
+    contours: (exportData.contours || []).map(contour => ({
+      ...contour,
+      points: (contour.points || []).map(([x, y]) => [x + dx, y + dy]),
+      layer: layerPrefix ? `${layerPrefix}${contour.layer || '0'}` : contour.layer,
+      designId: layerPrefix ? `${layerPrefix}${contour.designId || 'design'}` : contour.designId
+    }))
+  });
+
+  const getFrameDXFPanelSets = () => (
+    getPanelVertexSets().map(panel => transformPoints(panel))
+  );
+
+  const getSavedBoardFramePanelSets = (board) => (
+    (board.framePanelSets?.length ? board.framePanelSets : getFrameDXFPanelSets())
+      .map(panel => panel.map(([x, y]) => [x, y]))
+  );
+
+  const buildFrameDXFEntitiesFromPanelSets = (panelSets) => (
+    panelSets
+      .map(panel => dxfPolylineEntity(panel, true, '0'))
+      .join('')
+  );
+
+  const getSavedInteriorBoardExportItems = (board) => (
+    getSavedInteriorBoardImportItems(board)
+  );
+
+  const buildSavedInteriorBoardExportData = (board) => {
+    const sourceDesigns = getSavedInteriorBoardExportItems(board);
+    const settings = board.settings || {};
+    const savedClipEnabled = settings.interiorClipEnabled ?? interiorClipEnabled;
+    const savedMarginBoundarySets = savedClipEnabled
+      ? (board.marginBoundarySets?.length
+          ? board.marginBoundarySets.map(panel => panel.map(([x, y]) => [x, y]))
+          : getInteriorMarginBoundarySetsForDistance(settings.interiorMarginInput ?? interiorMarginInput))
+      : [];
+
+    return collectInteriorDesignContours(sourceDesigns, {
+      includeLivePattern: false,
+      clipEnabled: savedClipEnabled,
+      marginBoundarySets: savedMarginBoundarySets
+    });
+  };
+
+  const downloadSavedBoardsDXF = () => {
+    if (!savedInteriorBoards.length) {
+      window.alert('There are no saved boards to export.');
+      return;
+    }
+
+    const blocked = savedInteriorBoards.flatMap((board, boardIndex) => (
+      flattenInteriorDesigns(getSavedInteriorBoardExportItems(board))
+        .filter(design => design.exportable === false && design.kind !== 'text')
+        .map(design => `Board ${savedInteriorBoards.length - boardIndex}: ${design.name || 'Design'}`)
+    ));
+
+    if (blocked.length) {
+      window.alert(`Some saved board designs cannot be exported cleanly yet: ${blocked.join(', ')}.`);
+      return;
+    }
+
+    resetDxfHandles();
+
+    let cursorY = 0;
+    const boardExports = savedInteriorBoards.map((board, boardIndex) => {
+      const exportStraightenAngleRad = getSavedBoardExportStraightenAngleRad(board);
+      const framePanelSets = straightenPointSetsForDXF(
+        getSavedBoardFramePanelSets(board),
+        exportStraightenAngleRad
+      );
+      const exportData = straightenExportDataForDXF(
+        buildSavedInteriorBoardExportData(board),
+        exportStraightenAngleRad
+      );
+      const boardBounds = getBoundsFromPointSets([
+        ...framePanelSets,
+        ...exportData.contours.map(contour => contour.points || [])
+      ]);
+      const offsetY = cursorY - boardBounds.y;
+      cursorY += boardBounds.height + 100;
+
+      return {
+        framePanelSets: framePanelSets.map(panel => panel.map(([x, y]) => [x, y + offsetY])),
+        exportData: translateExportData(exportData, 0, offsetY, `BOARD_${boardIndex + 1}_`)
+      };
+    });
+
+    const skipped = boardExports.flatMap((item, index) => (
+      (item.exportData.skipped || []).map(name => `Board ${savedInteriorBoards.length - index}: ${name}`)
+    ));
+    if (skipped.length) {
+      window.alert(`Some saved board SVGs were skipped during export: ${skipped.join(', ')}.`);
+      return;
+    }
+
+    const designLayers = boardExports.flatMap(item => getInteriorDesignDXFLayers(item.exportData));
+
+    let dxf = '';
+    dxf += dxfLine('0', 'SECTION', '2', 'HEADER');
+    dxf += dxfLine('9', '$ACADVER', '1', 'AC1014');
+    dxf += dxfLine('9', '$HANDSEED', '5', 'FFFF');
+    dxf += dxfLine('9', '$INSUNITS', '70', '4');
+    dxf += dxfLine('9', '$MEASUREMENT', '70', '1');
+    dxf += dxfLine('0', 'ENDSEC');
+    dxf += buildDxfTablesSection(designLayers);
+    dxf += buildDxfBlocksSection();
+    dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
+    boardExports.forEach(item => {
+      dxf += buildFrameDXFEntitiesFromPanelSets(item.framePanelSets);
+      dxf += buildInteriorDesignDXFEntities(item.exportData);
+    });
+    dxf += dxfLine('0', 'ENDSEC');
+    dxf += buildDxfObjectsSection();
+    dxf += dxfLine('0', 'EOF');
+
+    const blob = new Blob([dxf], { type: 'application/dxf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `saved-boards-${savedInteriorBoards.length}-stacked.dxf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const segmentBulge = (segment, startLocal, endLocal) => {
     const includedAngle = segment.direction * ((endLocal - startLocal) / segment.radius);
@@ -8791,155 +8672,6 @@ export default function App() {
     return getPanelVertexSets().map(vertexSet => dxfPolylineFromRawVertices(vertexSet)).join('');
   };
 
-  const fusionLineEntity = (p1, p2) => {
-    const [x1, y1] = toDXFPoint(p1);
-    const [x2, y2] = toDXFPoint(p2);
-    return dxfLine('0', 'LINE', '8', '0', '10', x1, '20', y1, '11', x2, '21', y2);
-  };
-
-  const fusionArcEntity = (segment, startLocal, endLocal, radialOffset = 0) => {
-    if (Math.abs(endLocal - startLocal) < 0.001) return '';
-
-    const startPoint = segment.pointAtLocal(startLocal, radialOffset);
-    const endPoint = segment.pointAtLocal(endLocal, radialOffset);
-    const radius = segment.radius + segment.offsetSign * radialOffset;
-    const [cx, cy] = toDXFPoint([segment.cx, segment.cy]);
-
-    const angleDeg = (point) => {
-      const [px, py] = toDXFPoint(point);
-      let angle = Math.atan2(py - cy, px - cx) * 180 / Math.PI;
-      if (angle < 0) angle += 360;
-      return roundDXF(angle);
-    };
-
-    // SVG Y is flipped compared with DXF, so swap start/end angles.
-    const startAngle = angleDeg(endPoint);
-    const endAngle = angleDeg(startPoint);
-
-    return dxfLine(
-      '0', 'ARC',
-      '8', '0',
-      '10', cx,
-      '20', cy,
-      '40', roundDXF(Math.abs(radius)),
-      '50', startAngle,
-      '51', endAngle
-    );
-  };
-
-  const buildFusionStraightEntities = () => {
-    const entities = [];
-
-    getPanelVertexSets().forEach(raw => {
-      for (let i = 0; i < raw.length; i++) {
-        const p1 = raw[i];
-        const p2 = raw[(i + 1) % raw.length];
-        if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) > 0.000001) {
-          entities.push(fusionLineEntity(p1, p2));
-        }
-      }
-    });
-
-    return entities;
-  };
-
-  const buildFusionArcTopEntities = () => {
-    if (isAngledPanel || hasPanelSplit || bottomPanelEnabled) return buildFusionStraightEntities();
-
-    const arc = getActiveTopArcData();
-    if (!arc) return buildFusionStraightEntities();
-
-    const entities = [];
-    const startPoint = getStartPoint();
-    let currentPoint = startPoint;
-
-    const addLine = (nextPoint) => {
-      if (Math.hypot(nextPoint[0] - currentPoint[0], nextPoint[1] - currentPoint[1]) > 0.000001) {
-        entities.push(fusionLineEntity(currentPoint, nextPoint));
-      }
-      currentPoint = nextPoint;
-    };
-
-    const addArc = (startS, endS, radialOffset = 0) => {
-      arc.getParts(startS, endS).forEach(part => {
-        entities.push(fusionArcEntity(part.segment, part.startLocal, part.endLocal, radialOffset));
-        currentPoint = part.segment.pointAtLocal(part.endLocal, radialOffset);
-      });
-    };
-
-    const ears = getTopArcEarRanges();
-    let currentS = 0;
-
-    ears.forEach(ear => {
-      addArc(currentS, ear.start, 0);
-
-      const innerStart = arc.pointAt(ear.start, 0);
-      const outerStart = arc.pointAt(ear.start, topEarDepth);
-      const innerEnd = arc.pointAt(ear.end, 0);
-
-      currentPoint = innerStart;
-      addLine(outerStart);
-      addArc(ear.start, ear.end, topEarDepth);
-      addLine(innerEnd);
-
-      currentS = ear.end;
-    });
-
-    addArc(currentS, arc.arcLength, 0);
-
-    grouped.right.forEach(ear => {
-      const p = ear.pos;
-      addLine([safeWidth - rightEarDepth, p]);
-      addLine([safeWidth, p]);
-      addLine([safeWidth, p + rightEarLength]);
-      addLine([safeWidth - rightEarDepth, p + rightEarLength]);
-    });
-
-    addLine([safeWidth - rightEarDepth, bottomBaseY]);
-
-    grouped.bottom.forEach(ear => {
-      const p = ear.pos;
-      addLine([p + bottomEarLengthForLayout, safeHeight - bottomEarDepth]);
-      addLine([p + bottomEarLengthForLayout, safeHeight]);
-      addLine([p, safeHeight]);
-      addLine([p, safeHeight - bottomEarDepth]);
-    });
-
-    addLine([leftEarDepth, bottomBaseY]);
-
-    grouped.left.forEach(ear => {
-      const p = ear.pos;
-      addLine([leftEarDepth, p + leftEarLength]);
-      addLine([0, p + leftEarLength]);
-      addLine([0, p]);
-      addLine([leftEarDepth, p]);
-    });
-
-    addLine(startPoint);
-    return entities;
-  };
-
-  const downloadFusionDXF = () => {
-    let dxf = '';
-    dxf += dxfLine('0', 'SECTION', '2', 'HEADER');
-    dxf += dxfLine('9', '$ACADVER', '1', 'AC1009');
-    dxf += dxfLine('9', '$INSUNITS', '70', '4');
-    dxf += dxfLine('0', 'ENDSEC');
-    dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
-    dxf += (hasArcTop ? buildFusionArcTopEntities() : buildFusionStraightEntities()).join('');
-    dxf += dxfLine('0', 'ENDSEC', '0', 'EOF');
-
-    const blob = new Blob([dxf], { type: 'application/dxf' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `panel-${safeWidth}x${safeHeight}-${topShape}-fusion.dxf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
   const downloadDXF = () => {
     const blockedDesigns = interiorDesigns.filter(design => design.exportable === false);
     if (blockedDesigns.length > 0) {
@@ -8951,7 +8683,9 @@ export default function App() {
     resetDxfHandles();
 
     let dxf = '';
-    const interiorExportForDownload = collectInteriorDesignContours();
+    const exportStraightenAngleRad = getCurrentExportStraightenAngleRad();
+    const rawInteriorExportForDownload = collectInteriorDesignContours();
+    const interiorExportForDownload = straightenExportDataForDXF(rawInteriorExportForDownload, exportStraightenAngleRad);
     const designLayers = getInteriorDesignDXFLayers(interiorExportForDownload);
 
     dxf += dxfLine('0', 'SECTION', '2', 'HEADER');
@@ -8963,7 +8697,11 @@ export default function App() {
     dxf += buildDxfTablesSection(designLayers);
     dxf += buildDxfBlocksSection();
     dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
-    dxf += hasArcTop ? buildArcTopDXFLwPolyline() : buildStraightDXFLwPolyline();
+    if (Math.abs(exportStraightenAngleRad) > 0.000001) {
+      dxf += buildFrameDXFEntitiesFromPanelSets(straightenPointSetsForDXF(getFrameDXFPanelSets(), exportStraightenAngleRad));
+    } else {
+      dxf += hasArcTop ? buildArcTopDXFLwPolyline() : buildStraightDXFLwPolyline();
+    }
     dxf += buildInteriorDesignDXFEntities(interiorExportForDownload);
     dxf += dxfLine('0', 'ENDSEC');
     dxf += buildDxfObjectsSection();
@@ -10782,98 +10520,6 @@ export default function App() {
             <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={saveCurrentInteriorBoard}
-                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Save board
-              </button>
-              <div
-                className="relative"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  type="button"
-                  onClick={() => setShowInteriorBoardsMenu(prev => !prev)}
-                  className={[
-                    'rounded-md border px-3 py-2 text-xs font-semibold transition',
-                    showInteriorBoardsMenu
-                      ? 'border-blue-200 bg-blue-50 text-blue-700'
-                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                  ].join(' ')}
-                >
-                  Boards
-                </button>
-                {showInteriorBoardsMenu && (
-                  <div className="absolute right-0 top-10 z-40 w-80 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700 shadow-xl">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <div>
-                        <p className="font-semibold text-slate-800">Saved boards</p>
-                        <p className="text-[11px] text-slate-500">Click or drag into the workspace</p>
-                      </div>
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
-                        {savedInteriorBoards.length}
-                      </span>
-                    </div>
-
-                    {savedInteriorBoards.length ? (
-                      <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
-                        {savedInteriorBoards.map((board, index) => (
-                          <div
-                            key={board.id}
-                            draggable
-                            onDragStart={(e) => {
-                              interiorBoardDragItemRef.current = board.id;
-                              e.dataTransfer.setData(INTERIOR_BOARD_DRAG_TYPE, board.id);
-                              e.dataTransfer.setData('text/plain', board.id);
-                              e.dataTransfer.effectAllowed = 'copy';
-                            }}
-                            onDragEnd={() => {
-                              window.setTimeout(() => {
-                                interiorBoardDragItemRef.current = null;
-                              }, 0);
-                            }}
-                            onClick={() => importSavedInteriorBoard(board.id, getInteriorViewportCenterPoint())}
-                            className="group rounded-md border border-slate-200 bg-slate-50 p-2 transition hover:border-blue-200 hover:bg-blue-50"
-                            title="Click to insert centered, or drag into the workspace"
-                          >
-                            <div className="flex items-start gap-2">
-                              <div className="flex h-24 flex-1 items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
-                                {board.thumbnail ? (
-                                  <img src={board.thumbnail} alt="" className="h-full w-full object-contain" draggable={false} />
-                                ) : (
-                                  <span className="text-[11px] font-medium text-slate-400">No preview</span>
-                                )}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteSavedInteriorBoard(board.id);
-                                }}
-                                className="rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 opacity-80 hover:bg-red-100 group-hover:opacity-100"
-                                title="Delete saved board"
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            </div>
-                            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
-                              <span className="font-medium text-slate-600">Board {savedInteriorBoards.length - index}</span>
-                              <span>{new Date(board.createdAt || Date.now()).toLocaleDateString()}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-500">
-                        Press Save board to store the current interior design.
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
                 onClick={sendCurrentDesignToPresentation}
                 className="rounded-md bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600"
               >
@@ -12023,6 +11669,119 @@ export default function App() {
                     )}
                   </div>
                 )}
+              </div>
+
+              <div
+                className="absolute right-3 top-3 z-30 flex max-w-[calc(100%-1.5rem)] items-start justify-end gap-2"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                onWheel={(e) => e.stopPropagation()}
+                onWheelCapture={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={saveCurrentInteriorBoard}
+                  className="rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-white"
+                >
+                  Save board
+                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowInteriorBoardsMenu(prev => !prev)}
+                    className={[
+                      'rounded-lg border px-3 py-2 text-xs font-semibold shadow-sm transition',
+                      showInteriorBoardsMenu
+                        ? 'border-blue-200 bg-blue-50 text-blue-700'
+                        : 'border-slate-200 bg-white/95 text-slate-700 hover:bg-white'
+                    ].join(' ')}
+                  >
+                    Boards
+                  </button>
+                  {showInteriorBoardsMenu && (
+                    <div className="absolute right-0 top-10 z-40 w-80 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700 shadow-xl">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div>
+                          <p className="font-semibold text-slate-800">Saved boards</p>
+                          <p className="text-[11px] text-slate-500">Click or drag into the workspace</p>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={!savedInteriorBoards.length}
+                            onClick={downloadSavedBoardsDXF}
+                            className={[
+                              'rounded-md border px-2 py-1 text-[10px] font-semibold transition',
+                              savedInteriorBoards.length
+                                ? 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                                : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300'
+                            ].join(' ')}
+                            title="Export all saved boards in one stacked DXF"
+                          >
+                            Export DXF
+                          </button>
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                            {savedInteriorBoards.length}
+                          </span>
+                        </div>
+                      </div>
+
+                      {savedInteriorBoards.length ? (
+                        <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                          {savedInteriorBoards.map((board, index) => (
+                            <div
+                              key={board.id}
+                              draggable
+                              onDragStart={(e) => {
+                                interiorBoardDragItemRef.current = board.id;
+                                e.dataTransfer.setData(INTERIOR_BOARD_DRAG_TYPE, board.id);
+                                e.dataTransfer.setData('text/plain', board.id);
+                                e.dataTransfer.effectAllowed = 'copy';
+                              }}
+                              onDragEnd={() => {
+                                window.setTimeout(() => {
+                                  interiorBoardDragItemRef.current = null;
+                                }, 0);
+                              }}
+                              onClick={() => importSavedInteriorBoard(board.id, getInteriorViewportCenterPoint())}
+                              className="group rounded-md border border-slate-200 bg-slate-50 p-2 transition hover:border-blue-200 hover:bg-blue-50"
+                              title="Click to insert centered, or drag into the workspace"
+                            >
+                              <div className="flex items-start gap-2">
+                                <div className="flex h-24 flex-1 items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
+                                  {board.thumbnail ? (
+                                    <img src={board.thumbnail} alt="" className="h-full w-full object-contain" draggable={false} />
+                                  ) : (
+                                    <span className="text-[11px] font-medium text-slate-400">No preview</span>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteSavedInteriorBoard(board.id);
+                                  }}
+                                  className="rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 opacity-80 hover:bg-red-100 group-hover:opacity-100"
+                                  title="Delete saved board"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                              <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                                <span className="font-medium text-slate-600">Board {savedInteriorBoards.length - index}</span>
+                                <span>{new Date(board.createdAt || Date.now()).toLocaleDateString()}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-500">
+                          Press Save board to store the current interior design.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {expandedSvgLibraryThumbnail && (
