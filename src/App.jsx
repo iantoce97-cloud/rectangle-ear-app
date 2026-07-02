@@ -9694,6 +9694,60 @@ export default function App() {
     applyPresentationItems(prev => prev.map(item => item.id === selectedPresentationItemId ? { ...item, ...updates } : item));
   };
 
+  const getActivePresentationSelectionIds = () => (
+    selectedPresentationItemIdsRef.current.length
+      ? selectedPresentationItemIdsRef.current
+      : [selectedPresentationItemIdRef.current].filter(Boolean)
+  );
+
+  const mirrorSelectedPresentationItems = (axis) => {
+    const ids = getActivePresentationSelectionIds();
+    if (!ids.length) return;
+
+    applyPresentationItems(prev => prev.map(item => (
+      ids.includes(item.id)
+        ? {
+            ...item,
+            mirrorX: axis === 'x' ? !item.mirrorX : item.mirrorX,
+            mirrorY: axis === 'y' ? !item.mirrorY : item.mirrorY
+          }
+        : item
+    )), { selectedIds: ids });
+  };
+
+  const alignSelectedPresentationItems = (mode) => {
+    const ids = getActivePresentationSelectionIds();
+    if (ids.length < 2) return;
+
+    const selectedItems = presentationItemsRef.current.filter(item => ids.includes(item.id));
+    if (selectedItems.length < 2) return;
+
+    const groupBounds = getBoundsFromPointSets(selectedItems.flatMap(item => getPresentationItemCornerPoints(item)));
+    const groupCenterX = groupBounds.x + groupBounds.width / 2;
+    const groupCenterY = groupBounds.y + groupBounds.height / 2;
+
+    applyPresentationItems(prev => prev.map(item => {
+      if (!ids.includes(item.id)) return item;
+
+      const itemBounds = getBoundsFromPointSets([getPresentationItemCornerPoints(item)]);
+      let dx = 0;
+      let dy = 0;
+
+      if (mode === 'left') dx = groupBounds.x - itemBounds.x;
+      if (mode === 'right') dx = groupBounds.x + groupBounds.width - (itemBounds.x + itemBounds.width);
+      if (mode === 'center-x') dx = groupCenterX - (itemBounds.x + itemBounds.width / 2);
+      if (mode === 'top') dy = groupBounds.y - itemBounds.y;
+      if (mode === 'bottom') dy = groupBounds.y + groupBounds.height - (itemBounds.y + itemBounds.height);
+      if (mode === 'center-y') dy = groupCenterY - (itemBounds.y + itemBounds.height / 2);
+
+      return {
+        ...item,
+        x: n(item.x, 0) + dx,
+        y: n(item.y, 0) + dy
+      };
+    }), { selectedIds: ids });
+  };
+
   const copySelectedPresentationItem = () => {
     const ids = selectedPresentationItemIdsRef.current.length
       ? selectedPresentationItemIdsRef.current
@@ -9736,12 +9790,16 @@ export default function App() {
     if (isPresentationImageItem(item)) {
       const cx = (getPresentationItemWidth(item) * scale) / 2;
       const cy = (getPresentationItemHeight(item) * scale) / 2;
-      return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy})`;
+      const mirrorX = item.mirrorX ? -1 : 1;
+      const mirrorY = item.mirrorY ? -1 : 1;
+      return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy}) translate(${cx} ${cy}) scale(${mirrorX} ${mirrorY}) translate(${-cx} ${-cy})`;
     }
 
     const cx = (item.width * itemScale * scale) / 2;
     const cy = (item.height * itemScale * scale) / 2;
-    return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy}) scale(${itemScale}) translate(${-item.bounds.x * scale} ${-item.bounds.y * scale})`;
+    const mirrorX = item.mirrorX ? -1 : 1;
+    const mirrorY = item.mirrorY ? -1 : 1;
+    return `translate(${item.x * scale} ${item.y * scale}) rotate(${item.rotation || 0} ${cx} ${cy}) translate(${cx} ${cy}) scale(${mirrorX} ${mirrorY}) translate(${-cx} ${-cy}) scale(${itemScale}) translate(${-item.bounds.x * scale} ${-item.bounds.y * scale})`;
   };
 
   const presentationPolygonPath = (points) => (
@@ -9810,14 +9868,18 @@ export default function App() {
         const height = getPresentationItemHeight(item);
         const cx = width / 2;
         const cy = height / 2;
-        const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)})`;
+        const mirrorX = item.mirrorX ? -1 : 1;
+        const mirrorY = item.mirrorY ? -1 : 1;
+        const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)}) translate(${roundDXF(cx)} ${roundDXF(cy)}) scale(${mirrorX} ${mirrorY}) translate(${-roundDXF(cx)} ${-roundDXF(cy)})`;
         const imageUrl = getPresentationImageUrl(item);
         return `<image href="${imageUrl}" xlink:href="${imageUrl}" x="0" y="0" width="${roundDXF(width)}" height="${roundDXF(height)}" preserveAspectRatio="none" transform="${transform}"/>`;
       }
 
       const cx = (item.width * itemScale) / 2;
       const cy = (item.height * itemScale) / 2;
-      const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)}) scale(${roundDXF(itemScale)}) translate(${-roundDXF(item.bounds.x)} ${-roundDXF(item.bounds.y)})`;
+      const mirrorX = item.mirrorX ? -1 : 1;
+      const mirrorY = item.mirrorY ? -1 : 1;
+      const transform = `translate(${roundDXF(item.x)} ${roundDXF(item.y)}) rotate(${roundDXF(item.rotation || 0)} ${roundDXF(cx)} ${roundDXF(cy)}) translate(${roundDXF(cx)} ${roundDXF(cy)}) scale(${mirrorX} ${mirrorY}) translate(${-roundDXF(cx)} ${-roundDXF(cy)}) scale(${roundDXF(itemScale)}) translate(${-roundDXF(item.bounds.x)} ${-roundDXF(item.bounds.y)})`;
       const outerFrame = getPresentationOuterFrameRings(item)
         .map(ring => ring.solid
           ? `<polygon points="${presentationPolygonPointsRaw(ring.solid)}" fill="#000000"/>`
@@ -10109,9 +10171,9 @@ export default function App() {
     const presentationViewBox = getPresentationViewBox();
 
     return (
-      <div className="h-screen overflow-hidden bg-slate-100 p-3">
+      <div className="h-[100dvh] overflow-hidden bg-slate-100 p-3">
         <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
-          <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
+          <div className="shrink-0 overflow-x-auto border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
                 {[
@@ -10142,7 +10204,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {selectedPresentationItem && (
                 <>
                   {isPresentationImageItem(selectedPresentationItem) ? (
@@ -10206,6 +10268,48 @@ export default function App() {
                       className="h-8 w-10 rounded-md border border-slate-200 bg-white p-1"
                     />
                   </label>
+                  <div className="inline-flex overflow-hidden rounded-md border border-slate-200 bg-white">
+                    <button
+                      type="button"
+                      onClick={() => mirrorSelectedPresentationItems('x')}
+                      className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                      title="Mirror horizontally"
+                    >
+                      <FlipHorizontal size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => mirrorSelectedPresentationItems('y')}
+                      className="border-l border-slate-200 px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                      title="Mirror vertically"
+                    >
+                      <FlipVertical size={14} />
+                    </button>
+                  </div>
+                  <div className="inline-flex overflow-hidden rounded-md border border-slate-200 bg-white">
+                    {[
+                      ['Left', 'left'],
+                      ['H', 'center-x'],
+                      ['Right', 'right'],
+                      ['Top', 'top'],
+                      ['V', 'center-y'],
+                      ['Bottom', 'bottom']
+                    ].map(([label, mode], index) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        disabled={selectedPresentationItemIds.length < 2}
+                        onClick={() => alignSelectedPresentationItems(mode)}
+                        className={[
+                          'px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-white',
+                          index > 0 ? 'border-l border-slate-200' : ''
+                        ].join(' ')}
+                        title={`Align ${label}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                   <div className="inline-flex overflow-hidden rounded-md border border-slate-200 bg-white">
                     <button type="button" onClick={() => reorderSelectedPresentationItem('back')} className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Send to back">Back</button>
                     <button type="button" onClick={() => reorderSelectedPresentationItem('backward')} className="px-2 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Send backward"><ArrowDown size={14} /></button>
@@ -10281,7 +10385,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="relative flex-1 min-h-0 bg-white flex">
+          <div className="relative flex-1 min-h-0 bg-white flex overflow-hidden">
             <aside className="w-52 shrink-0 border-r border-slate-200 bg-slate-50 p-3 overflow-y-auto">
               <input
                 ref={presentationDecorationFileInputRef}
@@ -10480,9 +10584,9 @@ export default function App() {
 
   if (workspaceMode === 'interior') {
     return (
-      <div className="h-screen overflow-hidden bg-slate-100 p-3">
+      <div className="h-[100dvh] overflow-hidden bg-slate-100 p-3">
         <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
-          <div className="shrink-0 border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
+          <div className="shrink-0 overflow-x-auto border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
                 {[
@@ -10517,7 +10621,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+            <div className="flex min-w-max flex-1 items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={sendCurrentDesignToPresentation}
@@ -10595,7 +10699,7 @@ export default function App() {
             </div>
 
             {selectedInteriorDesign && (
-              <div className="flex min-w-0 items-center justify-end gap-2">
+              <div className="flex min-w-max items-center justify-end gap-2">
                 <div className="min-w-0 max-w-40">
                   <p className="truncate text-xs font-semibold text-slate-700">
                     {selectedInteriorDesignIds.length > 1 ? `${selectedInteriorDesignIds.length} selected` : selectedInteriorDesign.name}
@@ -10864,7 +10968,7 @@ export default function App() {
             )}
           </div>
 
-          <div className="flex-1 min-h-0 p-3 flex gap-3">
+          <div className="flex-1 min-h-0 overflow-hidden p-3 flex gap-3">
             <div
               ref={previewWheelBlockerRef}
               className="relative flex-1 min-w-0 min-h-0 rounded-lg border bg-slate-50 overflow-hidden"
@@ -11839,7 +11943,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="w-56 shrink-0 rounded-lg border bg-slate-50 p-3">
+            <div className="w-56 max-h-full min-h-0 shrink-0 overflow-y-auto rounded-lg border bg-slate-50 p-3">
               <div className="flex items-center gap-2 mb-3">
                 <Wrench size={18} className="text-slate-700" />
                 <div>
@@ -12058,7 +12162,7 @@ export default function App() {
 
   return (
     <div
-      className="h-screen overflow-hidden bg-slate-100 p-3"
+      className="min-h-[100dvh] overflow-auto bg-slate-100 p-3 lg:h-[100dvh] lg:overflow-hidden"
       onClick={() => {
         if (activeTool === 'measure' || activeTool === 'angle') {
           setMeasurePoints([]);
@@ -12067,7 +12171,7 @@ export default function App() {
         }
       }}
     >
-      <div className="h-full w-full grid lg:grid-cols-[minmax(340px,420px)_1fr] gap-3" onClick={(e) => e.stopPropagation()}>
+      <div className="min-h-0 w-full grid gap-3 lg:h-full lg:grid-cols-[minmax(340px,420px)_1fr]" onClick={(e) => e.stopPropagation()}>
 
         {/* LEFT PANEL - CONTROLS */}
         <div className="min-h-0 overflow-y-auto bg-white rounded-xl shadow-lg border border-slate-200 p-4 space-y-3">
@@ -12627,7 +12731,7 @@ export default function App() {
         </div>
 
         {/* RIGHT AREA - PREVIEW + TOOL PANEL */}
-        <div className="min-h-0 bg-white rounded-xl shadow-lg border border-slate-200 p-3 flex gap-3">
+        <div className="min-h-[520px] bg-white rounded-xl shadow-lg border border-slate-200 p-3 flex gap-3 lg:min-h-0">
           <div
             ref={previewWheelBlockerRef}
             className={[
@@ -12829,7 +12933,7 @@ export default function App() {
           </div>
 
           {/* TOOL PANEL */}
-          <div className={['rounded-lg border bg-slate-50 p-2 transition-all duration-200 shrink-0', activeTool ? 'w-52' : 'w-40'].join(' ')}>
+          <div className={['max-h-full min-h-0 overflow-y-auto rounded-lg border bg-slate-50 p-2 transition-all duration-200 shrink-0', activeTool ? 'w-52' : 'w-40'].join(' ')}>
             <div className="flex items-center gap-2 mb-2">
               <Wrench size={18} className="text-slate-700" />
               <div>
