@@ -24,14 +24,15 @@ import {
   Square,
   Circle,
   Type,
-  Grid3X3,
   Upload,
   Minus,
   Eraser,
   RotateCcw,
   RotateCw,
   FlipHorizontal,
-  FlipVertical
+  FlipVertical,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
 
 const projectSvgLibraryModules = import.meta.glob('./assets/svg-library/**/*.svg', {
@@ -72,6 +73,140 @@ const loadProjectSvgLibraryItemText = async (item) => {
   return svgText;
 };
 
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+const MIN_VIEW_ZOOM = 0.1;
+const MAX_VIEW_ZOOM = 8;
+
+function Section({ title, defaultOpen = false, alwaysOpen = false, enabled, onToggleEnabled, enabledLabel = 'Enabled', open, onOpenChange, children }) {
+  const controlled = open !== undefined;
+
+  const titleRow = onToggleEnabled ? (
+    <span className="flex w-full items-center justify-between gap-2">
+      <span>{title}</span>
+      <label
+        className="flex items-center gap-1.5 text-xs font-normal text-slate-500"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input type="checkbox" checked={enabled} onChange={e => onToggleEnabled(e.target.checked)} />
+        {enabledLabel}
+      </label>
+    </span>
+  ) : title;
+
+  if (alwaysOpen) {
+    return (
+      <div className="rounded-lg bg-slate-50 border px-3 py-2 space-y-2">
+        <div className="text-sm font-medium text-slate-700">{titleRow}</div>
+        {children}
+      </div>
+    );
+  }
+
+  const summaryProps = controlled
+    ? { onClick: (e) => { e.preventDefault(); onOpenChange(!open); } }
+    : {};
+
+  return (
+    <details className="rounded-lg bg-slate-50 border px-3 py-2" open={controlled ? open : defaultOpen}>
+      <summary className="cursor-pointer select-none text-sm font-medium text-slate-700" {...summaryProps}>{titleRow}</summary>
+      <div className="mt-2 space-y-3">{children}</div>
+    </details>
+  );
+}
+
+function WorkspaceTabs({ workspaceMode, onSwitch }) {
+  return (
+    <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+      {[
+        ['Frame', 'frame'],
+        ['Interior', 'interior'],
+        ['Presentation', 'presentation']
+      ].map(([label, mode]) => (
+        <button
+          key={mode}
+          type="button"
+          onClick={() => onSwitch(mode)}
+          className={[
+            'rounded-md px-3 py-1.5 text-sm font-semibold transition',
+            workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+          ].join(' ')}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ViewZoomControls({ viewZoom, setViewZoom, resetView }) {
+  return (
+    <div className="mb-2 flex items-center gap-1 rounded-lg border bg-white p-1">
+      <button
+        type="button"
+        onClick={() => setViewZoom(z => clamp(z / 1.12, MIN_VIEW_ZOOM, MAX_VIEW_ZOOM))}
+        className="flex-1 flex items-center justify-center rounded-md p-1.5 text-slate-600 hover:bg-slate-50"
+        title="Zoom out"
+      >
+        <ZoomOut size={15} />
+      </button>
+      <button
+        type="button"
+        onClick={resetView}
+        className="flex-1 rounded-md p-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+        title="Reset view"
+      >
+        {Math.round(viewZoom * 100)}%
+      </button>
+      <button
+        type="button"
+        onClick={() => setViewZoom(z => clamp(z * 1.12, MIN_VIEW_ZOOM, MAX_VIEW_ZOOM))}
+        className="flex-1 flex items-center justify-center rounded-md p-1.5 text-slate-600 hover:bg-slate-50"
+        title="Zoom in"
+      >
+        <ZoomIn size={15} />
+      </button>
+    </div>
+  );
+}
+
+function ToolButton({ id, icon: Icon, label, shortcut, disabled = false, activeTool, setActiveTool, setMeasurePoints, setHoverSnap, setDraggingMeasurement, clearMeasureTool }) {
+  const active = activeTool === id;
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => {
+        if (disabled) return;
+        if ((id === 'measure' || id === 'angle') && activeTool === id) {
+          clearMeasureTool();
+          return;
+        }
+        setMeasurePoints([]);
+        setHoverSnap(null);
+        setDraggingMeasurement(null);
+        setActiveTool(id);
+      }}
+      className={[
+        'w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition border',
+        active ? 'bg-slate-900 text-white border-slate-900 shadow-md' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50',
+        disabled ? 'opacity-40 cursor-not-allowed hover:bg-white' : 'cursor-pointer'
+      ].join(' ')}
+    >
+      <Icon size={18} />
+      <span className="flex-1 text-left">{label}</span>
+      {shortcut && (
+        <span className={[
+          'text-[10px] px-1.5 py-0.5 rounded border',
+          active ? 'border-white/30 text-white/80' : 'border-slate-200 text-slate-400'
+        ].join(' ')}>
+          {shortcut}
+        </span>
+      )}
+    </button>
+  );
+}
+
 export default function App() {
   const [width, setWidth] = useState(1000);
   const [height, setHeight] = useState(600); // right / maximum outside height for asymmetric + double arc modes
@@ -106,6 +241,8 @@ export default function App() {
   const [splitLeftBottomEars, setSplitLeftBottomEars] = useState(2);
   const [splitRightTopEars, setSplitRightTopEars] = useState(2);
   const [splitRightBottomEars, setSplitRightBottomEars] = useState(2);
+  const [rightPanelTopOffsetInput, setRightPanelTopOffsetInput] = useState(0);
+  const [rightPanelTopOffsetGlueEars, setRightPanelTopOffsetGlueEars] = useState(false);
   const [bottomPanelEnabled, setBottomPanelEnabled] = useState(false);
   const [bottomPanelHeightInput, setBottomPanelHeightInput] = useState(400);
   const [bottomPanelVEars, setBottomPanelVEars] = useState(1);
@@ -118,9 +255,18 @@ export default function App() {
   const [removeSideHorizontalConstraint, setRemoveSideHorizontalConstraint] = useState(false);
   const [cornerAngle, setCornerAngle] = useState(90);
   const [workspaceMode, setWorkspaceMode] = useState('frame');
-  const [interiorDesigns, setInteriorDesigns] = useState([]);
+  const [interiorDesigns, setInteriorDesigns] = useState(() => {
+    if (typeof localStorage === 'undefined') return [];
+    try {
+      const saved = JSON.parse(localStorage.getItem('rectangle-ear-interior-live-canvas') || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
   const [selectedInteriorDesignId, setSelectedInteriorDesignId] = useState(null);
   const [selectedInteriorDesignIds, setSelectedInteriorDesignIds] = useState([]);
+  const [excludedPatternSlotIds, setExcludedPatternSlotIds] = useState([]);
   const [interiorDrag, setInteriorDrag] = useState(null);
   const [interiorSelectionBox, setInteriorSelectionBox] = useState(null);
   const [isInteriorPointerOnBody, setIsInteriorPointerOnBody] = useState(false);
@@ -149,8 +295,25 @@ export default function App() {
     }
   });
   const [showInteriorBoardsMenu, setShowInteriorBoardsMenu] = useState(false);
+  const [pendingBoardImportId, setPendingBoardImportId] = useState(null);
   const [patternEnabled, setPatternEnabled] = useState(false);
   const [patternMode, setPatternMode] = useState('random');
+  const [patternLocked, setPatternLocked] = useState(() => {
+    if (typeof localStorage === 'undefined') return false;
+    try {
+      return JSON.parse(localStorage.getItem('rectangle-ear-pattern-lock') || 'null')?.locked ?? false;
+    } catch {
+      return false;
+    }
+  });
+  const [lockedPatternContours, setLockedPatternContours] = useState(() => {
+    if (typeof localStorage === 'undefined') return null;
+    try {
+      return JSON.parse(localStorage.getItem('rectangle-ear-pattern-lock') || 'null')?.contours ?? null;
+    } catch {
+      return null;
+    }
+  });
   const [patternThickness, setPatternThickness] = useState(15);
   const [patternMinLength, setPatternMinLength] = useState(80);
   const [patternMaxLength, setPatternMaxLength] = useState(260);
@@ -160,6 +323,8 @@ export default function App() {
   const [patternRoundedEnds, setPatternRoundedEnds] = useState(false);
   const [patternRandomRowSpacing, setPatternRandomRowSpacing] = useState(false);
   const [patternRandomGap, setPatternRandomGap] = useState(false);
+  const [patternRandomDirectionEnabled, setPatternRandomDirectionEnabled] = useState(false);
+  const [patternRandomDirectionAmount, setPatternRandomDirectionAmount] = useState(10);
   const [alignedSlotRows, setAlignedSlotRows] = useState(6);
   const [alignedSlotBottomRows, setAlignedSlotBottomRows] = useState(2);
   const [alignedSlotBreakWidth, setAlignedSlotBreakWidth] = useState(30);
@@ -169,6 +334,7 @@ export default function App() {
   const [alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing] = useState(false);
   const [alignedSlotRowSpacing, setAlignedSlotRowSpacing] = useState(80);
   const [alignedSlotStaggerBreaks, setAlignedSlotStaggerBreaks] = useState(false);
+  const [alignedSlotRowOffsetInput, setAlignedSlotRowOffsetInput] = useState(0);
   const [presentationItems, setPresentationItems] = useState(() => {
     if (typeof localStorage === 'undefined') return [];
     try {
@@ -253,8 +419,6 @@ export default function App() {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
-
-  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
   const cloneInteriorDesigns = (designs) => designs.map(design => ({ ...design }));
 
@@ -445,8 +609,6 @@ export default function App() {
   const IMPORTED_SVG_HIT_MASK_SIZE = 192;
 
   const topVisibleCornerMargin = Math.max(0, margin - topEarDepth);
-  const MIN_VIEW_ZOOM = 0.1;
-  const MAX_VIEW_ZOOM = 8;
 
   const isSymmetricTop = topShape === 'symmetric';
   const isSymmetricThreeArcTop = topShape === 'symmetricThreeArc';
@@ -463,6 +625,7 @@ export default function App() {
   const safeSplitPosition = safeSplitPanelWidth - splitEarDepth;
   const safeRightSplitPosition = safeSplitPanelWidth + splitGap + splitEarDepth;
   const hasPanelSplit = splitPanelEnabled && safeWidth - leftEarDepth - rightEarDepth > 2 && safeSplitPosition > leftEarDepth && safeRightSplitPosition < safeWidth - rightEarDepth;
+  const rightPanelTopOffset = (hasPanelSplit && isAsymmetricTop) ? Math.max(0, n(rightPanelTopOffsetInput, 0)) : 0;
   const safeCornerAngle = clamp(n(cornerAngle, 90), 30, 150);
   const shearOffset = safeWidth * Math.tan((safeCornerAngle - 90) * Math.PI / 180);
   const minShearY = Math.min(0, shearOffset);
@@ -495,8 +658,8 @@ export default function App() {
   const angledRun = Math.max(1, rightWallLimit - leftWallLimit);
   const angledEdgeLength = Math.hypot(angledRun, shearOffset) || 1;
   const angledLengthProjection = angledRun / angledEdgeLength;
-  const topEdgeMarginForLayout = topVisibleCornerMargin * angledLengthProjection + topEarDepth;
-  const bottomEdgeMarginForLayout = Math.max(0, margin - bottomEarDepth) * angledLengthProjection + bottomEarDepth;
+  const topEdgeMarginForLayout = topVisibleCornerMargin * angledLengthProjection;
+  const bottomEdgeMarginForLayout = Math.max(0, margin - bottomEarDepth) * angledLengthProjection;
   const topEarLengthForLayout = isAngledPanel && topShape === 'straight' ? topEarLength * angledLengthProjection : topEarLength;
   const bottomEarLengthForLayout = isAngledPanel ? bottomEarLength * angledLengthProjection : bottomEarLength;
   const topEdgeNormal = [shearOffset / angledEdgeLength, -angledRun / angledEdgeLength];
@@ -614,6 +777,75 @@ export default function App() {
     setDraggingMeasurement(null);
   };
 
+  const toolButtonProps = { activeTool, setActiveTool, setMeasurePoints, setHoverSnap, setDraggingMeasurement, clearMeasureTool };
+
+  const getFrameSettingsSnapshot = () => ({
+    width, height, leftHeight, middlePosition, middleHeight,
+    manualMode, hEars, vEars, leftVEars, rightVEars,
+    topEarLengthInput, topEarDepthInput, rightEarLengthInput, rightEarDepthInput,
+    bottomEarLengthInput, bottomEarDepthInput, leftEarLengthInput, leftEarDepthInput,
+    splitPanelEnabled, splitPositionInput, splitGapInput, splitEarLengthInput, splitEarDepthInput,
+    splitManualMode, splitLeftCutEars, splitRightCutEars, syncSplitEars,
+    splitLeftTopEars, splitLeftBottomEars, splitRightTopEars, splitRightBottomEars,
+    rightPanelTopOffsetInput, rightPanelTopOffsetGlueEars,
+    bottomPanelEnabled, bottomPanelHeightInput, bottomPanelVEars,
+    topShape, arcRise, transitionHeight, crownWidth, removeSideHorizontalConstraint, cornerAngle
+  });
+
+  const applyFrameSettingsSnapshot = (saved) => {
+    if (!saved || typeof saved !== 'object') return;
+    const setters = {
+      width: setWidth, height: setHeight, leftHeight: setLeftHeight, middlePosition: setMiddlePosition, middleHeight: setMiddleHeight,
+      manualMode: setManualMode, hEars: setHEars, vEars: setVEars, leftVEars: setLeftVEars, rightVEars: setRightVEars,
+      topEarLengthInput: setTopEarLengthInput, topEarDepthInput: setTopEarDepthInput,
+      rightEarLengthInput: setRightEarLengthInput, rightEarDepthInput: setRightEarDepthInput,
+      bottomEarLengthInput: setBottomEarLengthInput, bottomEarDepthInput: setBottomEarDepthInput,
+      leftEarLengthInput: setLeftEarLengthInput, leftEarDepthInput: setLeftEarDepthInput,
+      splitPanelEnabled: setSplitPanelEnabled, splitPositionInput: setSplitPositionInput,
+      splitGapInput: setSplitGapInput, splitEarLengthInput: setSplitEarLengthInput, splitEarDepthInput: setSplitEarDepthInput,
+      splitManualMode: setSplitManualMode, splitLeftCutEars: setSplitLeftCutEars, splitRightCutEars: setSplitRightCutEars,
+      syncSplitEars: setSyncSplitEars, splitLeftTopEars: setSplitLeftTopEars, splitLeftBottomEars: setSplitLeftBottomEars,
+      splitRightTopEars: setSplitRightTopEars, splitRightBottomEars: setSplitRightBottomEars,
+      rightPanelTopOffsetInput: setRightPanelTopOffsetInput, rightPanelTopOffsetGlueEars: setRightPanelTopOffsetGlueEars,
+      bottomPanelEnabled: setBottomPanelEnabled, bottomPanelHeightInput: setBottomPanelHeightInput, bottomPanelVEars: setBottomPanelVEars,
+      topShape: setTopShape, arcRise: setArcRise, transitionHeight: setTransitionHeight, crownWidth: setCrownWidth,
+      removeSideHorizontalConstraint: setRemoveSideHorizontalConstraint, cornerAngle: setCornerAngle
+    };
+    Object.entries(setters).forEach(([key, setter]) => {
+      if (saved[key] !== undefined) setter(saved[key]);
+    });
+  };
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const saved = JSON.parse(localStorage.getItem('rectangle-ear-frame-settings') || 'null');
+      applyFrameSettingsSnapshot(saved);
+    } catch {
+      // Ignore corrupt storage.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem('rectangle-ear-frame-settings', JSON.stringify(getFrameSettingsSnapshot()));
+    } catch {
+      // Avoid crashing when browser storage is full.
+    }
+  }, [
+    width, height, leftHeight, middlePosition, middleHeight,
+    manualMode, hEars, vEars, leftVEars, rightVEars,
+    topEarLengthInput, topEarDepthInput, rightEarLengthInput, rightEarDepthInput,
+    bottomEarLengthInput, bottomEarDepthInput, leftEarLengthInput, leftEarDepthInput,
+    splitPanelEnabled, splitPositionInput, splitGapInput, splitEarLengthInput, splitEarDepthInput,
+    splitManualMode, splitLeftCutEars, splitRightCutEars, syncSplitEars,
+    splitLeftTopEars, splitLeftBottomEars, splitRightTopEars, splitRightBottomEars,
+    rightPanelTopOffsetInput, rightPanelTopOffsetGlueEars,
+    bottomPanelEnabled, bottomPanelHeightInput, bottomPanelVEars,
+    topShape, arcRise, transitionHeight, crownWidth, removeSideHorizontalConstraint, cornerAngle
+  ]);
+
   useEffect(() => {
     interiorDesignsRef.current = interiorDesigns;
   }, [interiorDesigns]);
@@ -627,6 +859,26 @@ export default function App() {
       }
     }
   }, [savedInteriorBoards]);
+
+  useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('rectangle-ear-interior-live-canvas', JSON.stringify(interiorDesigns));
+      } catch {
+        // Avoid crashing when browser storage is full.
+      }
+    }
+  }, [interiorDesigns]);
+
+  useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('rectangle-ear-pattern-lock', JSON.stringify({ locked: patternLocked, contours: lockedPatternContours }));
+      } catch {
+        // Avoid crashing when browser storage is full.
+      }
+    }
+  }, [patternLocked, lockedPatternContours]);
 
   useEffect(() => {
     presentationItemsRef.current = presentationItems;
@@ -1302,7 +1554,7 @@ export default function App() {
   const points = useMemo(() => {
     const ears = [];
 
-    const addAutoSide = (sideLength, orientation, length, depth, edgeMargin = margin) => {
+    const addAutoSide = (sideLength, orientation, length, depth, edgeMargin = topEarDepth + Math.max(0, margin - depth)) => {
       if (depth <= 0) return;
       const usable = sideLength - 2 * edgeMargin - length;
       if (usable < 0) return;
@@ -1318,7 +1570,7 @@ export default function App() {
       }
     };
 
-    const addManualSide = (sideLength, orientation, count, length, depth, edgeMargin = margin) => {
+    const addManualSide = (sideLength, orientation, count, length, depth, edgeMargin = topEarDepth + Math.max(0, margin - depth)) => {
       if (depth <= 0) return;
 
       if (count === 1) {
@@ -1372,8 +1624,8 @@ export default function App() {
     };
 
     if (!manualMode) {
-      if (topShape === 'straight') addAutoSide(safeWidth, 'top', topEarLengthForLayout, topEarDepth, topEdgeMarginForLayout);
-      addAutoSide(safeWidth, 'bottom', bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout);
+      if (topShape === 'straight') addAutoSide(safeWidth, 'top', topEarLengthForLayout, topEarDepth, leftEarDepth + topEdgeMarginForLayout);
+      addAutoSide(safeWidth, 'bottom', bottomEarLengthForLayout, bottomEarDepth, leftEarDepth + bottomEdgeMarginForLayout);
 
       if (isSplitHeightTop) {
         addAutoVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', leftEarLength, leftEarDepth);
@@ -1383,8 +1635,8 @@ export default function App() {
         addAutoSide(safeHeight, 'right', rightEarLength, rightEarDepth);
       }
     } else {
-      if (topShape === 'straight') addManualSide(safeWidth, 'top', Math.max(1, n(hEars, 1)), topEarLengthForLayout, topEarDepth, topEdgeMarginForLayout);
-      addManualSide(safeWidth, 'bottom', Math.max(1, n(hEars, 1)), bottomEarLengthForLayout, bottomEarDepth, bottomEdgeMarginForLayout);
+      if (topShape === 'straight') addManualSide(safeWidth, 'top', Math.max(1, n(hEars, 1)), topEarLengthForLayout, topEarDepth, leftEarDepth + topEdgeMarginForLayout);
+      addManualSide(safeWidth, 'bottom', Math.max(1, n(hEars, 1)), bottomEarLengthForLayout, bottomEarDepth, leftEarDepth + bottomEdgeMarginForLayout);
 
       if (isSplitHeightTop) {
         addManualVerticalSpan(splitLeftBaseY, bottomBaseY, 'left', Math.max(1, n(leftVEars, 1)), leftEarLength, leftEarDepth);
@@ -1850,11 +2102,24 @@ export default function App() {
     const bottomRightToLeft = getBottomEdgeVerticesLeftToRightForSpan(rightSplitX, safeWidth - rightEarDepth, splitRightBottomEars).reverse();
     const splitTop = arc ? arc.pointAt(splitS, 0) : [splitX, topEarDepth];
     const splitBottom = [splitX, bottomBaseY];
-    const rightSplitTop = arc ? arc.pointAt(rightSplitS, 0) : [rightSplitX, topEarDepth];
+    const rightPanelEarOffset = rightPanelTopOffsetGlueEars ? 0 : rightPanelTopOffset;
+    const rightArcEndPointRaw = arc ? arc.pointAt(rightSplitS, 0) : [rightSplitX, topEarDepth];
+    // The arc itself always shifts by the full offset — this is where the visible material actually ends,
+    // regardless of whether the ears further down the edge are glued in place.
+    const rightArcActualEndY = rightArcEndPointRaw[1] + rightPanelTopOffset;
+    const rightSplitTop = [rightArcEndPointRaw[0], rightArcActualEndY];
     const rightSplitBottom = [rightSplitX, bottomBaseY];
     const syncedSplitEarRanges = syncSplitEars
       ? getVerticalEarRanges(splitTop[1], splitBottom[1], splitEarLength, splitEarDepth, splitManualMode, splitLeftCutEars)
       : null;
+    // When glued, compute the ear pattern against the ORIGINAL (unshifted) reference so positions match
+    // the un-offset baseline, then drop any ear the now-shifted arc would cross into — otherwise the fixed
+    // ear notch and the moved arc overlap and produce a self-intersecting outline (a visible spike).
+    const idealRightSplitRanges = syncedSplitEarRanges
+      || getVerticalEarRanges(bottomBaseY, rightArcEndPointRaw[1] + rightPanelEarOffset, splitEarLength, splitEarDepth, splitManualMode, splitRightCutEars);
+    const rightSplitRanges = rightPanelTopOffsetGlueEars
+      ? idealRightSplitRanges.filter(range => Math.min(range.start, range.end) >= rightArcActualEndY)
+      : idealRightSplitRanges;
 
     const leftVerts = [...leftTop];
     addVerticalEarsToEdge(leftVerts, splitX, splitTop[1], splitBottom[1], 'right', splitEarLength, splitEarDepth, splitManualMode, splitLeftCutEars, syncedSplitEarRanges);
@@ -1864,9 +2129,13 @@ export default function App() {
       leftVerts.push([leftEarDepth, p + leftEarLength], [0, p + leftEarLength], [0, p], [leftEarDepth, p]);
     });
 
-    const rightVerts = [...rightTop];
-    grouped.right.forEach(ear => {
-      const p = ear.pos;
+    const rightVerts = rightPanelTopOffset ? rightTop.map(([x, y]) => [x, y + rightPanelTopOffset]) : [...rightTop];
+    const rightOuterArcActualEndY = rightVerts[rightVerts.length - 1][1];
+    const rightOuterEars = rightPanelTopOffsetGlueEars
+      ? grouped.right.filter(ear => ear.pos >= rightOuterArcActualEndY)
+      : grouped.right;
+    rightOuterEars.forEach(ear => {
+      const p = ear.pos + rightPanelEarOffset;
       rightVerts.push(
         [safeWidth - rightEarDepth, p],
         [safeWidth, p],
@@ -1875,7 +2144,7 @@ export default function App() {
       );
     });
     bottomRightToLeft.forEach(point => pushPoint(rightVerts, point));
-    addVerticalEarsToEdge(rightVerts, rightSplitX, rightSplitBottom[1], rightSplitTop[1], 'left', splitEarLength, splitEarDepth, splitManualMode, splitRightCutEars, syncedSplitEarRanges);
+    addVerticalEarsToEdge(rightVerts, rightSplitX, rightSplitBottom[1], rightSplitTop[1], 'left', splitEarLength, splitEarDepth, splitManualMode, splitRightCutEars, rightSplitRanges);
 
     return [leftVerts, rightVerts];
   };
@@ -2035,7 +2304,7 @@ export default function App() {
     }
   };
 
-  const getCleanTopSpanVertices = (startX, endX) => {
+  const getCleanTopSpanVertices = (startX, endX, yOffset = 0) => {
     const arc = getActiveTopArcData();
     if (!arc) {
       const y1 = isSplitHeightTop
@@ -2044,14 +2313,14 @@ export default function App() {
       const y2 = isSplitHeightTop
         ? safeHeight - (safeLeftHeight + (safeHeight - safeLeftHeight) * ((endX - leftEarDepth) / Math.max(1, safeWidth - leftEarDepth - rightEarDepth))) + topEarDepth
         : topEarDepth;
-      return [[startX, y1], [endX, y2]];
+      return [[startX, y1 + yOffset], [endX, y2 + yOffset]];
     }
 
     const startS = getArcSAtX(arc, startX);
     const endS = getArcSAtX(arc, endX);
     const verts = [arc.pointAt(startS, 0)];
     appendCleanArcSpan(verts, arc, startS, endS);
-    return verts;
+    return yOffset ? verts.map(([x, y]) => [x, y + yOffset]) : verts;
   };
 
   const getCleanMainBodyPanelVertexSets = () => {
@@ -2068,7 +2337,7 @@ export default function App() {
       const splitX = safeSplitPosition;
       const rightSplitX = safeRightSplitPosition;
       const leftTop = getCleanTopSpanVertices(leftEarDepth, splitX);
-      const rightTop = getCleanTopSpanVertices(rightSplitX, safeWidth - rightEarDepth);
+      const rightTop = getCleanTopSpanVertices(rightSplitX, safeWidth - rightEarDepth, rightPanelTopOffset);
 
       return [
         [
@@ -2201,9 +2470,9 @@ export default function App() {
 
   const getActivePatternCleanPanelVertexSets = () => getCleanMainBodyPanelVertexSets();
 
-  const getActivePatternMarginBoundarySets = () => (
+  const getActivePatternPanelBoundarySets = () => (
     getActivePatternCleanPanelVertexSets()
-      .flatMap(panel => offsetPolygonInward(transformPoints(panel), interiorMargin))
+      .map(panel => transformPoints(panel))
   );
 
   const buildInteriorMarginPath = () => (
@@ -2259,12 +2528,12 @@ export default function App() {
     return points;
   };
 
-  const clipPatternSlotToMargin = (points) => {
-    const patternMarginBoundarySets = getActivePatternMarginBoundarySets();
-    if (!patternMarginBoundarySets.length) return [];
+  const clipPatternSlotToPanel = (points) => {
+    const patternPanelBoundarySets = getActivePatternPanelBoundarySets();
+    if (!patternPanelBoundarySets.length) return [];
 
     const subject = cleanClipperPaths([toClipperPath(points)]);
-    const clips = cleanClipperPaths(patternMarginBoundarySets.map(toClipperPath));
+    const clips = cleanClipperPaths(patternPanelBoundarySets.map(toClipperPath));
     if (!subject.length || !clips.length) return [];
 
     const clipper = new ClipperLib.Clipper();
@@ -2317,12 +2586,12 @@ export default function App() {
     );
   };
 
-  const getCleanPanelProjectionBounds = (panel, angle) => {
+  const getProjectionBoundsFromPointSets = (pointSets, angle) => {
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
     const nx = -uy;
     const ny = ux;
-    const points = transformPoints(panel);
+    const points = pointSets.flat();
     const projections = points.map(point => point[0] * ux + point[1] * uy);
     const normals = points.map(point => point[0] * nx + point[1] * ny);
 
@@ -2336,11 +2605,15 @@ export default function App() {
 
   const makeAlignedSlotPanelReferences = () => {
     const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
-    return getCleanMainBodyPanelVertexSets().map((panel, index) => ({
-      panel,
-      index,
-      bounds: getCleanPanelProjectionBounds(panel, angle)
-    }));
+    return getCleanMainBodyPanelVertexSets().map((panel, index) => {
+      const boundary = [transformPoints(panel)];
+      return {
+        panel,
+        boundary,
+        index,
+        bounds: getProjectionBoundsFromPointSets(boundary, angle)
+      };
+    });
   };
 
   const getAlignedSlotBreakProjectionsForPanel = (panelIndex, angle, staggered) => {
@@ -2433,6 +2706,7 @@ export default function App() {
     const leftInset = Math.max(0, n(alignedSlotLeftInset, 30));
     const rightInset = Math.max(0, n(alignedSlotRightInset, 30));
     const fixedRowSpacing = Math.max(0, n(alignedSlotRowSpacing, 80));
+    const rowOffset = n(alignedSlotRowOffsetInput, 0);
     const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
     const bottomPanelIndex = bottomPanelEnabled ? getCleanMainBodyPanelVertexSets().length - 1 : -1;
     const topPanelRefs = panelRefs.filter(ref => ref.index !== bottomPanelIndex);
@@ -2452,9 +2726,9 @@ export default function App() {
         : emptySpace / (rowCount + 1);
       const rowNormals = [];
       for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-        rowNormals.push(alignedSlotUseRowSpacing
+        rowNormals.push((alignedSlotUseRowSpacing
           ? minNormal + rowSpace + thickness / 2 + rowIndex * (thickness + fixedRowSpacing)
-          : minNormal + rowSpace * (rowIndex + 1) + thickness * (rowIndex + 0.5));
+          : minNormal + rowSpace * (rowIndex + 1) + thickness * (rowIndex + 0.5)) + rowOffset);
       }
 
       return {
@@ -2490,9 +2764,9 @@ export default function App() {
     };
   };
 
-  const clipPolygonToPanel = (points, panel) => {
+  const clipPolygonToBoundary = (points, boundaryPointSets) => {
     const subject = cleanClipperPaths([toClipperPath(points)]);
-    const clips = cleanClipperPaths([toClipperPath(transformPoints(panel))]);
+    const clips = cleanClipperPaths(boundaryPointSets.map(toClipperPath));
     if (!subject.length || !clips.length) return [];
 
     const clipper = new ClipperLib.Clipper();
@@ -2534,7 +2808,7 @@ export default function App() {
             pointFromProjectionNormal(a, group.maxNormal, layout.angle)
           ];
 
-          clipPolygonToPanel(rawStrip, ref.panel).forEach(points => {
+          clipPolygonToBoundary(rawStrip, ref.boundary).forEach(points => {
             if (points.length < 3) return;
             contours.push({
               points,
@@ -2590,7 +2864,7 @@ export default function App() {
               ? makeRoundedSlotPolygon(cx, cy, length, thickness, angle)
               : makeSlotPolygon(cx, cy, length, thickness, angle);
 
-            clipPolygonToPanel(rawSlot, ref.panel).forEach(points => {
+            clipPolygonToBoundary(rawSlot, ref.boundary).forEach(points => {
               const projectedLength = getPatternContourProjectedLength(points, angle);
               const finalPoints = patternRoundedEnds
                 ? roundClippedPatternContour(points, thickness, angle)
@@ -2627,8 +2901,8 @@ export default function App() {
   };
 
   const getRandomSlotPatternContours = () => {
-    const patternMarginBoundarySets = getActivePatternMarginBoundarySets();
-    if (!patternEnabled || patternMarginBoundarySets.length === 0) return [];
+    const patternPanelBoundarySets = getActivePatternPanelBoundarySets();
+    if (!patternEnabled || patternPanelBoundarySets.length === 0) return [];
 
     const thickness = Math.max(1, n(patternThickness, 15));
     const minLength = Math.max(1, n(patternMinLength, 80));
@@ -2641,7 +2915,7 @@ export default function App() {
     const uy = Math.sin(angle);
     const nx = -uy;
     const ny = ux;
-    const allPoints = patternMarginBoundarySets.flat();
+    const allPoints = patternPanelBoundarySets.flat();
     const projections = allPoints.map(point => point[0] * ux + point[1] * uy);
     const normals = allPoints.map(point => point[0] * nx + point[1] * ny);
     const minProjection = Math.min(...projections) - maxLength;
@@ -2693,13 +2967,21 @@ export default function App() {
           }
         }
 
-        const cx = ux * centerProjection + nx * lineNormal;
-        const cy = uy * centerProjection + ny * lineNormal;
+        let cx = ux * centerProjection + nx * lineNormal;
+        let cy = uy * centerProjection + ny * lineNormal;
+
+        if (patternRandomDirectionEnabled) {
+          const shiftAmount = Math.max(0, n(patternRandomDirectionAmount, 10));
+          const shiftAngle = random() * Math.PI * 2;
+          cx += Math.cos(shiftAngle) * shiftAmount;
+          cy += Math.sin(shiftAngle) * shiftAmount;
+        }
+
         const rawSlot = patternRoundedEnds
           ? makeRoundedSlotPolygon(cx, cy, length, thickness, angle)
           : makeSlotPolygon(cx, cy, length, thickness, angle);
 
-        clipPatternSlotToMargin(rawSlot).forEach(points => {
+        clipPatternSlotToPanel(rawSlot).forEach(points => {
           const projectedLength = getPatternContourProjectedLength(points, angle);
           const finalPoints = patternRoundedEnds
             ? roundClippedPatternContour(points, thickness, angle)
@@ -2732,12 +3014,24 @@ export default function App() {
       rowIndex++;
     });
 
-    return contours;
+    return contours.filter(contour => !excludedPatternSlotIds.includes(contour.designId));
   };
 
   const getPatternContours = () => {
+    if (patternLocked && lockedPatternContours) return lockedPatternContours;
     if (patternMode === 'alignedSlots') return getAlignedSlotPatternContours();
     return getRandomSlotPatternContours();
+  };
+
+  const lockCurrentPattern = () => {
+    const snapshot = getPatternContours();
+    setLockedPatternContours(snapshot);
+    setPatternLocked(true);
+  };
+
+  const unlockPattern = () => {
+    setPatternLocked(false);
+    setLockedPatternContours(null);
   };
 
   const buildOutlinePath = () => {
@@ -2807,7 +3101,7 @@ export default function App() {
     return () => {
       preview.removeEventListener('wheel', stopPageScroll);
     };
-  }, []);
+  }, [workspaceMode]);
 
   useEffect(() => {
     const handleInteriorKeyDown = (e) => {
@@ -3131,6 +3425,12 @@ export default function App() {
       getInteriorPointHandles(design).forEach(handle => addPoint([handle.x, handle.y]));
     });
 
+    if (patternEnabled) {
+      getPatternContours().forEach(contour => {
+        contour.points.forEach(addPoint);
+      });
+    }
+
     return points;
   };
 
@@ -3387,11 +3687,13 @@ export default function App() {
       addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [(p1[0] + p2[0]) / 2, outsideY]));
     };
 
-    const addArcRangeGap = (id, arc, ranges) => {
+    const addArcRangeGap = (id, arc, ranges, yOffset = 0) => {
       if (!arc || ranges.length < 2) return;
       const sorted = [...ranges].sort((a, b) => a.start - b.start);
-      const p1 = arc.pointAt(sorted[0].end, 0);
-      const p2 = arc.pointAt(sorted[1].start, 0);
+      const p1raw = arc.pointAt(sorted[0].end, 0);
+      const p2raw = arc.pointAt(sorted[1].start, 0);
+      const p1 = [p1raw[0], p1raw[1] + yOffset];
+      const p2 = [p2raw[0], p2raw[1] + yOffset];
       const outsideY = Math.min(p1[1], p2[1]) - 120;
       addMeasurement(createAutomaticGapMeasurement(id, p1, p2, [(p1[0] + p2[0]) / 2, outsideY]));
     };
@@ -3456,7 +3758,7 @@ export default function App() {
         const splitS = getArcSAtX(arc, splitX);
         const rightSplitS = getArcSAtX(arc, rightSplitX);
         addArcRangeGap('auto-gap-left-panel-top', arc, getArcEarRangesForSpan(0, splitS, true, splitLeftTopEars));
-        addArcRangeGap('auto-gap-right-panel-top', arc, getArcEarRangesForSpan(rightSplitS, arc.arcLength, true, splitRightTopEars));
+        addArcRangeGap('auto-gap-right-panel-top', arc, getArcEarRangesForSpan(rightSplitS, arc.arcLength, true, splitRightTopEars), rightPanelTopOffset);
       } else {
         addHorizontalRangeGap(
           'auto-gap-left-panel-top',
@@ -3485,8 +3787,10 @@ export default function App() {
         safeHeight + 120
       );
 
+      const rightPanelEarOffset = rightPanelTopOffsetGlueEars ? 0 : rightPanelTopOffset;
       const splitTop = arc ? arc.pointAt(getArcSAtX(arc, splitX), 0) : [splitX, topEarDepth];
-      const rightSplitTop = arc ? arc.pointAt(getArcSAtX(arc, rightSplitX), 0) : [rightSplitX, topEarDepth];
+      const rightSplitTopRaw = arc ? arc.pointAt(getArcSAtX(arc, rightSplitX), 0) : [rightSplitX, topEarDepth];
+      const rightSplitTop = [rightSplitTopRaw[0], rightSplitTopRaw[1] + rightPanelEarOffset];
       const leftSplitRanges = getVerticalEarRangesForSpan(splitTop[1], bottomBaseY, splitEarLength, splitEarDepth, splitManualMode, splitLeftCutEars);
       const rightSplitRanges = syncSplitEars
         ? leftSplitRanges
@@ -3495,7 +3799,14 @@ export default function App() {
       addVerticalRangeGap('auto-gap-right-panel-split', rightSplitRanges, rightSplitX, rightSplitX - 120);
 
       addVerticalGap('auto-gap-left-panel-left', grouped.left, leftEarDepth, -120, leftEarLength, leftEarDepth);
-      addVerticalGap('auto-gap-right-panel-right', grouped.right, safeWidth - rightEarDepth, safeWidth + 120, rightEarLength, rightEarDepth);
+      addVerticalGap(
+        'auto-gap-right-panel-right',
+        grouped.right.map(ear => ({ ...ear, pos: ear.pos + rightPanelEarOffset })),
+        safeWidth - rightEarDepth,
+        safeWidth + 120,
+        rightEarLength,
+        rightEarDepth
+      );
 
       return result;
     }
@@ -4062,6 +4373,34 @@ export default function App() {
     const cleanIds = Array.from(new Set(ids.filter(Boolean)));
     setSelectedInteriorDesignIds(cleanIds);
     setSelectedInteriorDesignId(cleanIds[cleanIds.length - 1] || null);
+  };
+
+  const promotePatternSlotToDesign = (contour) => {
+    const newDesign = {
+      id: crypto.randomUUID(),
+      kind: 'polygon',
+      name: 'Pattern slot',
+      color: 'white',
+      points: contour.points,
+      aspectLocked: false,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false
+    };
+    setExcludedPatternSlotIds(prev => [...prev, contour.designId]);
+    applyInteriorDesigns(prev => [...prev, newDesign]);
+    return newDesign;
+  };
+
+  const selectPatternSlotFromCanvas = (e, contour) => {
+    if (activeInteriorShapeTool) return;
+    e.stopPropagation();
+    const newDesign = promotePatternSlotToDesign(contour);
+    if (e.shiftKey) {
+      setInteriorSelection([...selectedInteriorDesignIdsRef.current, newDesign.id]);
+    } else {
+      setInteriorSelection([newDesign.id]);
+    }
   };
 
   const toggleInteriorSelection = (id) => {
@@ -5475,6 +5814,7 @@ export default function App() {
         hasPanelSplit,
         bottomPanelEnabled
       },
+      frameSettings: getFrameSettingsSnapshot(),
       designs: cloneInteriorDesigns(interiorDesignsRef.current),
       patternShapes,
       settings: {
@@ -5491,6 +5831,8 @@ export default function App() {
         patternRoundedEnds,
         patternRandomRowSpacing,
         patternRandomGap,
+        patternRandomDirectionEnabled,
+        patternRandomDirectionAmount,
         alignedSlotRows,
         alignedSlotBottomRows,
         alignedSlotBreakWidth,
@@ -5499,13 +5841,18 @@ export default function App() {
         alignedSlotMinLength,
         alignedSlotUseRowSpacing,
         alignedSlotRowSpacing,
-        alignedSlotStaggerBreaks
+        alignedSlotStaggerBreaks,
+        alignedSlotRowOffsetInput,
+        patternLocked,
+        lockedPatternContours,
+        excludedPatternSlotIds
       }
     };
 
     setSavedInteriorBoards(prev => [board, ...prev]);
     setShowInteriorBoardsMenu(true);
     showInteriorPositionMessage('Board saved.');
+    return board;
   };
 
   const importSavedInteriorBoard = (boardId, point = getInteriorViewportCenterPoint()) => {
@@ -5525,6 +5872,73 @@ export default function App() {
       selectedId: shifted[shifted.length - 1]?.id
     });
     setSelectedInteriorDesignIds(shifted.map(item => item.id));
+  };
+
+  const importFullBoard = (boardId) => {
+    const board = savedInteriorBoards.find(item => item.id === boardId);
+    if (!board) return;
+
+    if (board.frameSettings) applyFrameSettingsSnapshot(board.frameSettings);
+
+    const settings = board.settings || {};
+    const settingsSetters = {
+      interiorClipEnabled: setInteriorClipEnabled,
+      interiorMarginInput: setInteriorMarginInput,
+      patternEnabled: setPatternEnabled,
+      patternMode: setPatternMode,
+      patternThickness: setPatternThickness,
+      patternMinLength: setPatternMinLength,
+      patternMaxLength: setPatternMaxLength,
+      patternRowSpacing: setPatternRowSpacing,
+      patternGap: setPatternGap,
+      patternSeed: setPatternSeed,
+      patternRoundedEnds: setPatternRoundedEnds,
+      patternRandomRowSpacing: setPatternRandomRowSpacing,
+      patternRandomGap: setPatternRandomGap,
+      patternRandomDirectionEnabled: setPatternRandomDirectionEnabled,
+      patternRandomDirectionAmount: setPatternRandomDirectionAmount,
+      alignedSlotRows: setAlignedSlotRows,
+      alignedSlotBottomRows: setAlignedSlotBottomRows,
+      alignedSlotBreakWidth: setAlignedSlotBreakWidth,
+      alignedSlotLeftInset: setAlignedSlotLeftInset,
+      alignedSlotRightInset: setAlignedSlotRightInset,
+      alignedSlotMinLength: setAlignedSlotMinLength,
+      alignedSlotUseRowSpacing: setAlignedSlotUseRowSpacing,
+      alignedSlotRowSpacing: setAlignedSlotRowSpacing,
+      alignedSlotStaggerBreaks: setAlignedSlotStaggerBreaks,
+      alignedSlotRowOffsetInput: setAlignedSlotRowOffsetInput,
+      patternLocked: setPatternLocked,
+      lockedPatternContours: setLockedPatternContours,
+      excludedPatternSlotIds: setExcludedPatternSlotIds
+    };
+    Object.entries(settingsSetters).forEach(([key, setter]) => {
+      if (settings[key] !== undefined) setter(settings[key]);
+    });
+
+    setInteriorDesigns(cloneInteriorDesigns(board.designs || []));
+    setSelectedInteriorDesignId(null);
+    setSelectedInteriorDesignIds([]);
+    setShowInteriorBoardsMenu(false);
+    showInteriorPositionMessage('Board loaded.');
+  };
+
+  const requestFullBoardImport = (boardId) => {
+    setPendingBoardImportId(boardId);
+  };
+
+  const confirmSaveThenImportBoard = () => {
+    saveCurrentInteriorBoard();
+    importFullBoard(pendingBoardImportId);
+    setPendingBoardImportId(null);
+  };
+
+  const confirmDiscardAndImportBoard = () => {
+    importFullBoard(pendingBoardImportId);
+    setPendingBoardImportId(null);
+  };
+
+  const cancelBoardImport = () => {
+    setPendingBoardImportId(null);
   };
 
   const deleteSavedInteriorBoard = (boardId) => {
@@ -6097,6 +6511,20 @@ export default function App() {
   const cancelInteriorShapeTool = () => {
     setActiveInteriorShapeTool(null);
     setInteriorShapeDraft(null);
+  };
+
+  const switchWorkspaceMode = (mode) => {
+    const applyModeSwitch = () => {
+      clearMeasureTool();
+      cancelInteriorShapeTool();
+      setWorkspaceMode(mode);
+    };
+
+    if (typeof document !== 'undefined' && typeof document.startViewTransition === 'function') {
+      document.startViewTransition(applyModeSwitch);
+    } else {
+      applyModeSwitch();
+    }
   };
 
   const finishInteriorInteraction = () => {
@@ -7847,7 +8275,14 @@ export default function App() {
     return cleanClipperPaths(solution);
   };
 
-  const buildBooleanInteriorContours = (contours) => {
+  const getMarginFrameClipPaths = (marginBoundarySets) => {
+    if (!marginBoundarySets.length) return [];
+    const fullPanelPaths = getCleanMainBodyPanelVertexSets().map(panel => toClipperPath(transformPoints(panel)));
+    const insetPaths = marginBoundarySets.map(toClipperPath);
+    return differenceClipperPaths(fullPanelPaths, insetPaths);
+  };
+
+  const buildBooleanInteriorContours = (contours, marginFrameClipPaths = []) => {
     const passthrough = contours.filter(contour => !contour.closed || contour.points.length < 3);
     const orderedClosed = contours
       .filter(contour => contour.closed && contour.points.length >= 3)
@@ -7868,6 +8303,10 @@ export default function App() {
 
       accumulatedWhite = unionClipperPaths([...accumulatedWhite, ...paths]);
     });
+
+    if (marginFrameClipPaths.length) {
+      accumulatedWhite = differenceClipperPaths(accumulatedWhite, marginFrameClipPaths);
+    }
 
     const resultContours = accumulatedWhite
       .map((path, index) => ({ path, points: fromClipperPath(path), index }))
@@ -8288,11 +8727,12 @@ export default function App() {
         }))
       : [];
 
+    const marginFrameClipPaths = clipEnabled ? getMarginFrameClipPaths(marginBoundarySets) : [];
     const booleanContours = buildBooleanInteriorContours([
       ...withAnalysis,
       ...(includeLivePattern ? clearanceContours : []),
       ...patternContours
-    ]);
+    ], marginFrameClipPaths);
     const optimizedContours = optimizeDxfContours(booleanContours);
 
     return {
@@ -8718,44 +9158,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const ToolButton = ({ id, icon: Icon, label, shortcut, disabled = false }) => {
-    const active = activeTool === id;
-
-    return (
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => {
-          if (disabled) return;
-          if ((id === 'measure' || id === 'angle') && activeTool === id) {
-            clearMeasureTool();
-            return;
-          }
-          setMeasurePoints([]);
-          setHoverSnap(null);
-          setDraggingMeasurement(null);
-          setActiveTool(id);
-        }}
-        className={[
-          'w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition border',
-          active ? 'bg-slate-900 text-white border-slate-900 shadow-md' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50',
-          disabled ? 'opacity-40 cursor-not-allowed hover:bg-white' : 'cursor-pointer'
-        ].join(' ')}
-      >
-        <Icon size={18} />
-        <span className="flex-1 text-left">{label}</span>
-        {shortcut && (
-          <span className={[
-            'text-[10px] px-1.5 py-0.5 rounded border',
-            active ? 'border-white/30 text-white/80' : 'border-slate-200 text-slate-400'
-          ].join(' ')}>
-            {shortcut}
-          </span>
-        )}
-      </button>
-    );
-  };
-
   const handlePercentageChange = (setter) => (e) => {
     const value = e.target.value;
     if (value === '') {
@@ -8841,7 +9243,7 @@ export default function App() {
   const interiorDraftBounds = getInteriorDraftBounds(interiorShapeDraft);
   const interiorExportData = useMemo(
     () => (showInteriorExportPreview ? collectInteriorDesignContours() : null),
-    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternMode, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, alignedSlotRows, alignedSlotBottomRows, alignedSlotBreakWidth, alignedSlotLeftInset, alignedSlotRightInset, alignedSlotMinLength, alignedSlotUseRowSpacing, alignedSlotRowSpacing, alignedSlotStaggerBreaks, interiorClipEnabled, interiorMarginInput]
+    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternMode, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, patternRandomDirectionEnabled, patternRandomDirectionAmount, alignedSlotRows, alignedSlotBottomRows, alignedSlotBreakWidth, alignedSlotLeftInset, alignedSlotRightInset, alignedSlotMinLength, alignedSlotUseRowSpacing, alignedSlotRowSpacing, alignedSlotStaggerBreaks, alignedSlotRowOffsetInput, excludedPatternSlotIds, interiorClipEnabled, interiorMarginInput]
   );
   const interiorExportDiagnostics = useMemo(
     () => getInteriorExportDiagnostics(interiorExportData),
@@ -8849,9 +9251,8 @@ export default function App() {
   );
 
   const openInteriorDesigner = () => {
-    clearMeasureTool();
     resetView();
-    setWorkspaceMode('interior');
+    switchWorkspaceMode('interior');
   };
 
   const getBoundsFromPointSets = (sets) => {
@@ -8912,7 +9313,7 @@ export default function App() {
   const sendCurrentDesignToPresentation = () => {
     const snapshot = createPresentationSnapshot();
     applyPresentationItems(prev => [...prev, snapshot], { selectedId: snapshot.id });
-    setWorkspaceMode('presentation');
+    switchWorkspaceMode('presentation');
     setPresentationPosition(null);
   };
 
@@ -10175,29 +10576,7 @@ export default function App() {
         <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
           <div className="shrink-0 overflow-x-auto border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
-              <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
-                {[
-                  ['Frame', 'frame'],
-                  ['Interior', 'interior'],
-                  ['Presentation', 'presentation']
-                ].map(([label, mode]) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => {
-                      clearMeasureTool();
-                      cancelInteriorShapeTool();
-                      setWorkspaceMode(mode);
-                    }}
-                    className={[
-                      'rounded-md px-3 py-1.5 text-sm font-semibold transition',
-                      workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                    ].join(' ')}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <WorkspaceTabs workspaceMode={workspaceMode} onSwitch={switchWorkspaceMode} />
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Presentation</h1>
                 <p className="text-xs text-slate-500">{presentationItems.length} saved item{presentationItems.length === 1 ? '' : 's'}</p>
@@ -10386,82 +10765,14 @@ export default function App() {
           </div>
 
           <div className="relative flex-1 min-h-0 bg-white flex overflow-hidden">
-            <aside className="w-52 shrink-0 border-r border-slate-200 bg-slate-50 p-3 overflow-y-auto">
-              <input
-                ref={presentationDecorationFileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={handlePresentationDecorationFiles}
-              />
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-800">Decor</h2>
-                  <p className="text-[11px] text-slate-500">Drag into view</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => presentationDecorationFileInputRef.current?.click()}
-                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-100"
-                  title="Add image"
-                >
-                  <Plus size={15} />
-                </button>
-              </div>
-              <div className="space-y-2">
-                {allPresentationDecorations.map(decoration => (
-                  <div
-                    key={decoration.id}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData('presentation-decoration-id', decoration.id);
-                      e.dataTransfer.effectAllowed = 'copy';
-                    }}
-                    onDoubleClick={() => addDecorationToPresentation(decoration)}
-                    className="group rounded-lg border border-slate-200 bg-white p-2 cursor-grab active:cursor-grabbing"
-                  >
-                    <div className="aspect-[4/3] rounded-md border border-slate-100 bg-white flex items-center justify-center overflow-hidden">
-                      <img src={decoration.imageUrl} alt="" className="max-h-full max-w-full object-contain" />
-                    </div>
-                    <div className="mt-2 flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <span className="block truncate text-[11px] font-medium text-slate-600">{decoration.name}</span>
-                        <span className="block text-[9px] uppercase tracking-wide text-slate-400">
-                          {decoration.projectAsset ? 'Project asset' : 'Local only'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removePresentationDecorationBackground(decoration);
-                          }}
-                          className="rounded border border-slate-200 bg-slate-50 p-1 text-slate-600 hover:bg-slate-100"
-                          title="Remove background"
-                        >
-                          <Eraser size={12} />
-                        </button>
-                        {!decoration.builtIn && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deletePresentationDecoration(decoration.id);
-                            }}
-                            className="rounded border border-red-100 bg-red-50 p-1 text-red-600 hover:bg-red-100"
-                            title="Delete decoration"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </aside>
+            <input
+              ref={presentationDecorationFileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={handlePresentationDecorationFiles}
+            />
             <svg
               ref={presentationSvgRef}
               width="100%"
@@ -10576,6 +10887,74 @@ export default function App() {
                 );
               })}
             </svg>
+            <aside className="w-52 shrink-0 border-l border-slate-200 bg-slate-50 p-3 overflow-y-auto">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-800">Decor</h2>
+                  <p className="text-[11px] text-slate-500">Drag into view</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => presentationDecorationFileInputRef.current?.click()}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-100"
+                  title="Add image"
+                >
+                  <Plus size={15} />
+                </button>
+              </div>
+              <div className="space-y-2">
+                {allPresentationDecorations.map(decoration => (
+                  <div
+                    key={decoration.id}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData('presentation-decoration-id', decoration.id);
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
+                    onDoubleClick={() => addDecorationToPresentation(decoration)}
+                    className="group rounded-lg border border-slate-200 bg-white p-2 cursor-grab active:cursor-grabbing"
+                  >
+                    <div className="aspect-[4/3] rounded-md border border-slate-100 bg-white flex items-center justify-center overflow-hidden">
+                      <img src={decoration.imageUrl} alt="" className="max-h-full max-w-full object-contain" />
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="block truncate text-[11px] font-medium text-slate-600">{decoration.name}</span>
+                        <span className="block text-[9px] uppercase tracking-wide text-slate-400">
+                          {decoration.projectAsset ? 'Project asset' : 'Local only'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removePresentationDecorationBackground(decoration);
+                          }}
+                          className="rounded border border-slate-200 bg-slate-50 p-1 text-slate-600 hover:bg-slate-100"
+                          title="Remove background"
+                        >
+                          <Eraser size={12} />
+                        </button>
+                        {!decoration.builtIn && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deletePresentationDecoration(decoration.id);
+                            }}
+                            className="rounded border border-red-100 bg-red-50 p-1 text-red-600 hover:bg-red-100"
+                            title="Delete decoration"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </aside>
           </div>
         </div>
       </div>
@@ -10585,32 +10964,43 @@ export default function App() {
   if (workspaceMode === 'interior') {
     return (
       <div className="h-[100dvh] overflow-hidden bg-slate-100 p-3">
+        {pendingBoardImportId && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40">
+            <div className="w-80 rounded-xl border border-slate-200 bg-white p-4 shadow-2xl">
+              <p className="text-sm font-semibold text-slate-800">Save your current design first?</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Loading this board will replace your current frame and interior design. Anything not saved as a board will be lost.
+              </p>
+              <div className="mt-3 space-y-2">
+                <button
+                  type="button"
+                  onClick={confirmSaveThenImportBoard}
+                  className="w-full rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                >
+                  Save current, then load board
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDiscardAndImportBoard}
+                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Discard and load board
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelBoardImport}
+                  className="w-full rounded-md px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="h-full w-full bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col min-h-0">
           <div className="shrink-0 overflow-x-auto border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
-              <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
-                {[
-                  ['Frame', 'frame'],
-                  ['Interior', 'interior'],
-                  ['Presentation', 'presentation']
-                ].map(([label, mode]) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => {
-                      clearMeasureTool();
-                      cancelInteriorShapeTool();
-                      setWorkspaceMode(mode);
-                    }}
-                    className={[
-                      'rounded-md px-3 py-1.5 text-sm font-semibold transition',
-                      workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                    ].join(' ')}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <WorkspaceTabs workspaceMode={workspaceMode} onSwitch={switchWorkspaceMode} />
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Interior Designer</h1>
                 <p className="text-xs text-slate-500">
@@ -10629,73 +11019,6 @@ export default function App() {
               >
                 Send to presentation
               </button>
-              <details
-                className="relative"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <summary className="list-none rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer">
-                  Position
-                </summary>
-                <div className="absolute right-0 top-10 z-30 w-72 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600 shadow-lg">
-                  <div className="mb-2">
-                    <p className="font-semibold text-slate-700">Reference</p>
-                    <p className="mt-0.5 text-[11px] text-slate-500">Clean main body</p>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      ['Center H', 'center-x'],
-                      ['Center V', 'center-y'],
-                      ['Align Left', 'left'],
-                      ['Align Right', 'right'],
-                      ['Align Top', 'top'],
-                      ['Align Bottom', 'bottom']
-                    ].map(([label, mode]) => (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() => alignInteriorSelectionToPanel(mode)}
-                        className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-medium text-slate-700 hover:bg-white"
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    {[
-                      ['Left', 'left'],
-                      ['Right', 'right'],
-                      ['Top', 'top'],
-                      ['Bottom', 'bottom']
-                    ].map(([label, side]) => (
-                      <label key={side} className="text-[11px] font-medium text-slate-500">
-                        {label} mm
-                        <input
-                          type="number"
-                          step="0.1"
-                          value={positionDistanceInputs[side]}
-                          onChange={e => setPositionDistanceInputs(prev => ({ ...prev, [side]: e.target.value }))}
-                          onBlur={e => applyInteriorDistanceToPanel(side, e.target.value)}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                              e.currentTarget.blur();
-                            }
-                          }}
-                          className="mt-1 w-full rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
-                        />
-                      </label>
-                    ))}
-                  </div>
-
-                  {interiorPositionMessage && (
-                    <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] font-medium text-amber-800">
-                      {interiorPositionMessage}
-                    </p>
-                  )}
-                </div>
-              </details>
             </div>
 
             {selectedInteriorDesign && (
@@ -10969,6 +11292,348 @@ export default function App() {
           </div>
 
           <div className="flex-1 min-h-0 overflow-hidden p-3 flex gap-3">
+            <div className="w-72 max-h-full min-h-0 shrink-0 overflow-y-auto rounded-lg border bg-slate-50 p-3 space-y-3">
+              <Section title="Position">
+                <div className="mb-2">
+                  <p className="font-semibold text-slate-700">Reference</p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">Clean main body</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    ['Center H', 'center-x'],
+                    ['Center V', 'center-y'],
+                    ['Align Left', 'left'],
+                    ['Align Right', 'right'],
+                    ['Align Top', 'top'],
+                    ['Align Bottom', 'bottom']
+                  ].map(([label, mode]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => alignInteriorSelectionToPanel(mode)}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {[
+                    ['Left', 'left'],
+                    ['Right', 'right'],
+                    ['Top', 'top'],
+                    ['Bottom', 'bottom']
+                  ].map(([label, side]) => (
+                    <label key={side} className="text-[11px] font-medium text-slate-500">
+                      {label} mm
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={positionDistanceInputs[side]}
+                        onChange={e => setPositionDistanceInputs(prev => ({ ...prev, [side]: e.target.value }))}
+                        onBlur={e => applyInteriorDistanceToPanel(side, e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            e.currentTarget.blur();
+                          }
+                        }}
+                        className="mt-1 w-full rounded-md border border-slate-200 bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                {interiorPositionMessage && (
+                  <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] font-medium text-amber-800">
+                    {interiorPositionMessage}
+                  </p>
+                )}
+              </Section>
+
+              <Section
+                title="Margin & Clip"
+                enabled={interiorClipEnabled}
+                onToggleEnabled={setInteriorClipEnabled}
+                enabledLabel="Clip white designs"
+                open={interiorOverlayPanel === 'margin'}
+                onOpenChange={(isOpen) => setInteriorOverlayPanel(isOpen ? 'margin' : null)}
+              >
+                <div>
+                  <label className="text-[11px] text-slate-500">Distance (mm)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={interiorMarginInput}
+                    onFocus={() => setShowInteriorMarginGuide(true)}
+                    onChange={e => {
+                      setShowInteriorMarginGuide(true);
+                      setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
+                    }}
+                    onBlur={handleInteriorMarginBlur}
+                    className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                  />
+                </div>
+              </Section>
+
+              {hasPanelSplit && isAsymmetricTop && (
+                <Section title="Frame Adjustments" alwaysOpen>
+                  <label className="text-[11px] text-slate-500">Right panel top offset (mm)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={rightPanelTopOffsetInput}
+                    onChange={e => setRightPanelTopOffsetInput(e.target.value === '' ? '' : +e.target.value)}
+                    onBlur={() => handleNumberBlur(setRightPanelTopOffsetInput, rightPanelTopOffsetInput, 0)}
+                    className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-400">Shifts the right panel's arc top and its ears down, without reshaping the arc or affecting the left panel.</p>
+                  <label className="mt-2 flex items-center gap-2 text-xs font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={rightPanelTopOffsetGlueEars}
+                      onChange={e => setRightPanelTopOffsetGlueEars(e.target.checked)}
+                    />
+                    Glue ears in place
+                  </label>
+                  <p className="mt-1 text-[11px] text-slate-400">When on, only the arc top and its own top ears move — the right-edge ears and split-gap ears stay exactly where they are.</p>
+                </Section>
+              )}
+
+              <Section
+                title="Pattern"
+                enabled={patternEnabled}
+                onToggleEnabled={setPatternEnabled}
+                enabledLabel="Enable pattern"
+                open={interiorOverlayPanel === 'pattern'}
+                onOpenChange={(isOpen) => setInteriorOverlayPanel(isOpen ? 'pattern' : null)}
+              >
+                <div>
+                  <label className="text-[11px] text-slate-500">Mode</label>
+                  <select
+                    value={patternMode}
+                    onChange={e => setPatternMode(e.target.value)}
+                    className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                  >
+                    <option value="random">Random slots</option>
+                    <option value="alignedSlots">Aligned slots</option>
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => (patternLocked ? unlockPattern() : lockCurrentPattern())}
+                  className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  {patternLocked ? 'Unlock pattern' : 'Lock pattern'}
+                </button>
+                {patternLocked && (
+                  <p className="rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] font-medium text-amber-800">
+                    Locked — showing frozen layout. Edit fields to preview; unlock to apply.
+                  </p>
+                )}
+                {patternMode === 'alignedSlots' && (
+                  <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={alignedSlotStaggerBreaks}
+                      onChange={e => setAlignedSlotStaggerBreaks(e.target.checked)}
+                    />
+                    Stagger breaks
+                  </label>
+                )}
+                {(patternMode === 'random'
+                  ? [
+                    ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                    ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
+                    ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
+                    ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
+                    ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
+                    ['Position shift', patternRandomDirectionAmount, setPatternRandomDirectionAmount, 0, patternRandomDirectionEnabled, setPatternRandomDirectionEnabled],
+                    ['Seed', patternSeed, setPatternSeed, 1, null, null]
+                  ]
+                  : [
+                    ['Rows count', alignedSlotRows, setAlignedSlotRows, 1, null, null],
+                    ...(bottomPanelEnabled ? [['Bottom panel rows', alignedSlotBottomRows, setAlignedSlotBottomRows, 1, null, null]] : []),
+                    ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                    ['Break width', alignedSlotBreakWidth, setAlignedSlotBreakWidth, 0, null, null],
+                    ['Left inset', alignedSlotLeftInset, setAlignedSlotLeftInset, 0, null, null],
+                    ['Right inset', alignedSlotRightInset, setAlignedSlotRightInset, 0, null, null],
+                    ['Min segment', alignedSlotMinLength, setAlignedSlotMinLength, 1, null, null],
+                    ['Row spacing', alignedSlotUseRowSpacing ? alignedSlotRowSpacing : formatPositionDistance(getAlignedSlotEqualRowSpacing()), setAlignedSlotRowSpacing, 0, alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing, !alignedSlotUseRowSpacing]
+                  ]).map(([label, value, setter, min, randomEnabled, setRandomEnabled, readOnly = false]) => (
+                    <div key={label}>
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] text-slate-500">{label}{label === 'Rows count' || label === 'Bottom panel rows' ? '' : ' (mm)'}</label>
+                        {setRandomEnabled && (
+                          <label className="flex items-center gap-1 text-[10px] text-slate-500">
+                            <input
+                              type="checkbox"
+                              checked={randomEnabled}
+                              onChange={e => {
+                                const checked = e.target.checked;
+                                if (patternMode === 'alignedSlots' && label === 'Row spacing' && checked) {
+                                  const displayedSpacing = n(value, getAlignedSlotEqualRowSpacing());
+                                  setAlignedSlotRowSpacing(displayedSpacing);
+                                }
+                                setRandomEnabled(checked);
+                              }}
+                            />
+                            {patternMode === 'alignedSlots' && label === 'Row spacing' ? 'Use fixed spacing' : 'Random'}
+                          </label>
+                        )}
+                      </div>
+                      <input
+                        type="number"
+                        min={min}
+                        value={value}
+                        readOnly={readOnly}
+                        onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
+                        onBlur={() => {
+                          if (!readOnly) handleNumberBlur(setter, value, min, Infinity, min);
+                        }}
+                        className={['mt-1 w-full rounded-md border p-1.5 text-sm text-slate-900', readOnly ? 'bg-slate-100' : 'bg-white'].join(' ')}
+                      />
+                    </div>
+                  ))}
+                {patternMode === 'alignedSlots' && (
+                  <div>
+                    <label className="text-[11px] text-slate-500">Row offset (mm)</label>
+                    <input
+                      type="number"
+                      value={alignedSlotRowOffsetInput}
+                      onChange={e => setAlignedSlotRowOffsetInput(e.target.value === '' ? '' : +e.target.value)}
+                      onBlur={() => handleNumberBlur(setAlignedSlotRowOffsetInput, alignedSlotRowOffsetInput, -Infinity, Infinity, 0)}
+                      className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                    />
+                  </div>
+                )}
+                <label className="flex items-center gap-2 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={patternRoundedEnds}
+                    onChange={e => setPatternRoundedEnds(e.target.checked)}
+                  />
+                  Rounded ends
+                </label>
+                {patternMode === 'random' && (
+                  <button
+                    type="button"
+                    disabled={patternLocked}
+                    onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
+                    className={[
+                      'w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50',
+                      patternLocked ? 'opacity-40 cursor-not-allowed hover:bg-white' : ''
+                    ].join(' ')}
+                  >
+                    Regenerate
+                  </button>
+                )}
+              </Section>
+
+              <Section
+                title="SVG Library"
+                open={interiorOverlayPanel === 'svgLibrary'}
+                onOpenChange={(isOpen) => setInteriorOverlayPanel(isOpen ? 'svgLibrary' : null)}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-[11px] font-medium text-slate-500">Folder</label>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                    {visibleProjectSvgLibraryItems.length}
+                  </span>
+                </div>
+                <select
+                  value={selectedInteriorSvgLibraryFolder}
+                  onChange={e => setSelectedInteriorSvgLibraryFolder(e.target.value)}
+                  className="w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
+                >
+                  {projectSvgLibraryFolders.map(folder => (
+                    <option key={folder} value={folder}>{folder}</option>
+                  ))}
+                </select>
+
+                {visibleProjectSvgLibraryItems.length ? (
+                  <div
+                    className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-1"
+                    onWheel={(e) => e.stopPropagation()}
+                    onWheelCapture={(e) => e.stopPropagation()}
+                  >
+                    {visibleProjectSvgLibraryItems.map(item => {
+                      const thumbnail = svgLibraryThumbnails[item.id];
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          draggable
+                          onDragStart={(e) => {
+                            interiorSvgLibraryDragRef.current = true;
+                            interiorSvgLibraryDragItemRef.current = item.id;
+                            e.dataTransfer.setData(INTERIOR_SVG_LIBRARY_DRAG_TYPE, item.id);
+                            e.dataTransfer.setData('text/plain', item.id);
+                            e.dataTransfer.effectAllowed = 'copy';
+                          }}
+                          onDragEnd={() => {
+                            window.setTimeout(() => {
+                              interiorSvgLibraryDragRef.current = false;
+                              interiorSvgLibraryDragItemRef.current = null;
+                            }, 0);
+                          }}
+                          onClick={async () => {
+                            if (interiorSvgLibraryDragRef.current) return;
+                            const svgText = await loadProjectSvgLibraryItemText(item);
+                            addInteriorSvgDesignFromText(svgText, item.name);
+                          }}
+                          onMouseDown={async (e) => {
+                            if (e.button !== 1 || !thumbnail) return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const svgText = await loadProjectSvgLibraryItemText(item);
+                            setExpandedSvgLibraryThumbnail({
+                              src: svgTextToDataUrl(removeSvgCanvasBackground(svgText)),
+                              name: item.name
+                            });
+                          }}
+                          onMouseUp={(e) => {
+                            if (e.button === 1) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setExpandedSvgLibraryThumbnail(null);
+                            }
+                          }}
+                          onAuxClick={(e) => {
+                            if (e.button === 1) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                            }
+                          }}
+                          className="rounded-md border border-slate-200 bg-slate-50 p-1.5 text-left text-[11px] text-slate-700 transition hover:border-blue-200 hover:bg-blue-50"
+                          title="Click to insert centered, drag into the workspace, or hold middle mouse for large preview"
+                        >
+                          <span className="flex h-16 w-full items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
+                            {thumbnail ? (
+                              <img
+                                src={thumbnail}
+                                alt=""
+                                className="h-full w-full scale-125 object-contain"
+                                draggable={false}
+                              />
+                            ) : (
+                              <span className="text-[10px] font-medium text-slate-400">Loading</span>
+                            )}
+                          </span>
+                          <span className="mt-1 block truncate font-medium">{item.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-500">
+                    Add SVG files to <span className="font-mono text-slate-600">src/assets/svg-library</span>.
+                  </div>
+                )}
+              </Section>
+            </div>
+
             <div
               ref={previewWheelBlockerRef}
               className="relative flex-1 min-w-0 min-h-0 rounded-lg border bg-slate-50 overflow-hidden"
@@ -11067,12 +11732,15 @@ export default function App() {
                 )}
 
                 {patternEnabled && (
-                  <g pointerEvents="none">
+                  <g pointerEvents={patternMode === 'random' && !activeInteriorShapeTool ? 'auto' : 'none'}>
                     {getPatternContours().map((contour, index) => (
                       <polygon
                         key={`pattern-preview-${index}`}
                         points={polygonPoints(contour.points)}
                         fill="#ffffff"
+                        onMouseDown={patternMode === 'random' ? (e) => { if (!activeInteriorShapeTool) e.stopPropagation(); } : undefined}
+                        onClick={patternMode === 'random' ? (e) => selectPatternSlotFromCanvas(e, contour) : undefined}
+                        style={patternMode === 'random' ? { cursor: 'pointer' } : undefined}
                       />
                     ))}
                   </g>
@@ -11279,6 +11947,15 @@ export default function App() {
                       />
                     ))}
                   </g>
+                )}
+
+                {interiorClipEnabled && interiorMarginBoundarySets.length > 0 && (
+                  <path
+                    d={`${buildOutlinePath()} ${buildInteriorMarginPath()}`}
+                    fill="#000000"
+                    fillRule="evenodd"
+                    pointerEvents="none"
+                  />
                 )}
 
                 {interiorShapeDraft && interiorDraftBounds && (
@@ -11510,272 +12187,6 @@ export default function App() {
               </svg>
 
               <div
-                className="absolute left-3 top-3 z-30 max-w-[calc(100%-1.5rem)]"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
-                onWheel={(e) => e.stopPropagation()}
-                onWheelCapture={(e) => e.stopPropagation()}
-              >
-                <div className="flex items-start gap-2">
-                  {[
-                    ['margin', 'Margin'],
-                    ['pattern', 'Pattern'],
-                    ['svgLibrary', 'SVG Library']
-                  ].map(([id, label]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => setInteriorOverlayPanel(prev => prev === id ? null : id)}
-                      className={[
-                        'rounded-lg border px-3 py-2 text-xs font-semibold shadow-sm transition',
-                        interiorOverlayPanel === id
-                          ? 'border-blue-200 bg-blue-50 text-blue-700'
-                          : 'border-slate-200 bg-white/95 text-slate-700 hover:bg-white'
-                      ].join(' ')}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                {interiorOverlayPanel && (
-                  <div className="mt-2 max-h-[calc(100vh-11rem)] overflow-y-auto rounded-lg border border-slate-200 bg-white/95 p-3 text-xs text-slate-700 shadow-lg">
-                    {interiorOverlayPanel === 'margin' && (
-                      <div className="w-52 space-y-2">
-                        <label className="flex items-center gap-2 font-medium">
-                          <input
-                            type="checkbox"
-                            checked={interiorClipEnabled}
-                            onChange={e => setInteriorClipEnabled(e.target.checked)}
-                          />
-                          Clip white designs
-                        </label>
-                        <div>
-                          <label className="text-[11px] text-slate-500">Distance (mm)</label>
-                          <input
-                            type="number"
-                            min="0"
-                            value={interiorMarginInput}
-                            onFocus={() => setShowInteriorMarginGuide(true)}
-                            onChange={e => {
-                              setShowInteriorMarginGuide(true);
-                              setInteriorMarginInput(e.target.value === '' ? '' : +e.target.value);
-                            }}
-                            onBlur={handleInteriorMarginBlur}
-                            className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {interiorOverlayPanel === 'pattern' && (
-                      <div className="w-64 space-y-2">
-                        <label className="flex items-center gap-2 font-medium">
-                          <input
-                            type="checkbox"
-                            checked={patternEnabled}
-                            onChange={e => setPatternEnabled(e.target.checked)}
-                          />
-                          Enable pattern
-                        </label>
-                        <div>
-                          <label className="text-[11px] text-slate-500">Mode</label>
-                          <select
-                            value={patternMode}
-                            onChange={e => setPatternMode(e.target.value)}
-                            className="mt-1 w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                          >
-                            <option value="random">Random slots</option>
-                            <option value="alignedSlots">Aligned slots</option>
-                          </select>
-                        </div>
-                        {patternMode === 'alignedSlots' && (
-                          <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 font-medium text-slate-700">
-                            <input
-                              type="checkbox"
-                              checked={alignedSlotStaggerBreaks}
-                              onChange={e => setAlignedSlotStaggerBreaks(e.target.checked)}
-                            />
-                            Stagger breaks
-                          </label>
-                        )}
-                        {(patternMode === 'random'
-                          ? [
-                            ['Thickness', patternThickness, setPatternThickness, 1, null, null],
-                            ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
-                            ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
-                            ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
-                            ['Gap', patternGap, setPatternGap, 0, patternRandomGap, setPatternRandomGap],
-                            ['Seed', patternSeed, setPatternSeed, 1, null, null]
-                          ]
-                          : [
-                            ['Rows count', alignedSlotRows, setAlignedSlotRows, 1, null, null],
-                            ...(bottomPanelEnabled ? [['Bottom panel rows', alignedSlotBottomRows, setAlignedSlotBottomRows, 1, null, null]] : []),
-                            ['Thickness', patternThickness, setPatternThickness, 1, null, null],
-                            ['Break width', alignedSlotBreakWidth, setAlignedSlotBreakWidth, 0, null, null],
-                            ['Left inset', alignedSlotLeftInset, setAlignedSlotLeftInset, 0, null, null],
-                            ['Right inset', alignedSlotRightInset, setAlignedSlotRightInset, 0, null, null],
-                            ['Min segment', alignedSlotMinLength, setAlignedSlotMinLength, 1, null, null],
-                            ['Row spacing', alignedSlotUseRowSpacing ? alignedSlotRowSpacing : formatPositionDistance(getAlignedSlotEqualRowSpacing()), setAlignedSlotRowSpacing, 0, alignedSlotUseRowSpacing, setAlignedSlotUseRowSpacing, !alignedSlotUseRowSpacing]
-                          ]).map(([label, value, setter, min, randomEnabled, setRandomEnabled, readOnly = false]) => (
-                            <div key={label}>
-                              <div className="flex items-center justify-between gap-2">
-                                <label className="text-[11px] text-slate-500">{label}{label === 'Rows count' || label === 'Bottom panel rows' ? '' : ' (mm)'}</label>
-                                {setRandomEnabled && (
-                                  <label className="flex items-center gap-1 text-[10px] text-slate-500">
-                                    <input
-                                      type="checkbox"
-                                      checked={randomEnabled}
-                                      onChange={e => {
-                                        const checked = e.target.checked;
-                                        if (patternMode === 'alignedSlots' && label === 'Row spacing' && checked) {
-                                          const displayedSpacing = n(value, getAlignedSlotEqualRowSpacing());
-                                          setAlignedSlotRowSpacing(displayedSpacing);
-                                        }
-                                        setRandomEnabled(checked);
-                                      }}
-                                    />
-                                    {patternMode === 'alignedSlots' && label === 'Row spacing' ? 'Use fixed spacing' : 'Random'}
-                                  </label>
-                                )}
-                              </div>
-                              <input
-                                type="number"
-                                min={min}
-                                value={value}
-                                readOnly={readOnly}
-                                onChange={e => setter(e.target.value === '' ? '' : +e.target.value)}
-                                onBlur={() => {
-                                  if (!readOnly) handleNumberBlur(setter, value, min, Infinity, min);
-                                }}
-                                className={['mt-1 w-full rounded-md border p-1.5 text-sm text-slate-900', readOnly ? 'bg-slate-100' : 'bg-white'].join(' ')}
-                              />
-                            </div>
-                          ))}
-                        <label className="flex items-center gap-2 font-medium">
-                          <input
-                            type="checkbox"
-                            checked={patternRoundedEnds}
-                            onChange={e => setPatternRoundedEnds(e.target.checked)}
-                          />
-                          Rounded ends
-                        </label>
-                        {patternMode === 'random' && (
-                          <button
-                            type="button"
-                            onClick={() => setPatternSeed(prev => Math.max(1, n(prev, 1) + 1))}
-                            className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                          >
-                            Regenerate
-                          </button>
-                        )}
-                      </div>
-                    )}
-
-                    {interiorOverlayPanel === 'svgLibrary' && (
-                      <div className="w-72 space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <label className="text-[11px] font-medium text-slate-500">Folder</label>
-                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
-                            {visibleProjectSvgLibraryItems.length}
-                          </span>
-                        </div>
-                        <select
-                          value={selectedInteriorSvgLibraryFolder}
-                          onChange={e => setSelectedInteriorSvgLibraryFolder(e.target.value)}
-                          className="w-full rounded-md border bg-white p-1.5 text-sm text-slate-900"
-                        >
-                          {projectSvgLibraryFolders.map(folder => (
-                            <option key={folder} value={folder}>{folder}</option>
-                          ))}
-                        </select>
-
-                        {visibleProjectSvgLibraryItems.length ? (
-                          <div
-                            className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto pr-1"
-                            onWheel={(e) => e.stopPropagation()}
-                            onWheelCapture={(e) => e.stopPropagation()}
-                          >
-                            {visibleProjectSvgLibraryItems.map(item => {
-                              const thumbnail = svgLibraryThumbnails[item.id];
-                              return (
-                                <button
-                                  key={item.id}
-                                  type="button"
-                                  draggable
-                                  onDragStart={(e) => {
-                                    interiorSvgLibraryDragRef.current = true;
-                                    interiorSvgLibraryDragItemRef.current = item.id;
-                                    e.dataTransfer.setData(INTERIOR_SVG_LIBRARY_DRAG_TYPE, item.id);
-                                    e.dataTransfer.setData('text/plain', item.id);
-                                    e.dataTransfer.effectAllowed = 'copy';
-                                  }}
-                                  onDragEnd={() => {
-                                    window.setTimeout(() => {
-                                      interiorSvgLibraryDragRef.current = false;
-                                      interiorSvgLibraryDragItemRef.current = null;
-                                    }, 0);
-                                  }}
-                                  onClick={async () => {
-                                    if (interiorSvgLibraryDragRef.current) return;
-                                    const svgText = await loadProjectSvgLibraryItemText(item);
-                                    addInteriorSvgDesignFromText(svgText, item.name);
-                                  }}
-                                  onMouseDown={async (e) => {
-                                    if (e.button !== 1 || !thumbnail) return;
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    const svgText = await loadProjectSvgLibraryItemText(item);
-                                    setExpandedSvgLibraryThumbnail({
-                                      src: svgTextToDataUrl(removeSvgCanvasBackground(svgText)),
-                                      name: item.name
-                                    });
-                                  }}
-                                  onMouseUp={(e) => {
-                                    if (e.button === 1) {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      setExpandedSvgLibraryThumbnail(null);
-                                    }
-                                  }}
-                                  onAuxClick={(e) => {
-                                    if (e.button === 1) {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                    }
-                                  }}
-                                  className="rounded-md border border-slate-200 bg-slate-50 p-1.5 text-left text-[11px] text-slate-700 transition hover:border-blue-200 hover:bg-blue-50"
-                                  title="Click to insert centered, drag into the workspace, or hold middle mouse for large preview"
-                                >
-                                  <span className="flex h-16 w-full items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
-                                    {thumbnail ? (
-                                      <img
-                                        src={thumbnail}
-                                        alt=""
-                                        className="h-full w-full scale-125 object-contain"
-                                        draggable={false}
-                                      />
-                                    ) : (
-                                      <span className="text-[10px] font-medium text-slate-400">Loading</span>
-                                    )}
-                                  </span>
-                                  <span className="mt-1 block truncate font-medium">{item.name}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-500">
-                            Add SVG files to <span className="font-mono text-slate-600">src/assets/svg-library</span>.
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div
                 className="absolute right-3 top-3 z-30 flex max-w-[calc(100%-1.5rem)] items-start justify-end gap-2"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
@@ -11822,7 +12233,7 @@ export default function App() {
                             ].join(' ')}
                             title="Export all saved boards in one stacked DXF"
                           >
-                            Export DXF
+                            Export all boards
                           </button>
                           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
                             {savedInteriorBoards.length}
@@ -11847,9 +12258,9 @@ export default function App() {
                                   interiorBoardDragItemRef.current = null;
                                 }, 0);
                               }}
-                              onClick={() => importSavedInteriorBoard(board.id, getInteriorViewportCenterPoint())}
+                              onClick={() => requestFullBoardImport(board.id)}
                               className="group rounded-md border border-slate-200 bg-slate-50 p-2 transition hover:border-blue-200 hover:bg-blue-50"
-                              title="Click to insert centered, or drag into the workspace"
+                              title="Click to load this board's full frame and design, or drag in just the design"
                             >
                               <div className="flex items-start gap-2">
                                 <div className="flex h-24 flex-1 items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
@@ -11859,17 +12270,30 @@ export default function App() {
                                     <span className="text-[11px] font-medium text-slate-400">No preview</span>
                                   )}
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    deleteSavedInteriorBoard(board.id);
-                                  }}
-                                  className="rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 opacity-80 hover:bg-red-100 group-hover:opacity-100"
-                                  title="Delete saved board"
-                                >
-                                  <Trash2 size={13} />
-                                </button>
+                                <div className="flex flex-col gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      deleteSavedInteriorBoard(board.id);
+                                    }}
+                                    className="rounded-md border border-red-200 bg-red-50 p-1.5 text-red-700 opacity-80 hover:bg-red-100 group-hover:opacity-100"
+                                    title="Delete saved board"
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      importSavedInteriorBoard(board.id, getInteriorViewportCenterPoint());
+                                    }}
+                                    className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 opacity-80 hover:bg-slate-100 group-hover:opacity-100"
+                                    title="Import just the design into the current workspace"
+                                  >
+                                    <PenLine size={13} />
+                                  </button>
+                                </div>
                               </div>
                               <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
                                 <span className="font-medium text-slate-600">Board {savedInteriorBoards.length - index}</span>
@@ -11955,6 +12379,8 @@ export default function App() {
                   </p>
                 </div>
               </div>
+
+              <ViewZoomControls viewZoom={viewZoom} setViewZoom={setViewZoom} resetView={resetView} />
 
               <div className="space-y-1.5">
                 <input
@@ -12073,10 +12499,6 @@ export default function App() {
                     />
                   </label>
                 </div>
-                <button type="button" disabled className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-white text-slate-400 border-slate-200 cursor-not-allowed">
-                  <Grid3X3 size={17} />
-                  <span className="flex-1 text-left">Patterns</span>
-                </button>
                 <button
                   type="button"
                   onClick={() => designFileInputRef.current?.click()}
@@ -12089,9 +12511,10 @@ export default function App() {
                   type="button"
                   onClick={downloadDXF}
                   className="w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-sm border bg-slate-900 text-white border-slate-900 hover:bg-slate-800"
+                  title="Export the current interior design as DXF"
                 >
                   <Upload size={17} />
-                  <span className="flex-1 text-left">Export DXF</span>
+                  <span className="flex-1 text-left">Export current design</span>
                 </button>
                 <button
                   type="button"
@@ -12174,36 +12597,16 @@ export default function App() {
       <div className="min-h-0 w-full grid gap-3 lg:h-full lg:grid-cols-[minmax(340px,420px)_1fr]" onClick={(e) => e.stopPropagation()}>
 
         {/* LEFT PANEL - CONTROLS */}
-        <div className="min-h-0 overflow-y-auto bg-white rounded-xl shadow-lg border border-slate-200 p-4 space-y-3">
-          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
-            {[
-              ['Frame', 'frame'],
-              ['Interior', 'interior'],
-              ['Presentation', 'presentation']
-            ].map(([label, mode]) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => {
-                  clearMeasureTool();
-                  cancelInteriorShapeTool();
-                  setWorkspaceMode(mode);
-                }}
-                className={[
-                  'rounded-md px-3 py-1.5 text-sm font-semibold transition',
-                  workspaceMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-                ].join(' ')}
-              >
-                {label}
-              </button>
-            ))}
+        <div className="min-h-0 flex flex-col bg-white rounded-xl shadow-lg border border-slate-200">
+          <div className="shrink-0 border-b border-slate-200 px-4 py-3 space-y-3">
+            <WorkspaceTabs workspaceMode={workspaceMode} onSwitch={switchWorkspaceMode} />
+            <div>
+              <h1 className="text-xl font-bold text-slate-800">Ear Pattern Generator</h1>
+              <p className="text-slate-500 text-xs mt-0.5">Parametric CAD DXF generator</p>
+            </div>
           </div>
 
-          <div>
-            <h1 className="text-xl font-bold text-slate-800">Ear Pattern Generator</h1>
-            <p className="text-slate-500 text-xs mt-0.5">Parametric CAD DXF generator</p>
-          </div>
-
+          <div className="min-h-0 flex-1 overflow-y-auto p-4 space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-slate-500">Width (mm)</label>
@@ -12230,9 +12633,8 @@ export default function App() {
             </div>
           </div>
 
-          <details className="rounded-lg bg-slate-50 border px-3 py-2">
-            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Corner angle</summary>
-            <div className="grid grid-cols-3 gap-3 mt-2">
+          <Section title="Corner angle">
+            <div className="grid grid-cols-3 gap-3">
               <div>
                 <label className="text-xs text-slate-500">Angle (deg)</label>
                 <input
@@ -12269,10 +12671,10 @@ export default function App() {
                 />
               </div>
             </div>
-          </details>
+          </Section>
 
-          <div className="p-3 rounded-lg bg-slate-50 border space-y-2">
-            <label className="text-xs text-slate-500">Top shape</label>
+          <Section title="Top shape" alwaysOpen>
+            <label className="text-xs text-slate-500">Shape</label>
             <select
               value={topShape}
               onChange={e => setTopShape(e.target.value)}
@@ -12389,11 +12791,10 @@ export default function App() {
                 </p>
               </div>
             )}
-          </div>
+          </Section>
 
-          <details className="rounded-lg bg-slate-50 border px-3 py-2">
-            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Ear sizes</summary>
-            <div className="grid grid-cols-4 gap-2 mt-2 text-xs">
+          <Section title="Ear sizes">
+            <div className="grid grid-cols-4 gap-2 text-xs">
               {[
                 ['Top', topEarLengthInput, setTopEarLengthInput, topEarDepthInput, setTopEarDepthInput],
                 ['Right', rightEarLengthInput, setRightEarLengthInput, rightEarDepthInput, setRightEarDepthInput],
@@ -12423,20 +12824,9 @@ export default function App() {
                 </div>
               ))}
             </div>
-          </details>
+          </Section>
 
-          <details className="rounded-lg bg-slate-50 border px-3 py-2">
-            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Split panel</summary>
-            <div className="mt-2 space-y-3">
-              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={splitPanelEnabled}
-                  onChange={e => setSplitPanelEnabled(e.target.checked)}
-                />
-                Enable vertical split
-              </label>
-
+          <Section title="Split panel" enabled={splitPanelEnabled} onToggleEnabled={setSplitPanelEnabled}>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-slate-500">Left panel width (mm)</label>
@@ -12570,21 +12960,9 @@ export default function App() {
                   </div>
                 </div>
               )}
-            </div>
-          </details>
+          </Section>
 
-          <details className="rounded-lg bg-slate-50 border px-3 py-2">
-            <summary className="cursor-pointer select-none text-sm font-medium text-slate-700">Add bottom panel</summary>
-            <div className="mt-2 space-y-3">
-              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={bottomPanelEnabled}
-                  onChange={e => setBottomPanelEnabled(e.target.checked)}
-                />
-                Add bottom panel
-              </label>
-
+          <Section title="Add bottom panel" enabled={bottomPanelEnabled} onToggleEnabled={setBottomPanelEnabled}>
               {bottomPanelEnabled && (
                 <>
                   <div className="grid grid-cols-2 gap-3">
@@ -12627,16 +13005,15 @@ export default function App() {
                   )}
                 </>
               )}
-            </div>
-          </details>
+          </Section>
 
-          <div className="p-3 rounded-lg bg-slate-50 border space-y-2">
+          <Section title="Manual Mode" alwaysOpen>
             <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
               <input type="checkbox" checked={manualMode} onChange={e => setManualMode(e.target.checked)} />
-              Manual Mode
+              Enable manual ear count
             </label>
             <p className="text-xs text-slate-500">Toggle between automatic optimization and fixed ear count</p>
-          </div>
+          </Section>
 
           {manualMode && (
             <div className="space-y-1.5">
@@ -12707,7 +13084,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setWorkspaceMode('presentation')}
+              onClick={() => switchWorkspaceMode('presentation')}
               className="w-full inline-flex items-center justify-center gap-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 font-semibold py-2.5 rounded-lg transition shadow-sm"
             >
               Presentation
@@ -12720,14 +13097,17 @@ export default function App() {
             </button>
           </div>
 
-          <details className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500"><summary className="cursor-pointer select-none font-medium text-slate-600">Notes</summary><div className="mt-2 leading-relaxed">
-            <p>• Auto mode: optimized spacing 240–400mm</p>
-            <p>• Manual mode: fixed ear count with 80mm visible margins</p>
-            <p>• N=1 centers ear perfectly</p>
-            <p>• Asymmetric top: low left side, max right side, circular arc ends flat on the right</p>
-            <p>• Double arc top: two connected circular arcs with editable middle point</p>
-            <p>• Symmetric 3-arc top: transition height + crown width controls with optional side horizontal constraint</p>
-          </div></details>
+          <Section title="Notes">
+            <div className="text-xs text-slate-500 leading-relaxed space-y-1">
+              <p>• Auto mode: optimized spacing 240–400mm</p>
+              <p>• Manual mode: fixed ear count with 80mm visible margins</p>
+              <p>• N=1 centers ear perfectly</p>
+              <p>• Asymmetric top: low left side, max right side, circular arc ends flat on the right</p>
+              <p>• Double arc top: two connected circular arcs with editable middle point</p>
+              <p>• Symmetric 3-arc top: transition height + crown width controls with optional side horizontal constraint</p>
+            </div>
+          </Section>
+          </div>
         </div>
 
         {/* RIGHT AREA - PREVIEW + TOOL PANEL */}
@@ -12942,11 +13322,13 @@ export default function App() {
               </div>
             </div>
 
+            <ViewZoomControls viewZoom={viewZoom} setViewZoom={setViewZoom} resetView={resetView} />
+
             <div className="space-y-1.5">
-              <ToolButton id="measure" icon={Ruler} label="Measure" shortcut="M" />
-              <ToolButton id="angle" icon={DraftingCompass} label="Angle" shortcut="A" />
-              <ToolButton id="add-ear" icon={Plus} label="Add ear" />
-              <ToolButton id="delete-ear" icon={Trash2} label="Delete ear" />
+              <ToolButton id="measure" icon={Ruler} label="Measure" shortcut="M" {...toolButtonProps} />
+              <ToolButton id="angle" icon={DraftingCompass} label="Angle" shortcut="A" {...toolButtonProps} />
+              <ToolButton id="add-ear" icon={Plus} label="Add ear" {...toolButtonProps} />
+              <ToolButton id="delete-ear" icon={Trash2} label="Delete ear" {...toolButtonProps} />
             </div>
 
             {activeTool === 'measure' && (

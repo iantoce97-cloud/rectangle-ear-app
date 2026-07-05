@@ -57,6 +57,12 @@ body {
   margin: 0;
 }
 
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.18s;
+  animation-timing-function: ease-out;
+}
+
 #root {
   width: 100%;
   max-width: none;
