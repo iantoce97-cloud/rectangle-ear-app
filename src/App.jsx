@@ -75,7 +75,7 @@ const loadProjectSvgLibraryItemText = async (item) => {
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const MIN_VIEW_ZOOM = 0.1;
-const MAX_VIEW_ZOOM = 8;
+const MAX_VIEW_ZOOM = 50;
 
 function Section({ title, defaultOpen = false, alwaysOpen = false, enabled, onToggleEnabled, enabledLabel = 'Enabled', open, onOpenChange, children }) {
   const controlled = open !== undefined;
@@ -254,6 +254,12 @@ export default function App() {
   const [crownWidth, setCrownWidth] = useState(50); // symmetric 3-arc horizontal distance between merge points percent
   const [removeSideHorizontalConstraint, setRemoveSideHorizontalConstraint] = useState(false);
   const [cornerAngle, setCornerAngle] = useState(90);
+  // When set, this replaces the parametric ear/split/top-shape frame outline entirely: it's a
+  // single closed polygon (mm) read from an imported DXF file. Ear placement, split panels, and
+  // top-shape controls don't apply to an arbitrary imported outline, so they're bypassed wherever
+  // this is set rather than trying to make them understand a shape they can't parametrize.
+  const [importedFrameOutline, setImportedFrameOutline] = useState(null);
+  const [importedFrameFileName, setImportedFrameFileName] = useState('');
   const [workspaceMode, setWorkspaceMode] = useState('frame');
   const [interiorDesigns, setInteriorDesigns] = useState(() => {
     if (typeof localStorage === 'undefined') return [];
@@ -273,6 +279,8 @@ export default function App() {
   const [isInteriorPointerOnWhiteSurface, setIsInteriorPointerOnWhiteSurface] = useState(false);
   const [activeInteriorShapeTool, setActiveInteriorShapeTool] = useState(null);
   const [interiorShapeDraft, setInteriorShapeDraft] = useState(null);
+  const [pendingPatternPathSourceId, setPendingPatternPathSourceId] = useState(null);
+  const [hoveredPatternPathEdge, setHoveredPatternPathEdge] = useState(null);
   const [eraserSizeInput, setEraserSizeInput] = useState(20);
   const [interiorDimensionDrafts, setInteriorDimensionDrafts] = useState({});
   const [positionDistanceInputs, setPositionDistanceInputs] = useState({ left: '', right: '', top: '', bottom: '' });
@@ -379,6 +387,7 @@ export default function App() {
   const lastMiddleClickRef = useRef(0);
   const previewWheelBlockerRef = useRef(null);
   const designFileInputRef = useRef(null);
+  const frameDxfFileInputRef = useRef(null);
   const interiorDesignsRef = useRef([]);
   const selectedInteriorDesignIdRef = useRef(null);
   const selectedInteriorDesignIdsRef = useRef([]);
@@ -666,6 +675,9 @@ export default function App() {
   const bottomEdgeNormal = [-shearOffset / angledEdgeLength, angledRun / angledEdgeLength];
 
   const transformPoint = ([x, y]) => {
+    // An imported outline isn't a parametric panel — there's no "corner angle" to shear it by.
+    if (importedFrameOutline) return [x, y];
+
     if (bottomPanelEnabled && y >= safeHeight + bottomPanelGap - 0.001) {
       return [x, y];
     }
@@ -1154,6 +1166,8 @@ export default function App() {
         setActiveInteriorShapeTool(null);
         setInteriorShapeDraft(null);
         setPresentationDrag(null);
+        setPendingPatternPathSourceId(null);
+        setHoveredPatternPathEdge(null);
       }
 
       if (!isTextEditingTarget(e.target) && (e.key === 'Delete' || e.key === 'Backspace')) {
@@ -2232,6 +2246,8 @@ export default function App() {
   };
 
   const buildSnapVertices = () => {
+    if (importedFrameOutline) return importedFrameOutline;
+
     const verts = [getStartPoint()];
 
     if (hasArcTop) {
@@ -2284,11 +2300,13 @@ export default function App() {
     return verts;
   };
 
-  const getPrimaryPanelVertexSets = () => (hasPanelSplit ? getSplitPanelVertexSets() : [buildVertices()]);
+  const getPrimaryPanelVertexSets = () => (
+    importedFrameOutline ? [importedFrameOutline] : (hasPanelSplit ? getSplitPanelVertexSets() : [buildVertices()])
+  );
 
   const getPanelVertexSets = () => {
     const panels = getPrimaryPanelVertexSets();
-    return bottomPanelEnabled ? [...panels, buildBottomPanelVertices()] : panels;
+    return (bottomPanelEnabled && !importedFrameOutline) ? [...panels, buildBottomPanelVertices()] : panels;
   };
 
   const snapPoints = hasPanelSplit || bottomPanelEnabled
@@ -2324,6 +2342,8 @@ export default function App() {
   };
 
   const getCleanMainBodyPanelVertexSets = () => {
+    if (importedFrameOutline) return [importedFrameOutline];
+
     const primaryPanels = (() => {
       if (!hasPanelSplit) {
         const top = getCleanTopSpanVertices(leftEarDepth, safeWidth - rightEarDepth);
@@ -3328,6 +3348,7 @@ export default function App() {
   };
 
   const getFrameEarDescriptors = () => {
+    if (importedFrameOutline) return [];
     const descriptors = [];
 
     if (hasArcTop) {
@@ -3496,6 +3517,16 @@ export default function App() {
         const points = design.points || [];
         points.forEach(addPoint);
         points.forEach((point, index) => addSegment(point, points[(index + 1) % points.length]));
+        return;
+      }
+
+      if (design.kind === 'editableSvg') {
+        (design.contours || []).forEach(contour => {
+          const points = contour.points || [];
+          points.forEach(addPoint);
+          const segCount = contour.closed ? points.length : points.length - 1;
+          for (let i = 0; i < segCount; i++) addSegment(points[i], points[(i + 1) % points.length]);
+        });
         return;
       }
 
@@ -3837,6 +3868,22 @@ export default function App() {
 
 
   const polygonPoints = (pointsArray) => pointsArray.map(([x, y]) => `${x * scale},${y * scale}`).join(' ');
+  // For points already placed inside a wrapper <g transform="...scale(...)"> (e.g. thickened SVG
+  // contours, in the same raw/local coordinate space as dangerouslySetInnerHTML markup) — the
+  // wrapper already applies the global mm scale, so these must NOT be multiplied again.
+  const rawPolygonPoints = (pointsArray) => pointsArray.map(([x, y]) => `${x},${y}`).join(' ');
+
+  // Combines multiple (possibly disjoint) contours — e.g. an editable multi-path SVG shape — into
+  // one <path d> string in absolute mm coordinates (same convention as polygonPoints).
+  const buildInteriorContoursPathD = (contours) => (
+    contours.map(contour => {
+      const points = contour.points || [];
+      if (points.length < 2) return '';
+      const [first, ...rest] = points;
+      const segments = rest.map(([x, y]) => `L ${x * scale} ${y * scale}`).join(' ');
+      return `M ${first[0] * scale} ${first[1] * scale} ${segments}${contour.closed ? ' Z' : ''}`;
+    }).filter(Boolean).join(' ')
+  );
 
   const handlePreviewMouseMove = (e) => {
     if (panState) {
@@ -3882,7 +3929,10 @@ export default function App() {
   };
 
   const isImportedInteriorSvg = (design) => !design?.kind || design.kind === 'svg';
-  const isPointEditedInteriorShape = (design) => design?.kind === 'line' || design?.kind === 'arc' || design?.kind === 'polygon';
+  // editableSvg shapes can be toggled out of point-editing (pointEditMode: false) to get normal
+  // corner resize/rotate handles back instead of one handle per vertex — the point geometry itself
+  // is unchanged either way, and re-entering point mode later is just flipping the flag back.
+  const isPointEditedInteriorShape = (design) => design?.kind === 'line' || design?.kind === 'arc' || design?.kind === 'polygon' || (design?.kind === 'editableSvg' && design.pointEditMode !== false);
   const isInteriorGroup = (design) => design?.kind === 'group';
   const flattenInteriorDesigns = (designs, parentMatrix = null) => (
     designs.flatMap(design => {
@@ -3981,6 +4031,38 @@ export default function App() {
       };
     }
 
+    if (design.kind === 'editableSvg') {
+      const points = (design.contours || []).flatMap(contour => contour.points || []);
+      if (!points.length) return { x: n(design.x, 0), y: n(design.y, 0), width: 10, height: 10 };
+      const xs = points.map(point => point[0]);
+      const ys = points.map(point => point[1]);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+      const maxX = Math.max(...xs);
+      const maxY = Math.max(...ys);
+      return {
+        x: minX,
+        y: minY,
+        width: Math.max(10, maxX - minX),
+        height: Math.max(10, maxY - minY)
+      };
+    }
+
+    if (design.kind === 'patternAlongPath') {
+      const instances = buildPatternAlongPathInstances(design);
+      const halfW = Math.max(1, n(design.motifWidth, 20)) * n(design.scale, 1) / 2;
+      const halfH = Math.max(1, n(design.motifHeight, 20)) * n(design.scale, 1) / 2;
+      if (!instances.length) return { x: n(design.x, 0), y: n(design.y, 0), width: 10, height: 10 };
+      const xs = instances.flatMap(inst => [inst.x - halfW, inst.x + halfW]);
+      const ys = instances.flatMap(inst => [inst.y - halfH, inst.y + halfH]);
+      return {
+        x: Math.min(...xs),
+        y: Math.min(...ys),
+        width: Math.max(10, Math.max(...xs) - Math.min(...xs)),
+        height: Math.max(10, Math.max(...ys) - Math.min(...ys))
+      };
+    }
+
     return {
       x: n(design.x, 0),
       y: n(design.y, 0),
@@ -4004,6 +4086,38 @@ export default function App() {
     bounds.y + bounds.height / 2
   ];
 
+  // Axis-aligned bounding box of the shape's OWN rect after rotation is applied — used for the
+  // selection outline/handles so they visually tighten/expand around the rotated shape instead of
+  // staying pinned to the un-rotated bounds.
+  const getInteriorRotatedBounds = (design, bounds) => {
+    const rotation = n(design?.rotation, 0);
+    if (!rotation) return bounds;
+
+    const [cx, cy] = getInteriorTransformCenter(bounds);
+    const rad = rotation * Math.PI / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const corners = [
+      [bounds.x, bounds.y],
+      [bounds.x + bounds.width, bounds.y],
+      [bounds.x + bounds.width, bounds.y + bounds.height],
+      [bounds.x, bounds.y + bounds.height]
+    ].map(([px, py]) => {
+      const dx = px - cx;
+      const dy = py - cy;
+      return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+    });
+
+    const xs = corners.map(point => point[0]);
+    const ys = corners.map(point => point[1]);
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys)
+    };
+  };
+
   const getInteriorDesignTransformMatrix = (design, bounds = getInteriorObjectBounds(design)) => {
     const [cx, cy] = getInteriorTransformCenter(bounds);
     const angle = n(design?.rotation, 0) * Math.PI / 180;
@@ -4011,13 +4125,19 @@ export default function App() {
     const sin = Math.sin(angle);
     const sx = design?.mirrorX ? -1 : 1;
     const sy = design?.mirrorY ? -1 : 1;
+    // Rotate first, then mirror in world space (about the same center) — so mirroring flips the
+    // shape as it currently appears on screen, not its original pre-rotation local axes.
+    const a = sx * cos;
+    const b = sy * sin;
+    const c = -sx * sin;
+    const d = sy * cos;
     const localMatrix = [
-      cos * sx,
-      sin * sx,
-      -sin * sy,
-      cos * sy,
-      cx - cos * sx * cx + sin * sy * cy,
-      cy - sin * sx * cx - cos * sy * cy
+      a,
+      b,
+      c,
+      d,
+      cx - a * cx - c * cy,
+      cy - b * cx - d * cy
     ];
     return design?.__parentMatrix ? multiplyMatrix(design.__parentMatrix, localMatrix) : localMatrix;
   };
@@ -4033,10 +4153,13 @@ export default function App() {
   const getInteriorSvgTransform = (design, bounds = getInteriorObjectBounds(design)) => {
     const [cx, cy] = getInteriorTransformCenter(bounds);
     const transforms = [];
-    if (n(design?.rotation, 0)) transforms.push(`rotate(${n(design.rotation, 0)} ${cx * scale} ${cy * scale})`);
+    // Mirror is listed first (outermost/applied last) so it flips the shape as it currently
+    // appears on screen — rotation is applied first (innermost), then the mirror reflects that
+    // already-rotated result in world space, rather than flipping the pre-rotation local axes.
     if (design?.mirrorX || design?.mirrorY) {
       transforms.push(`translate(${cx * scale} ${cy * scale}) scale(${design.mirrorX ? -1 : 1} ${design.mirrorY ? -1 : 1}) translate(${-cx * scale} ${-cy * scale})`);
     }
+    if (n(design?.rotation, 0)) transforms.push(`rotate(${n(design.rotation, 0)} ${cx * scale} ${cy * scale})`);
     return transforms.join(' ');
   };
 
@@ -4061,6 +4184,7 @@ export default function App() {
         ...design,
         ...next,
         ...(design.clipBounds ? { clipBounds: next } : {}),
+        ...(design.bendPoints ? { bendPoints: design.bendPoints.map(point => transformPoint(point[0], point[1])) } : {}),
         children: (design.children || []).map(child => {
           const childBounds = getInteriorObjectBounds(child);
           return {
@@ -4087,6 +4211,29 @@ export default function App() {
       return {
         ...next,
         points: (design.points || []).map(point => transformPoint(point[0], point[1]))
+      };
+    }
+
+    if (design.kind === 'editableSvg') {
+      return {
+        ...next,
+        contours: (design.contours || []).map(contour => ({
+          ...contour,
+          points: contour.points.map(point => transformPoint(point[0], point[1]))
+        })),
+        ...(design.bendPoints ? { bendPoints: design.bendPoints.map(point => transformPoint(point[0], point[1])) } : {})
+      };
+    }
+
+    if (design.kind === 'patternAlongPath') {
+      const uniformScale = (scaleX + scaleY) / 2;
+      return {
+        ...next,
+        pathPoints: (design.pathPoints || []).map(point => transformPoint(point[0], point[1])),
+        motifWidth: Math.max(1, n(design.motifWidth, 20) * uniformScale),
+        motifHeight: Math.max(1, n(design.motifHeight, 20) * uniformScale),
+        offset: n(design.offset, 0) * uniformScale,
+        ...(design.bendPoints ? { bendPoints: design.bendPoints.map(point => transformPoint(point[0], point[1])) } : {})
       };
     }
 
@@ -4159,6 +4306,29 @@ export default function App() {
     if (design?.kind === 'polygon') {
       return (design.points || []).map((point, index) => ({
         id: `poly-${index}`,
+        x: point[0],
+        y: point[1],
+        cursor: 'move'
+      }));
+    }
+
+    if (design?.kind === 'editableSvg' && design.pointEditMode !== false) {
+      return (design.contours || []).flatMap((contour, contourIndex) => (
+        contour.points.map((point, pointIndex) => ({
+          id: `edit-${contourIndex}-${pointIndex}`,
+          x: point[0],
+          y: point[1],
+          cursor: 'move'
+        }))
+      ));
+    }
+
+    // Bend-line control points (left/mid/right) are additive: shown for a group or patternAlongPath
+    // whenever it has a bend line, and for an editableSvg only while OUT of corner point-edit mode
+    // (matching the "flat while editing corners, bent otherwise" convention the bend already follows).
+    if (design?.bendPoints && (isInteriorGroup(design) || design?.kind === 'patternAlongPath' || (design?.kind === 'editableSvg' && design.pointEditMode === false))) {
+      return design.bendPoints.map((point, index) => ({
+        id: `bend-${index}`,
         x: point[0],
         y: point[1],
         cursor: 'move'
@@ -5011,7 +5181,7 @@ export default function App() {
         && py <= bounds.y + bounds.height + tolerance;
       if (!inBounds) return false;
 
-      if (design.kind === 'rect' || design.kind === 'text') return true;
+      if (design.kind === 'rect' || design.kind === 'text' || design.kind === 'patternAlongPath') return true;
 
       if (design.kind === 'ellipse') {
         const rx = bounds.width / 2;
@@ -5023,7 +5193,7 @@ export default function App() {
 
       if (design.kind === 'polygon') return pointInPolygon([px, py], design.points || []);
 
-      if (design.kind === 'line' || design.kind === 'arc') {
+      if (design.kind === 'line' || design.kind === 'arc' || design.kind === 'editableSvg') {
         return getInteriorShapeContours(design).some(contour => pointInPolygon([px, py], contour));
       }
 
@@ -5319,6 +5489,13 @@ export default function App() {
   const handleInteriorCanvasClick = (e) => {
     if (activeTool === 'measure') {
       handleInteriorMeasureClick(e);
+      return;
+    }
+
+    if (pendingPatternPathSourceId) {
+      if (hoveredPatternPathEdge) confirmPatternAlongPath(pendingPatternPathSourceId, hoveredPatternPathEdge);
+      setPendingPatternPathSourceId(null);
+      setHoveredPatternPathEdge(null);
       return;
     }
 
@@ -5625,6 +5802,7 @@ export default function App() {
       rotation: 0,
       mirrorX: false,
       mirrorY: false,
+      lineThicken: 0,
       aspectRatio
     };
   };
@@ -5641,6 +5819,259 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = () => {
       addInteriorSvgDesignFromText(String(reader.result || ''), file.name);
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // --- DXF import (frame outline) -------------------------------------------------------------
+  // Converts a DXF's signed bulge (a chord-relative arc encoding: bulge = tan(includedAngle/4),
+  // positive = arc bows to the left of the p1->p2 direction / CCW, negative = right / CW) into
+  // sampled arc points from p1 to (and including) p2.
+  const sampleDxfBulgeSegment = (p1, p2, bulge, maxSegAngleDeg = 6) => {
+    if (Math.abs(bulge) < 1e-9) return [p2];
+    const theta = 4 * Math.atan(bulge);
+    const d = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    if (d < 1e-9) return [p2];
+    const halfTheta = Math.abs(theta) / 2;
+    const radius = d / (2 * Math.sin(halfTheta));
+    const apothem = radius * Math.cos(halfTheta);
+    const midX = (p1[0] + p2[0]) / 2;
+    const midY = (p1[1] + p2[1]) / 2;
+    const ux = (p2[0] - p1[0]) / d;
+    const uy = (p2[1] - p1[1]) / d;
+    const sign = bulge >= 0 ? 1 : -1;
+    // Left-perpendicular of p1->p2, offset toward the center by the apothem (verified by hand: for
+    // a positive bulge this places the center such that the CCW sweep from p1 to p2 equals theta).
+    const cx = midX + (-uy) * apothem * sign;
+    const cy = midY + ux * apothem * sign;
+    const startAngle = Math.atan2(p1[1] - cy, p1[0] - cx);
+    const steps = Math.max(1, Math.ceil(Math.abs(theta) / (maxSegAngleDeg * Math.PI / 180)));
+    const points = [];
+    for (let i = 1; i <= steps; i++) {
+      const angle = startAngle + theta * (i / steps);
+      points.push([cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)]);
+    }
+    return points;
+  };
+
+  const flattenDxfBulgeVertices = (verts, closed) => {
+    if (!verts.length) return [];
+    const points = [[verts[0].x, verts[0].y]];
+    const segCount = closed ? verts.length : verts.length - 1;
+    for (let i = 0; i < segCount; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % verts.length];
+      if (Math.abs(a.bulge) > 1e-9) {
+        sampleDxfBulgeSegment([a.x, a.y], [b.x, b.y], a.bulge).forEach(point => points.push(point));
+      } else {
+        points.push([b.x, b.y]);
+      }
+    }
+    return points;
+  };
+
+  // DXF ARC entities always sweep counter-clockwise from the start angle to the end angle.
+  const sampleDxfArcEntity = (cx, cy, radius, startDeg, endDeg, maxSegAngleDeg = 6) => {
+    const a1 = startDeg * Math.PI / 180;
+    let sweep = (endDeg - startDeg) * Math.PI / 180;
+    while (sweep <= 0) sweep += Math.PI * 2;
+    const steps = Math.max(1, Math.ceil(sweep / (maxSegAngleDeg * Math.PI / 180)));
+    const points = [];
+    for (let i = 0; i <= steps; i++) {
+      const angle = a1 + sweep * (i / steps);
+      points.push([cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)]);
+    }
+    return points;
+  };
+
+  const sampleDxfCircleEntity = (cx, cy, radius, segments = 96) => (
+    Array.from({ length: segments }, (_, i) => {
+      const angle = (i / segments) * Math.PI * 2;
+      return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+    })
+  );
+
+  // Greedily connects open segments (each an array of points; only the first/last points matter
+  // for matching) end-to-end into closed loops, for outlines exported as separate LINE/ARC
+  // entities rather than one continuous polyline.
+  const chainDxfSegmentsIntoLoops = (segments, tolerance = 0.05) => {
+    const remaining = segments.map(points => [...points]);
+    const loops = [];
+    const pointsMatch = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= tolerance;
+
+    while (remaining.length) {
+      let current = remaining.shift();
+      let extended = true;
+      while (extended) {
+        extended = false;
+        for (let i = 0; i < remaining.length; i++) {
+          const seg = remaining[i];
+          const curStart = current[0];
+          const curEnd = current[current.length - 1];
+          const segStart = seg[0];
+          const segEnd = seg[seg.length - 1];
+
+          if (pointsMatch(curEnd, segStart)) {
+            current = current.concat(seg.slice(1));
+          } else if (pointsMatch(curEnd, segEnd)) {
+            current = current.concat([...seg].reverse().slice(1));
+          } else if (pointsMatch(curStart, segEnd)) {
+            current = seg.slice(0, -1).concat(current);
+          } else if (pointsMatch(curStart, segStart)) {
+            current = [...seg].reverse().slice(0, -1).concat(current);
+          } else {
+            continue;
+          }
+          remaining.splice(i, 1);
+          extended = true;
+          break;
+        }
+      }
+      if (current.length >= 3 && pointsMatch(current[0], current[current.length - 1])) {
+        loops.push(current.slice(0, -1));
+      }
+    }
+    return loops;
+  };
+
+  // Parses the ENTITIES section of an ASCII DXF file (group-code/value line pairs) and returns
+  // the single largest closed outline found — reading LWPOLYLINE (with bulge arcs), legacy
+  // POLYLINE+VERTEX+SEQEND, LINE, ARC, and CIRCLE, chaining any disconnected LINE/ARC entities
+  // into closed loops the same way a real board outline would trace one continuous edge.
+  const parseDxfOutlineFromText = (dxfText) => {
+    const lines = dxfText.split(/\r\n|\r|\n/);
+    const pairs = [];
+    for (let i = 0; i + 1 < lines.length; i += 2) {
+      const code = parseInt(lines[i], 10);
+      pairs.push([code, (lines[i + 1] || '').trim()]);
+    }
+
+    let entitiesStart = -1;
+    for (let i = 0; i < pairs.length - 1; i++) {
+      if (pairs[i][0] === 0 && pairs[i][1] === 'SECTION' && pairs[i + 1][0] === 2 && pairs[i + 1][1] === 'ENTITIES') {
+        entitiesStart = i + 2;
+        break;
+      }
+    }
+    if (entitiesStart === -1) throw new Error('No ENTITIES section found in this DXF file.');
+
+    let entitiesEnd = pairs.length;
+    for (let i = entitiesStart; i < pairs.length; i++) {
+      if (pairs[i][0] === 0 && pairs[i][1] === 'ENDSEC') { entitiesEnd = i; break; }
+    }
+
+    const entityPairs = pairs.slice(entitiesStart, entitiesEnd);
+    const rawEntities = [];
+    let i = 0;
+    while (i < entityPairs.length) {
+      if (entityPairs[i][0] !== 0) { i++; continue; }
+      const type = entityPairs[i][1];
+      i++;
+      const attrs = [];
+      while (i < entityPairs.length && entityPairs[i][0] !== 0) { attrs.push(entityPairs[i]); i++; }
+      const entity = { type, attrs, vertices: null };
+      if (type === 'POLYLINE') {
+        const vertices = [];
+        while (i < entityPairs.length && entityPairs[i][0] === 0 && entityPairs[i][1] === 'VERTEX') {
+          i++;
+          const vAttrs = [];
+          while (i < entityPairs.length && entityPairs[i][0] !== 0) { vAttrs.push(entityPairs[i]); i++; }
+          vertices.push(vAttrs);
+        }
+        if (i < entityPairs.length && entityPairs[i][0] === 0 && entityPairs[i][1] === 'SEQEND') i++;
+        entity.vertices = vertices;
+      }
+      rawEntities.push(entity);
+    }
+
+    const getCode = (attrs, code) => {
+      const found = attrs.find(a => a[0] === code);
+      return found ? found[1] : undefined;
+    };
+    const getNum = (attrs, code, fallback = 0) => {
+      const value = getCode(attrs, code);
+      return value === undefined ? fallback : parseFloat(value);
+    };
+
+    const closedLoops = [];
+    const openSegments = [];
+
+    rawEntities.forEach(entity => {
+      if (entity.type === 'LWPOLYLINE') {
+        const closed = (getNum(entity.attrs, 70, 0) & 1) === 1;
+        const verts = [];
+        let cur = null;
+        entity.attrs.forEach(([code, value]) => {
+          if (code === 10) { if (cur) verts.push(cur); cur = { x: parseFloat(value), y: 0, bulge: 0 }; }
+          else if (code === 20 && cur) cur.y = parseFloat(value);
+          else if (code === 42 && cur) cur.bulge = parseFloat(value);
+        });
+        if (cur) verts.push(cur);
+        const points = flattenDxfBulgeVertices(verts, closed);
+        if (points.length >= 2) (closed ? closedLoops : openSegments).push(points);
+      } else if (entity.type === 'POLYLINE' && entity.vertices) {
+        const closed = (getNum(entity.attrs, 70, 0) & 1) === 1;
+        const verts = entity.vertices.map(vAttrs => ({
+          x: getNum(vAttrs, 10, 0),
+          y: getNum(vAttrs, 20, 0),
+          bulge: getNum(vAttrs, 42, 0)
+        }));
+        const points = flattenDxfBulgeVertices(verts, closed);
+        if (points.length >= 2) (closed ? closedLoops : openSegments).push(points);
+      } else if (entity.type === 'LINE') {
+        openSegments.push([
+          [getNum(entity.attrs, 10, 0), getNum(entity.attrs, 20, 0)],
+          [getNum(entity.attrs, 11, 0), getNum(entity.attrs, 21, 0)]
+        ]);
+      } else if (entity.type === 'ARC') {
+        const radius = getNum(entity.attrs, 40, 0);
+        if (radius > 0) {
+          openSegments.push(sampleDxfArcEntity(
+            getNum(entity.attrs, 10, 0), getNum(entity.attrs, 20, 0), radius,
+            getNum(entity.attrs, 50, 0), getNum(entity.attrs, 51, 0)
+          ));
+        }
+      } else if (entity.type === 'CIRCLE') {
+        const radius = getNum(entity.attrs, 40, 0);
+        if (radius > 0) closedLoops.push(sampleDxfCircleEntity(getNum(entity.attrs, 10, 0), getNum(entity.attrs, 20, 0), radius));
+      }
+    });
+
+    const chainedLoops = chainDxfSegmentsIntoLoops(openSegments);
+    const allLoops = [...closedLoops, ...chainedLoops];
+    if (!allLoops.length) {
+      throw new Error('No closed shape found in this DXF file (looked for closed polylines, or lines/arcs forming a closed loop).');
+    }
+
+    let best = allLoops[0];
+    let bestArea = Math.abs(polygonArea(best));
+    allLoops.slice(1).forEach(loop => {
+      const area = Math.abs(polygonArea(loop));
+      if (area > bestArea) { best = loop; bestArea = area; }
+    });
+
+    return cleanDxfPoints(best, true);
+  };
+
+  const importDxfFrameOutlineFromText = (dxfText, fileName = 'frame.dxf') => {
+    try {
+      const outline = parseDxfOutlineFromText(dxfText);
+      if (outline.length < 3) throw new Error('The largest closed shape found has fewer than 3 points.');
+      setImportedFrameOutline(outline);
+      setImportedFrameFileName(fileName);
+    } catch (error) {
+      window.alert(`Could not import this DXF as the frame: ${error.message}`);
+    }
+  };
+
+  const handleFrameDxfFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      importDxfFrameOutlineFromText(String(reader.result || ''), file.name);
     };
     reader.readAsText(file);
     e.target.value = '';
@@ -5947,6 +6378,7 @@ export default function App() {
 
   const startInteriorDesignDrag = (e, design, mode, handle = null) => {
     if (activeInteriorShapeTool) return;
+    if (activeTool === 'measure' || activeTool === 'angle') return;
     if (e.button !== 0) return;
     if (e.shiftKey) {
       e.preventDefault();
@@ -6043,6 +6475,11 @@ export default function App() {
       }
 
       setHoverSnap(findNearestInteriorSnapPoint(point.x, point.y));
+      return;
+    }
+
+    if (pendingPatternPathSourceId) {
+      setHoveredPatternPathEdge(findNearestPatternPathEdge(point.x, point.y, pendingPatternPathSourceId));
       return;
     }
 
@@ -6207,6 +6644,23 @@ export default function App() {
         next.points = (start.points || []).map((point, index) => (
           index === pointIndex ? [point[0] + dx, point[1] + dy] : point
         ));
+      } else if (String(interiorDrag.handle).startsWith('edit-')) {
+        const [, contourIndexStr, pointIndexStr] = String(interiorDrag.handle).split('-');
+        const contourIndex = Number(contourIndexStr);
+        const pointIndex = Number(pointIndexStr);
+        next.contours = (start.contours || []).map((contour, cIndex) => (
+          cIndex !== contourIndex ? contour : {
+            ...contour,
+            points: contour.points.map((point, pIndex) => (
+              pIndex === pointIndex ? [point[0] + dx, point[1] + dy] : point
+            ))
+          }
+        ));
+      } else if (String(interiorDrag.handle).startsWith('bend-')) {
+        const bendIndex = Number(String(interiorDrag.handle).replace('bend-', ''));
+        next.bendPoints = (start.bendPoints || []).map((point, index) => (
+          index === bendIndex ? [point[0] + dx, point[1] + dy] : point
+        ));
       }
 
       updateInteriorDesign(interiorDrag.id, { ...next, ...getInteriorObjectBounds(next) }, { history: false });
@@ -6216,6 +6670,54 @@ export default function App() {
     const next = { ...start };
     const handle = interiorDrag.handle;
     const ratio = Math.max(0.0001, n(start.aspectRatio, start.width / start.height || 1));
+    const rotation = n(start.rotation, 0);
+
+    if (rotation) {
+      // Resize in the shape's own (rotated) frame: un-rotate the mouse delta into local axes,
+      // resize there, then solve for the new center that keeps the opposite corner/edge fixed
+      // in world space (the same anchor a non-rotated resize keeps fixed).
+      const rotRad = rotation * Math.PI / 180;
+      const cosR = Math.cos(rotRad);
+      const sinR = Math.sin(rotRad);
+      const localDx = dx * cosR + dy * sinR;
+      const localDy = -dx * sinR + dy * cosR;
+
+      let nextWidth = start.width;
+      let nextHeight = start.height;
+      if (handle.includes('e')) nextWidth = Math.max(minSize, start.width + localDx);
+      if (handle.includes('w')) nextWidth = Math.max(minSize, start.width - localDx);
+      if (handle.includes('s')) nextHeight = Math.max(minSize, start.height + localDy);
+      if (handle.includes('n')) nextHeight = Math.max(minSize, start.height - localDy);
+
+      if (start.aspectLocked) {
+        const widthDriven = handle.includes('e') || handle.includes('w');
+        const heightDriven = handle.includes('n') || handle.includes('s');
+        if (widthDriven && (!heightDriven || Math.abs(localDx) >= Math.abs(localDy))) {
+          nextHeight = Math.max(minSize, nextWidth / ratio);
+        } else {
+          nextWidth = Math.max(minSize, nextHeight * ratio);
+        }
+      }
+
+      const anchorLocalX = handle.includes('e') ? -start.width / 2 : handle.includes('w') ? start.width / 2 : 0;
+      const anchorLocalY = handle.includes('s') ? -start.height / 2 : handle.includes('n') ? start.height / 2 : 0;
+      const [c0x, c0y] = getInteriorTransformCenter(start);
+      const anchorWorldX = c0x + anchorLocalX * cosR - anchorLocalY * sinR;
+      const anchorWorldY = c0y + anchorLocalX * sinR + anchorLocalY * cosR;
+
+      const anchorLocalXNext = handle.includes('e') ? -nextWidth / 2 : handle.includes('w') ? nextWidth / 2 : 0;
+      const anchorLocalYNext = handle.includes('s') ? -nextHeight / 2 : handle.includes('n') ? nextHeight / 2 : 0;
+      const nextCenterX = anchorWorldX - (anchorLocalXNext * cosR - anchorLocalYNext * sinR);
+      const nextCenterY = anchorWorldY - (anchorLocalXNext * sinR + anchorLocalYNext * cosR);
+
+      updateInteriorDesign(interiorDrag.id, applyInteriorObjectBounds(start, {
+        x: nextCenterX - nextWidth / 2,
+        y: nextCenterY - nextHeight / 2,
+        width: nextWidth,
+        height: nextHeight
+      }), { history: false });
+      return;
+    }
 
     if (handle.includes('e')) next.width = Math.max(minSize, start.width + dx);
     if (handle.includes('s')) next.height = Math.max(minSize, start.height + dy);
@@ -6492,6 +6994,7 @@ export default function App() {
       return;
     }
     if (activeInteriorShapeTool) return;
+    if (activeTool === 'measure' || activeTool === 'angle') return;
 
     const design = interiorDesignsRef.current.find(item => item.id === designId)
       || flattenInteriorDesigns(interiorDesignsRef.current).find(item => item.id === designId);
@@ -7833,7 +8336,7 @@ export default function App() {
     paths.map(path => (ClipperLib.Clipper.Orientation(path) ? path : [...path].reverse()))
   );
 
-  const offsetOpenStrokeContours = (points, strokeWidth, linecap = 'butt') => {
+  const offsetOpenStrokeContours = (points, strokeWidth, linecap = 'butt', linejoin = 'round') => {
     const cleaned = cleanDxfPoints(points, false);
     if (cleaned.length < 2 || strokeWidth <= 0) return [];
 
@@ -7843,12 +8346,18 @@ export default function App() {
       butt: ClipperLib.EndType.etOpenButt
     }[(linecap || 'butt').trim().toLowerCase()] || ClipperLib.EndType.etOpenButt;
 
+    const joinType = {
+      round: ClipperLib.JoinType.jtRound,
+      miter: ClipperLib.JoinType.jtMiter,
+      square: ClipperLib.JoinType.jtSquare
+    }[(linejoin || 'round').trim().toLowerCase()] || ClipperLib.JoinType.jtRound;
+
     const clipperPath = cleaned.map(([x, y]) => ({
       X: Math.round(x * clipperScale),
       Y: Math.round(y * clipperScale)
     }));
     const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * clipperScale);
-    offsetter.AddPath(clipperPath, ClipperLib.JoinType.jtRound, endType);
+    offsetter.AddPath(clipperPath, joinType, endType);
     const solution = [];
     offsetter.Execute(solution, (strokeWidth / 2) * clipperScale);
 
@@ -8116,6 +8625,71 @@ export default function App() {
       ...contour,
       points: cleanDxfPoints(contour.points.map(placePoint), contour.closed)
     }));
+  };
+
+  // Places pre-computed LOCAL (raw SVG source-unit) contours using the same bounds/sourceBox/
+  // transform math as getImportedSvgHitContours's own placement step, without re-flattening the
+  // SVG markup. Lets thickened contours (computed once) be reused across many placements, e.g.
+  // once per pattern-along-path instance, instead of re-walking + re-offsetting each time.
+  const placeLocalSvgContours = (design, localContours, bounds = getInteriorObjectBounds(design)) => {
+    const sourceBox = design.sourceBox || getInlineSvgRenderData(design.svgText)?.rootBox || { x: 0, y: 0, width: bounds.width, height: bounds.height };
+    const scaleX = bounds.width / Math.max(0.0001, sourceBox.width);
+    const scaleY = bounds.height / Math.max(0.0001, sourceBox.height);
+    const placePoint = ([px, py]) => transformInteriorDesignPoint(design, [
+      bounds.x + (px - sourceBox.x) * scaleX,
+      bounds.y + (py - sourceBox.y) * scaleY
+    ], bounds);
+
+    return localContours.map(contour => ({
+      ...contour,
+      points: cleanDxfPoints(contour.points.map(placePoint), contour.closed)
+    }));
+  };
+
+  // Flattens the design's own SVG artwork (fills + stroke bands) and, when lineThicken > 0,
+  // grows every resulting black-ink contour outward by that amount via a Clipper offset — this is
+  // the "thicker lines" feature. Returns polygons in the SAME LOCAL coordinate space as the raw
+  // SVG source markup (identity placement), so callers can feed them through the exact same
+  // per-instance translate/rotate/mirror transform used for the raw dangerouslySetInnerHTML markup.
+  // `placementScale` is the caller's own local->placed scale factor (e.g. itemWidth/sourceBox.width,
+  // averaged with the Y equivalent) — the requested mm amount is divided by it before offsetting in
+  // this LOCAL space, so the FINAL placed/rendered growth equals lineThicken mm regardless of how
+  // much the SVG (or a pattern's motif) has been scaled up or down.
+  const getThickenedLocalSvgContours = (design, placementScale = 1) => {
+    const svgRenderData = getInlineSvgRenderData(design.svgText);
+    const sourceBox = design.sourceBox || svgRenderData?.rootBox || { x: 0, y: 0, width: 20, height: 20 };
+    const identityDesign = {
+      ...design,
+      kind: 'svg',
+      x: sourceBox.x,
+      y: sourceBox.y,
+      width: sourceBox.width,
+      height: sourceBox.height,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false,
+      sourceBox,
+      __parentMatrix: undefined
+    };
+    const contours = getImportedSvgHitContours(identityDesign).filter(contour => contour.closed);
+    const thicken = n(design.lineThicken, 0);
+    if (thicken <= 0) return contours;
+
+    const localThicken = thicken / Math.max(0.0001, placementScale);
+    // Every contour is treated as an independent solid black region and normalized to a
+    // consistent (positive) winding — without this, a path sampled in the "wrong" direction
+    // would shrink instead of grow for a positive offset delta. This sacrifices correct
+    // hole-shrinking for true nested-hole artwork (a rare case) in favor of predictable growth
+    // for the common case (simple fills and stroke-expanded bands).
+    const paths = orientClipperPaths(contours.map(contour => toClipperPath(contour.points)).filter(path => path.length >= 3));
+    if (!paths.length) return contours;
+
+    const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * clipperScale);
+    paths.forEach(path => offsetter.AddPath(path, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon));
+    const solution = [];
+    offsetter.Execute(solution, localThicken * clipperScale);
+
+    return cleanClipperPaths(solution).map(fromClipperPath).map(points => ({ points, closed: true }));
   };
 
   const isPointNearImportedSvgVisibleSurface = (design, point, toleranceMm = 0) => {
@@ -8408,6 +8982,519 @@ export default function App() {
     return [...arc.points, ...outerPoints.reverse()];
   };
 
+  // Normalized centerline (u = along the run 0..1, v = across the thickness 0..1) for one
+  // repeat of a Greek-key/meander motif. Tiles seamlessly: the path's start (0,0) lines up
+  // with the previous repeat's end (1,0) when placed back-to-back along a run.
+  const MEANDER_UNIT_PATH = [
+    [0, 0], [0, 1], [0.66, 1], [0.66, 0.33],
+    [0.33, 0.33], [0.33, 0.66], [1, 0.66], [1, 0]
+  ];
+
+  const getPathCumulativeLengths = (points) => {
+    const lengths = [0];
+    for (let i = 1; i < points.length; i++) {
+      lengths.push(lengths[i - 1] + Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]));
+    }
+    return lengths;
+  };
+
+  const pointAndAngleAtLength = (points, lengths, target) => {
+    const total = lengths[lengths.length - 1];
+    const t = clamp(target, 0, total);
+    let i = 1;
+    while (i < lengths.length - 1 && lengths[i] < t) i++;
+    const segStart = lengths[i - 1];
+    const segEnd = lengths[i];
+    const segLen = Math.max(0.000001, segEnd - segStart);
+    const frac = (t - segStart) / segLen;
+    const [x1, y1] = points[i - 1];
+    const [x2, y2] = points[i];
+    return {
+      x: x1 + (x2 - x1) * frac,
+      y: y1 + (y2 - y1) * frac,
+      angle: Math.atan2(y2 - y1, x2 - x1)
+    };
+  };
+
+  const rotateTranslatePoints = (localPoints, angle, originX, originY) => {
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    return localPoints.map(([x, y]) => [
+      originX + x * cos - y * sin,
+      originY + x * sin + y * cos
+    ]);
+  };
+
+  // Builds one repeat unit's local centerline. The hook detail is always sized off `thickness`
+  // (so it stays readable regardless of repeat spacing) and a straight filler segment absorbs
+  // whatever length is left over up to `repeatLength`, so tiles still butt together seamlessly.
+  const buildMeanderUnitLocalPath = (repeatLength, thickness) => {
+    const hookWidth = Math.min(repeatLength, thickness * 2.2);
+    const hookPoints = MEANDER_UNIT_PATH.map(([u, v]) => [u * hookWidth, v * thickness]);
+    if (repeatLength > hookWidth + 0.01) hookPoints.push([repeatLength, 0]);
+    return hookPoints;
+  };
+
+  const tileMeanderAlongRun = (runPoints, thickness, motifLength, inwardSign = 1) => {
+    if (!runPoints || runPoints.length < 2) return [];
+    const lengths = getPathCumulativeLengths(runPoints);
+    const total = lengths[lengths.length - 1];
+    if (total <= 0.01) return [];
+
+    const gaps = Math.max(1, Math.round(total / Math.max(1, motifLength)));
+    const actualLength = total / gaps;
+    const barWidth = Math.min(thickness / 3, actualLength / 6);
+    const results = [];
+
+    for (let i = 0; i < gaps; i++) {
+      const start = pointAndAngleAtLength(runPoints, lengths, i * actualLength);
+      const localCenterline = buildMeanderUnitLocalPath(actualLength, thickness).map(([x, y]) => [x, y * inwardSign]);
+      offsetOpenStrokeContours(localCenterline, barWidth, 'butt', 'miter').forEach(poly => {
+        results.push(rotateTranslatePoints(poly, start.angle, start.x, start.y));
+      });
+    }
+
+    return results;
+  };
+
+  const getInteriorMeanderRuns = (design) => {
+    if (design.kind === 'line') {
+      return [{ points: [[n(design.x1, 0), n(design.y1, 0)], [n(design.x2, 0), n(design.y2, 0)]], inwardSign: 1 }];
+    }
+
+    if (design.kind === 'arc') {
+      return [{ points: getInteriorThreePointArcData(design, 96).points, inwardSign: 1 }];
+    }
+
+    return [];
+  };
+
+  const buildMeanderPatternContours = (design) => {
+    const thickness = Math.max(0.5, n(design.thickness, 8));
+    const motifLength = Math.max(1, n(design.meanderLength, 40));
+    const runs = getInteriorMeanderRuns(design);
+    const result = [];
+    runs.forEach(run => {
+      result.push(...tileMeanderAlongRun(run.points, thickness, motifLength, run.inwardSign));
+    });
+    return result;
+  };
+
+  // Every individually-pickable edge of a shape, for the "pattern along path" edge picker.
+  // Unlike getInteriorMeanderRuns (deliberately narrowed to line/arc), this covers every kind
+  // since the user should be able to pick any single edge of any shape as the path to follow.
+  const getInteriorPatternPathEdges = (design) => {
+    const bounds = getInteriorObjectBounds(design);
+
+    if (design.kind === 'rect') {
+      const corners = [
+        [bounds.x, bounds.y],
+        [bounds.x + bounds.width, bounds.y],
+        [bounds.x + bounds.width, bounds.y + bounds.height],
+        [bounds.x, bounds.y + bounds.height]
+      ];
+      const inwardSign = signedPolygonArea(corners) >= 0 ? 1 : -1;
+      return corners.map((point, index) => ({
+        key: `rect-${index}`,
+        points: [point, corners[(index + 1) % corners.length]],
+        inwardSign
+      }));
+    }
+
+    if (design.kind === 'polygon') {
+      const pts = design.points || [];
+      if (pts.length < 2) return [];
+      const inwardSign = signedPolygonArea(pts) >= 0 ? 1 : -1;
+      return pts.map((point, index) => ({
+        key: `polygon-${index}`,
+        points: [point, pts[(index + 1) % pts.length]],
+        inwardSign
+      }));
+    }
+
+    if (design.kind === 'ellipse') {
+      const segments = 160;
+      const pts = Array.from({ length: segments + 1 }, (_, index) => {
+        const angle = (index % segments) * Math.PI * 2 / segments;
+        return [
+          bounds.x + bounds.width / 2 + Math.cos(angle) * bounds.width / 2,
+          bounds.y + bounds.height / 2 + Math.sin(angle) * bounds.height / 2
+        ];
+      });
+      return [{ key: 'whole', points: pts, inwardSign: signedPolygonArea(pts) >= 0 ? 1 : -1 }];
+    }
+
+    if (design.kind === 'line') {
+      return [{ key: 'whole', points: [[n(design.x1, 0), n(design.y1, 0)], [n(design.x2, 0), n(design.y2, 0)]], inwardSign: 1 }];
+    }
+
+    if (design.kind === 'arc') {
+      return [{ key: 'whole', points: getInteriorThreePointArcData(design, 96).points, inwardSign: 1 }];
+    }
+
+    return [];
+  };
+
+  const findNearestPatternPathEdge = (x, y, excludeDesignId) => {
+    let best = null;
+    let bestDist = Infinity;
+
+    flattenInteriorDesigns(interiorDesignsRef.current)
+      .filter(item => item.id !== excludeDesignId && !isImportedInteriorSvg(item) && item.kind !== 'patternAlongPath' && item.kind !== 'text' && item.kind !== 'eraser')
+      .forEach(item => {
+        getInteriorPatternPathEdges(item).forEach(edge => {
+          for (let i = 0; i < edge.points.length - 1; i++) {
+            const nearest = nearestPointOnSegment([x, y], edge.points[i], edge.points[i + 1]);
+            const dist = Math.hypot(nearest[0] - x, nearest[1] - y);
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = { designId: item.id, key: edge.key, points: edge.points, inwardSign: edge.inwardSign };
+            }
+          }
+        });
+      });
+
+    const tolerancePx = 14;
+    const toleranceMm = tolerancePx / Math.max(0.0001, scale * viewZoom);
+    return bestDist <= toleranceMm ? best : null;
+  };
+
+  // Nearest arc-length distance along a polyline to a given point, used to anchor a new pattern's
+  // first instance at wherever the source SVG actually was, instead of always starting at the
+  // path's own t=0 endpoint.
+  const getNearestDistanceAlongPath = (pathPoints, point) => {
+    const lengths = getPathCumulativeLengths(pathPoints);
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < pathPoints.length - 1; i++) {
+      const a = pathPoints[i];
+      const b = pathPoints[i + 1];
+      const nearest = nearestPointOnSegment(point, a, b);
+      const dist = Math.hypot(nearest[0] - point[0], nearest[1] - point[1]);
+      if (dist < bestDist) {
+        bestDist = dist;
+        const alongSeg = Math.hypot(nearest[0] - a[0], nearest[1] - a[1]);
+        best = lengths[i] + alongSeg;
+      }
+    }
+    return best;
+  };
+
+  const confirmPatternAlongPath = (sourceId, edge) => {
+    const source = flattenInteriorDesigns(interiorDesignsRef.current).find(item => item.id === sourceId);
+    if (!source) return;
+    const bounds = getInteriorObjectBounds(source);
+    const [sourceCx, sourceCy] = getInteriorTransformCenter(bounds);
+    const patternDesign = {
+      id: crypto.randomUUID(),
+      kind: 'patternAlongPath',
+      name: 'Pattern along path',
+      color: source.color || 'white',
+      exportable: true,
+      warnings: [],
+      aspectLocked: false,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false,
+      svgText: source.svgText,
+      sourceBox: source.sourceBox,
+      href: source.href,
+      motifWidth: bounds.width,
+      motifHeight: bounds.height,
+      pathPoints: edge.points.map(point => [...point]),
+      pathInwardSign: edge.inwardSign,
+      startDistance: getNearestDistanceAlongPath(edge.points, [sourceCx, sourceCy]),
+      lineThicken: n(source.lineThicken, 0),
+      count: 6,
+      offset: 0,
+      mirror: false,
+      alternateMirror: false,
+      scale: 1
+    };
+    applyInteriorDesigns(
+      prev => [...prev.filter(item => item.id !== sourceId), patternDesign],
+      { selectedId: patternDesign.id }
+    );
+  };
+
+  // Converts an imported SVG into an editable "node" shape: flattens whatever is currently shown
+  // (including any lineThicken growth) into plain point contours, each point then draggable on its
+  // own via the same point-handle system polygons already use. This is a one-way conversion —
+  // once converted, the design is a plain point-based shape, not a re-editable link back to the
+  // original vector markup.
+  const convertImportedSvgToEditablePoints = (design) => {
+    if (!isImportedInteriorSvg(design)) return;
+    const bounds = getInteriorObjectBounds(design);
+    const sourceBox = design.sourceBox || getInlineSvgRenderData(design.svgText)?.rootBox || { width: bounds.width, height: bounds.height };
+    const thicken = n(design.lineThicken, 0);
+    const contours = thicken > 0
+      ? placeLocalSvgContours(
+        design,
+        getThickenedLocalSvgContours(design, ((bounds.width / (sourceBox.width || 1)) + (bounds.height / (sourceBox.height || 1))) / 2),
+        bounds
+      )
+      : getImportedSvgHitContours(design);
+
+    const cleanContours = contours
+      .map(contour => ({ points: contour.points.map(point => [...point]), closed: contour.closed }))
+      .filter(contour => contour.points.length >= 2);
+    if (!cleanContours.length) return;
+
+    const editableDesign = {
+      id: crypto.randomUUID(),
+      kind: 'editableSvg',
+      name: design.name,
+      color: design.color,
+      exportable: design.exportable,
+      warnings: [],
+      aspectLocked: false,
+      rotation: 0,
+      mirrorX: false,
+      mirrorY: false,
+      pointEditMode: true,
+      bendPoints: null,
+      contours: cleanContours
+    };
+    applyInteriorDesigns(
+      prev => [...prev.filter(item => item.id !== design.id), editableDesign],
+      { selectedId: editableDesign.id }
+    );
+  };
+
+  const getContoursBoundingBox = (contours) => {
+    const allPoints = contours.flatMap(contour => contour.points);
+    if (!allPoints.length) return null;
+    const xs = allPoints.map(point => point[0]);
+    const ys = allPoints.map(point => point[1]);
+    return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+  };
+
+  // The default bend line: a flat horizontal line through the vertical center of `bbox`, spanning
+  // its full width — three collinear points, so the fitted "arc" is a straight line and bending is
+  // initially a no-op (see bendPointsAlongCurve's identity check for the flat case).
+  const getDefaultBendPoints = (bbox) => {
+    const midY = (bbox.minY + bbox.maxY) / 2;
+    return [
+      [bbox.minX, midY],
+      [(bbox.minX + bbox.maxX) / 2, midY],
+      [bbox.maxX, midY]
+    ];
+  };
+
+  // Samples the circular arc fitted through the 3 bend-line control points (reusing the same
+  // 3-point-arc circle fit the "3-point arc" drawing tool already uses), then arc-length
+  // parametrizes it (reusing the same cumulative-length walk Pattern-along-path already uses) so
+  // points can be placed at a given fraction of the way along the curve.
+  const getBendCurveSamples = (bendPoints) => {
+    if (!bendPoints || bendPoints.length < 3) return null;
+    const [[x1, y1], [x2, y2], [x3, y3]] = bendPoints;
+    const arcData = getInteriorThreePointArcData({ x1, y1, x2, y2, x3, y3 }, 72);
+    const curvePoints = arcData.points;
+    const lengths = getPathCumulativeLengths(curvePoints);
+    const total = lengths[lengths.length - 1];
+    return { curvePoints, lengths, total };
+  };
+
+  // Warps `points` (absolute mm coords) so their position along `bbox`'s width maps onto the same
+  // fraction of the way along the bend curve, offset perpendicular to the curve's local tangent by
+  // however far each point originally sat above/below the bend line's own (flat) starting height —
+  // the same "position along the shape's width → position along a path, offset by depth" technique
+  // Pattern-along-path already uses to place instances along an arbitrary picked edge.
+  const bendPointsAlongCurve = (points, bendPoints, bbox, baselineY) => {
+    const curve = getBendCurveSamples(bendPoints);
+    if (!curve || curve.total <= 0.0001) return points;
+    const { curvePoints, lengths, total } = curve;
+    const width = Math.max(0.0001, bbox.maxX - bbox.minX);
+
+    return points.map(([x, y]) => {
+      const t = clamp((x - bbox.minX) / width, 0, 1);
+      const { x: cx, y: cy, angle } = pointAndAngleAtLength(curvePoints, lengths, t * total);
+      const perpAngle = angle + Math.PI / 2;
+      const depth = y - baselineY;
+      return [cx + Math.cos(perpAngle) * depth, cy + Math.sin(perpAngle) * depth];
+    });
+  };
+
+  // Bends an editableSvg's flat contours along its bend line (design.bendPoints). Computed fresh
+  // from the CURRENT flat contours every time (nothing is destructively warped), so resizing or
+  // editing the flat points and dragging the bend control points both just work without any extra
+  // bookkeeping.
+  const getBentContours = (design) => {
+    const contours = design.contours || [];
+    if (!design.bendPoints) return contours;
+    const bbox = getContoursBoundingBox(contours);
+    if (!bbox) return contours;
+    const baselineY = (bbox.minY + bbox.maxY) / 2;
+    return contours.map(contour => ({
+      ...contour,
+      points: bendPointsAlongCurve(contour.points, design.bendPoints, bbox, baselineY)
+    }));
+  };
+
+  // Flattens every descendant of a group (recursing through nested groups via the existing
+  // flattenInteriorDesigns) into absolute-space contours, tagged with each leaf's own fill color
+  // so bent output can still be rendered/exported as separate black/white regions. Covers the same
+  // kinds getInteriorShapeContours already handles (rect/ellipse/polygon/editableSvg/line/arc/
+  // eraser/text), plus imported SVGs (not covered by getInteriorShapeContours) via the existing
+  // SVG flattener. patternAlongPath children are skipped — bending a repeated pattern isn't
+  // supported in this pass.
+  const getFlattenedGroupContours = (design) => {
+    if (!isInteriorGroup(design)) return [];
+    const leaves = flattenInteriorDesigns(design.children || []);
+    const result = [];
+    leaves.forEach(leaf => {
+      const color = leaf.color || 'white';
+      if (isImportedInteriorSvg(leaf)) {
+        getImportedSvgHitContours(leaf).forEach(contour => {
+          if (contour.points.length >= 2) result.push({ points: contour.points, closed: contour.closed !== false, color });
+        });
+        return;
+      }
+      if (leaf.kind === 'group' || leaf.kind === 'patternAlongPath') return;
+      getInteriorShapeContours(leaf).forEach(points => {
+        if (points.length >= 2) result.push({ points, closed: true, color });
+      });
+    });
+    return result;
+  };
+
+  // Bent version of getFlattenedGroupContours, using the WHOLE group's own bounding box as the
+  // bend-line reference so every child bends together along one continuous curve.
+  const getBentGroupContours = (design) => {
+    const flatContours = getFlattenedGroupContours(design);
+    if (!design.bendPoints || !flatContours.length) return flatContours;
+    const bbox = getContoursBoundingBox(flatContours);
+    if (!bbox) return flatContours;
+    const baselineY = (bbox.minY + bbox.maxY) / 2;
+    return flatContours.map(contour => ({
+      ...contour,
+      points: bendPointsAlongCurve(contour.points, design.bendPoints, bbox, baselineY)
+    }));
+  };
+
+  // Flattens every repeated instance of a patternAlongPath into absolute-space contours (the same
+  // per-instance "fake SVG design" approach the DXF export already uses), so the whole pattern can
+  // be bent as one continuous curve just like a group's children.
+  const getFlattenedPatternContours = (design) => {
+    if (design.kind !== 'patternAlongPath') return [];
+    const designScale = n(design.scale, 1);
+    const motifW = Math.max(1, n(design.motifWidth, 20)) * designScale;
+    const motifH = Math.max(1, n(design.motifHeight, 20)) * designScale;
+    const patternRotation = n(design.rotation, 0);
+    const [pivotCx, pivotCy] = getInteriorTransformCenter(getInteriorObjectBounds(design));
+    const pivotRad = patternRotation * Math.PI / 180;
+    const pivotCos = Math.cos(pivotRad);
+    const pivotSin = Math.sin(pivotRad);
+    const patternSourceBox = design.sourceBox || getInlineSvgRenderData(design.svgText)?.rootBox || { width: 20, height: 20 };
+    const motifScaleX = motifW / (patternSourceBox.width || 1);
+    const motifScaleY = motifH / (patternSourceBox.height || 1);
+    const localThickenedContours = n(design.lineThicken, 0) > 0
+      ? getThickenedLocalSvgContours(design, (motifScaleX + motifScaleY) / 2)
+      : null;
+    const color = design.color || 'white';
+
+    const result = [];
+    buildPatternAlongPathInstances(design).forEach((inst, instIndex) => {
+      const dx = inst.x - pivotCx;
+      const dy = inst.y - pivotCy;
+      const instX = pivotCx + dx * pivotCos - dy * pivotSin;
+      const instY = pivotCy + dx * pivotSin + dy * pivotCos;
+      const fakeInstanceDesign = {
+        id: `${design.id}-instance-${instIndex}`,
+        kind: 'svg',
+        svgText: design.svgText,
+        sourceBox: design.sourceBox,
+        color: design.color,
+        x: instX - motifW / 2,
+        y: instY - motifH / 2,
+        width: motifW,
+        height: motifH,
+        rotation: inst.angle * 180 / Math.PI + patternRotation,
+        mirrorX: isPatternInstanceMirrored(design, instIndex),
+        mirrorY: false
+      };
+
+      const instanceContours = localThickenedContours
+        ? placeLocalSvgContours(fakeInstanceDesign, localThickenedContours, getInteriorObjectBounds(fakeInstanceDesign))
+        : getImportedSvgHitContours(fakeInstanceDesign);
+
+      instanceContours.forEach(contour => {
+        if (contour.points.length >= 2) result.push({ points: contour.points, closed: contour.closed !== false, color });
+      });
+    });
+    return result;
+  };
+
+  // Bent version of getFlattenedPatternContours, using the WHOLE pattern's own bounding box as the
+  // bend-line reference so every repeated instance bends together along one continuous curve.
+  const getBentPatternContours = (design) => {
+    const flatContours = getFlattenedPatternContours(design);
+    if (!design.bendPoints || !flatContours.length) return flatContours;
+    const bbox = getContoursBoundingBox(flatContours);
+    if (!bbox) return flatContours;
+    const baselineY = (bbox.minY + bbox.maxY) / 2;
+    return flatContours.map(contour => ({
+      ...contour,
+      points: bendPointsAlongCurve(contour.points, design.bendPoints, bbox, baselineY)
+    }));
+  };
+
+  // Adds or removes the draggable 3-point bend line for an editableSvg, group, or patternAlongPath.
+  // Adding it seeds a flat line (a no-op bend) through the shape's current vertical center so the
+  // control points start exactly where the shape already is; removing it clears the bend entirely
+  // (not just hides the handles) since there's no separate "frozen bend" state to preserve here.
+  const toggleInteriorBendLine = (design) => {
+    if (design.bendPoints) {
+      updateInteriorDesign(design.id, { bendPoints: null });
+      return;
+    }
+    const bbox = isInteriorGroup(design)
+      ? getContoursBoundingBox(getFlattenedGroupContours(design))
+      : design.kind === 'patternAlongPath'
+        ? getContoursBoundingBox(getFlattenedPatternContours(design))
+        : getContoursBoundingBox(design.contours || []);
+    if (!bbox) return;
+    updateInteriorDesign(design.id, { bendPoints: getDefaultBendPoints(bbox) });
+  };
+
+  // When "alternate" is on, every other instance is mirrored (1 normal, 1 mirrored, ...),
+  // starting with a normal (unmirrored) instance at index 0; otherwise falls back to the
+  // uniform "Mirror" checkbox applied to every instance.
+  const isPatternInstanceMirrored = (design, index) => (
+    design.alternateMirror ? index % 2 === 1 : !!design.mirror
+  );
+
+  const buildPatternAlongPathInstances = (design) => {
+    const pathPoints = design.pathPoints;
+    if (!pathPoints || pathPoints.length < 2) return [];
+    const inwardSign = n(design.pathInwardSign, 1);
+
+    const count = Math.max(1, Math.round(n(design.count, 6)));
+    const offset = n(design.offset, 0);
+    const lengths = getPathCumulativeLengths(pathPoints);
+    const total = lengths[lengths.length - 1];
+    if (total <= 0.01) return [];
+
+    // Anchor the first instance at the original source SVG's position (startDistance) and space
+    // the rest onward toward the path's end, rather than always spanning the whole path from t=0.
+    const startDistance = clamp(n(design.startDistance, 0), 0, total);
+    const remaining = total - startDistance;
+    const positions = count === 1
+      ? [startDistance]
+      : Array.from({ length: count }, (_, index) => startDistance + (index / (count - 1)) * remaining);
+
+    return positions.map(distance => {
+      const { x, y, angle } = pointAndAngleAtLength(pathPoints, lengths, distance);
+      const perpAngle = angle + Math.PI / 2;
+      const shift = offset * inwardSign;
+      return {
+        x: x + Math.cos(perpAngle) * shift,
+        y: y + Math.sin(perpAngle) * shift,
+        angle
+      };
+    });
+  };
+
   const getInteriorShapeContours = (design) => {
     const bounds = getInteriorObjectBounds(design);
     const thickness = Math.max(0.5, n(design.thickness, 8));
@@ -8438,7 +9525,12 @@ export default function App() {
       return applyDesignTransform([design.points || []]);
     }
 
+    if (design.kind === 'editableSvg') {
+      return applyDesignTransform(getBentContours(design).filter(contour => contour.closed).map(contour => contour.points));
+    }
+
     if (design.kind === 'line') {
+      if (design.borderPattern === 'meander') return applyDesignTransform(buildMeanderPatternContours(design));
       return applyDesignTransform(offsetOpenStrokeContours(
         [[n(design.x1, 0), n(design.y1, 0)], [n(design.x2, 0), n(design.y2, 0)]],
         thickness,
@@ -8447,6 +9539,7 @@ export default function App() {
     }
 
     if (design.kind === 'arc') {
+      if (design.borderPattern === 'meander') return applyDesignTransform(buildMeanderPatternContours(design));
       return applyDesignTransform([getInteriorArcBandPoints(design)]);
     }
 
@@ -8461,6 +9554,19 @@ export default function App() {
     return [];
   };
 
+  // Like flattenInteriorDesigns, but a group with a bend line is kept as one leaf instead of
+  // being recursed into — bent groups are exported as their own flattened+bent contours (see
+  // the isInteriorGroup branch below), not as their individual (unbent) children.
+  const flattenInteriorDesignsForExport = (designs, parentMatrix = null) => (
+    designs.flatMap(design => {
+      const inheritedDesign = parentMatrix ? { ...design, __parentMatrix: parentMatrix } : design;
+      if (!isInteriorGroup(inheritedDesign)) return [inheritedDesign];
+      if (inheritedDesign.bendPoints) return [inheritedDesign];
+      const groupMatrix = getInteriorDesignTransformMatrix(inheritedDesign);
+      return flattenInteriorDesignsForExport(inheritedDesign.children || [], groupMatrix);
+    })
+  );
+
   const collectInteriorDesignContours = (sourceDesigns = interiorDesigns, options = {}) => {
     const {
       includeLivePattern = true,
@@ -8472,14 +9578,61 @@ export default function App() {
     const parser = new DOMParser();
     const clipOptions = { sourceDesigns, clipEnabled, marginBoundarySets };
 
-    flattenInteriorDesigns(sourceDesigns).forEach((design, designIndex) => {
+    flattenInteriorDesignsForExport(sourceDesigns).forEach((design, designIndex) => {
       if (design.exportable === false && design.kind !== 'text') {
         skipped.push(design.name);
         return;
       }
 
+      if (isInteriorGroup(design) && design.bendPoints) {
+        const layer = `SHAPE_${designIndex + 1}`;
+        getBentGroupContours(design).forEach(contour => {
+          const cleaned = cleanDxfPoints(contour.points, contour.closed);
+          if (cleaned.length < (contour.closed ? 3 : 2)) return;
+          const contourSets = contour.closed
+            ? intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design, clipOptions))
+            : [cleaned];
+          contourSets.forEach(clipped => {
+            if (clipped.length < (contour.closed ? 3 : 2)) return;
+            contours.push({
+              points: clipped,
+              closed: contour.closed,
+              source: 'fill',
+              fillRule: 'nonzero',
+              layer,
+              designId: design.id,
+              designName: design.name,
+              materialColor: contour.color || 'white',
+              zIndex: designIndex,
+              contourOrder: contours.length
+            });
+          });
+        });
+        return;
+      }
+
       if (!isImportedInteriorSvg(design)) {
         const layer = `SHAPE_${designIndex + 1}`;
+        if (design.kind === 'patternAlongPath') {
+          getBentPatternContours(design).forEach(contour => {
+            const cleaned = cleanDxfPoints(contour.points, contour.closed);
+            if (cleaned.length < (contour.closed ? 3 : 2)) return;
+            contours.push({
+              points: cleaned,
+              closed: contour.closed,
+              source: 'fill',
+              fillRule: 'nonzero',
+              layer,
+              designId: design.id,
+              designName: design.name,
+              materialColor: contour.color || design.color || 'white',
+              zIndex: designIndex,
+              contourOrder: contours.length
+            });
+          });
+          return;
+        }
+
         if (design.kind === 'text') {
           const textContours = getInteriorTextBooleanContours(design);
 
@@ -8551,6 +9704,38 @@ export default function App() {
       }
 
       if (!design.svgText) return;
+
+      if (n(design.lineThicken, 0) > 0) {
+        // Thickened lines are already a flattened+offset approximation (see
+        // getThickenedLocalSvgContours), so export reuses that same simplified geometry directly
+        // instead of re-walking the SVG DOM with the full fill-rule-aware logic below.
+        const layer = `DESIGN_${designIndex + 1}`;
+        const bounds = getInteriorObjectBounds(design);
+        const exportSourceBox = design.sourceBox || getInlineSvgRenderData(design.svgText)?.rootBox || { width: bounds.width, height: bounds.height };
+        const exportScaleX = bounds.width / (exportSourceBox.width || 1);
+        const exportScaleY = bounds.height / (exportSourceBox.height || 1);
+        placeLocalSvgContours(design, getThickenedLocalSvgContours(design, (exportScaleX + exportScaleY) / 2), bounds).forEach(contour => {
+          const cleaned = cleanDxfPoints(contour.points, true);
+          if (cleaned.length < 3) return;
+          const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design, clipOptions));
+          contourSets.forEach(clipped => {
+            if (clipped.length < 3) return;
+            contours.push({
+              points: clipped,
+              closed: true,
+              source: 'fill',
+              fillRule: 'nonzero',
+              layer,
+              designId: design.id,
+              designName: design.name,
+              materialColor: design.color || 'white',
+              zIndex: designIndex,
+              contourOrder: contours.length
+            });
+          });
+        });
+        return;
+      }
 
       const doc = parser.parseFromString(design.svgText, 'image/svg+xml');
       const svg = doc.querySelector('svg');
@@ -9012,7 +10197,7 @@ export default function App() {
   };
 
   const buildArcTopDXFLwPolyline = () => {
-    if (isAngledPanel || hasPanelSplit || bottomPanelEnabled) return buildStraightDXFLwPolyline();
+    if (isAngledPanel || hasPanelSplit || bottomPanelEnabled || importedFrameOutline) return buildStraightDXFLwPolyline();
 
     const arc = getActiveTopArcData();
     if (!arc) return '';
@@ -9137,7 +10322,7 @@ export default function App() {
     dxf += buildDxfTablesSection(designLayers);
     dxf += buildDxfBlocksSection();
     dxf += dxfLine('0', 'SECTION', '2', 'ENTITIES');
-    if (Math.abs(exportStraightenAngleRad) > 0.000001) {
+    if (!importedFrameOutline && Math.abs(exportStraightenAngleRad) > 0.000001) {
       dxf += buildFrameDXFEntitiesFromPanelSets(straightenPointSetsForDXF(getFrameDXFPanelSets(), exportStraightenAngleRad));
     } else {
       dxf += hasArcTop ? buildArcTopDXFLwPolyline() : buildStraightDXFLwPolyline();
@@ -10407,6 +11592,33 @@ export default function App() {
     if (isInteriorGroup(design)) {
       const bounds = getInteriorObjectBounds(design);
       const objectTransform = getInteriorSvgTransform(design, bounds);
+
+      if (design.bendPoints) {
+        // Bent groups render as flattened black/white paths instead of recursing into children —
+        // this loses each child's own interactivity and exact z-order (collapsed into two color
+        // layers, white under black) while bent; remove the bend line to get normal per-child
+        // group editing back.
+        const bentContours = getBentGroupContours(design);
+        const eventProps = interactiveDesign ? {
+          onMouseDown: (e) => startInteriorDesignDrag(e, interactiveDesign, 'move'),
+          onClick: (e) => selectInteriorDesignFromCanvas(e, interactiveDesign.id)
+        } : {};
+        const cursorStyle = interactiveDesign ? { cursor: interiorDrag?.id === interactiveDesign.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' } : undefined;
+        const whiteContours = bentContours.filter(contour => contour.color !== 'black');
+        const blackContours = bentContours.filter(contour => contour.color === 'black');
+
+        return (
+          <g transform={objectTransform || undefined}>
+            {whiteContours.length > 0 && (
+              <path d={buildInteriorContoursPathD(whiteContours)} fill="#ffffff" fillRule="nonzero" {...eventProps} style={cursorStyle} />
+            )}
+            {blackContours.length > 0 && (
+              <path d={buildInteriorContoursPathD(blackContours)} fill="#000000" fillRule="nonzero" {...eventProps} style={cursorStyle} />
+            )}
+          </g>
+        );
+      }
+
       return (
         <g transform={objectTransform || undefined}>
           {(design.children || []).map(child => (
@@ -10436,6 +11648,82 @@ export default function App() {
     } : {};
     const cursorStyle = interactiveDesign ? { cursor: interiorDrag?.id === interactiveDesign.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' } : undefined;
 
+    if (design.kind === 'patternAlongPath') {
+      const svgRenderData = getInlineSvgRenderData(design.svgText);
+      if (!svgRenderData) return null;
+      const sourceBox = design.sourceBox || svgRenderData.rootBox;
+      const designScale = n(design.scale, 1);
+      const itemW = Math.max(1, n(design.motifWidth, sourceBox.width || 20)) * designScale;
+      const itemH = Math.max(1, n(design.motifHeight, sourceBox.height || 20)) * designScale;
+      const sx = itemW / (sourceBox.width || 1);
+      const sy = itemH / (sourceBox.height || 1);
+      const localTx = -itemW / 2 - sourceBox.x * sx;
+      const localTy = -itemH / 2 - sourceBox.y * sy;
+      const thicken = n(design.lineThicken, 0);
+      const thickenedContours = thicken > 0 ? getThickenedLocalSvgContours(design, (sx + sy) / 2) : null;
+      const motifFill = design.color === 'black' ? '#000000' : '#ffffff';
+
+      if (design.bendPoints) {
+        // Bent patterns render as one flattened path instead of repeating per-instance groups —
+        // this loses per-instance interactivity while bent; remove the bend line to get the
+        // normal repeated-instance rendering back.
+        return (
+          <g clipPath={commonClipPath}>
+            <path d={buildInteriorContoursPathD(getBentPatternContours(design))} fill={motifFill} fillRule="nonzero" {...eventProps} style={cursorStyle} />
+          </g>
+        );
+      }
+
+      return (
+        // clip-path is on this outer, untransformed <g> so the margin/clip-source region stays
+        // fixed in absolute board space; the design's own rotation is applied only to the inner
+        // <g>, so rotating the shape no longer drags the clip mask along with it.
+        <g clipPath={commonClipPath}>
+          <g transform={objectTransform || undefined}>
+            <rect
+              x={x * scale}
+              y={y * scale}
+              width={itemWidth * scale}
+              height={itemHeight * scale}
+              fill="transparent"
+              pointerEvents="all"
+              {...eventProps}
+              style={cursorStyle}
+            />
+            {buildPatternAlongPathInstances(design).map((inst, index) => {
+              const mirrorFlip = isPatternInstanceMirrored(design, index) ? -1 : 1;
+              return (
+                <g
+                  key={index}
+                  transform={`translate(${inst.x * scale} ${inst.y * scale}) rotate(${inst.angle * 180 / Math.PI}) scale(${mirrorFlip} 1)`}
+                  {...eventProps}
+                  style={cursorStyle}
+                >
+                  {thickenedContours ? (
+                    <g
+                      transform={`translate(${localTx * scale} ${localTy * scale}) scale(${sx * scale} ${sy * scale})`}
+                      pointerEvents="visiblePainted"
+                    >
+                      {thickenedContours.map((contour, contourIndex) => (
+                        <polygon key={contourIndex} points={rawPolygonPoints(contour.points)} fill={motifFill} fillRule="nonzero" />
+                      ))}
+                    </g>
+                  ) : (
+                    <g
+                      transform={`translate(${localTx * scale} ${localTy * scale}) scale(${sx * scale} ${sy * scale})`}
+                      pointerEvents="visiblePainted"
+                      style={{ filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)' }}
+                      dangerouslySetInnerHTML={{ __html: svgRenderData.markup }}
+                    />
+                  )}
+                </g>
+              );
+            })}
+          </g>
+        </g>
+      );
+    }
+
     if (isImportedInteriorSvg(design)) {
       const svgRenderData = getInlineSvgRenderData(design.svgText);
       if (svgRenderData) {
@@ -10445,70 +11733,112 @@ export default function App() {
         const tx = (x - sourceBox.x * sx) * scale;
         const ty = (y - sourceBox.y * sy) * scale;
         const hitPadding = IMPORTED_SVG_HIT_TOLERANCE_PX / Math.max(0.0001, scale * viewZoom);
+        const thicken = n(design.lineThicken, 0);
+        const thickenedContours = thicken > 0 ? getThickenedLocalSvgContours(design, (sx + sy) / 2) : null;
 
         return (
-          <g clipPath={commonClipPath} transform={objectTransform || undefined}>
-            <rect
-              x={(x - hitPadding) * scale}
-              y={(y - hitPadding) * scale}
-              width={(itemWidth + hitPadding * 2) * scale}
-              height={(itemHeight + hitPadding * 2) * scale}
-              fill="transparent"
-              pointerEvents="all"
-              {...eventProps}
-              style={cursorStyle}
-            />
-            <g
-              transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
-              pointerEvents="visiblePainted"
-              {...eventProps}
-              style={{
-                ...(cursorStyle || {}),
-                filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
-              }}
-              dangerouslySetInnerHTML={{ __html: svgRenderData.markup }}
-            />
+          <g clipPath={commonClipPath}>
+            <g transform={objectTransform || undefined}>
+              <rect
+                x={(x - hitPadding) * scale}
+                y={(y - hitPadding) * scale}
+                width={(itemWidth + hitPadding * 2) * scale}
+                height={(itemHeight + hitPadding * 2) * scale}
+                fill="transparent"
+                pointerEvents="all"
+                {...eventProps}
+                style={cursorStyle}
+              />
+              {thickenedContours ? (
+                <g
+                  transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
+                  pointerEvents="visiblePainted"
+                  {...eventProps}
+                  style={cursorStyle}
+                >
+                  {thickenedContours.map((contour, contourIndex) => (
+                    <polygon
+                      key={contourIndex}
+                      points={rawPolygonPoints(contour.points)}
+                      fill={design.color === 'black' ? '#000000' : '#ffffff'}
+                      fillRule="nonzero"
+                    />
+                  ))}
+                </g>
+              ) : (
+                <g
+                  transform={`translate(${tx} ${ty}) scale(${sx * scale} ${sy * scale})`}
+                  pointerEvents="visiblePainted"
+                  {...eventProps}
+                  style={{
+                    ...(cursorStyle || {}),
+                    filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
+                  }}
+                  dangerouslySetInnerHTML={{ __html: svgRenderData.markup }}
+                />
+              )}
+            </g>
           </g>
         );
       }
 
       return (
-        <image
-          href={design.href}
-          x={x * scale}
-          y={y * scale}
-          width={itemWidth * scale}
-          height={itemHeight * scale}
-          preserveAspectRatio="none"
-          clipPath={commonClipPath}
-          transform={objectTransform || undefined}
-          {...eventProps}
-          style={{
-            ...(cursorStyle || {}),
-            filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
-          }}
-        />
+        <g clipPath={commonClipPath}>
+          <image
+            href={design.href}
+            x={x * scale}
+            y={y * scale}
+            width={itemWidth * scale}
+            height={itemHeight * scale}
+            preserveAspectRatio="none"
+            transform={objectTransform || undefined}
+            {...eventProps}
+            style={{
+              ...(cursorStyle || {}),
+              filter: design.color === 'black' ? 'brightness(0)' : 'brightness(0) invert(1)'
+            }}
+          />
+        </g>
+      );
+    }
+
+    if ((design.kind === 'line' || design.kind === 'arc') && design.borderPattern === 'meander') {
+      return (
+        <g clipPath={commonClipPath}>
+          <g transform={objectTransform || undefined} {...eventProps} style={cursorStyle}>
+            {buildMeanderPatternContours(design).map((points, index) => (
+              <polygon key={index} points={polygonPoints(points)} fill={shapeFill} />
+            ))}
+          </g>
+        </g>
       );
     }
 
     if (design.kind === 'rect') {
-      return <rect x={x * scale} y={y * scale} width={itemWidth * scale} height={itemHeight * scale} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
+      return <g clipPath={commonClipPath}><rect x={x * scale} y={y * scale} width={itemWidth * scale} height={itemHeight * scale} fill={shapeFill} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} /></g>;
     }
 
     if (design.kind === 'ellipse') {
-      return <ellipse cx={(x + itemWidth / 2) * scale} cy={(y + itemHeight / 2) * scale} rx={(itemWidth / 2) * scale} ry={(itemHeight / 2) * scale} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
+      return <g clipPath={commonClipPath}><ellipse cx={(x + itemWidth / 2) * scale} cy={(y + itemHeight / 2) * scale} rx={(itemWidth / 2) * scale} ry={(itemHeight / 2) * scale} fill={shapeFill} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} /></g>;
     }
 
     if (design.kind === 'polygon') {
-      return <polygon points={polygonPoints(design.points || [])} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
+      return <g clipPath={commonClipPath}><polygon points={polygonPoints(design.points || [])} fill={shapeFill} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} /></g>;
+    }
+
+    if (design.kind === 'editableSvg') {
+      // Show the flat (unbent) points while actively point-editing, so dragging stays simple and
+      // undistorted; the arc bend re-applies once you exit point-edit mode.
+      const displayContours = design.pointEditMode !== false ? (design.contours || []) : getBentContours(design);
+      return <g clipPath={commonClipPath}><path d={buildInteriorContoursPathD(displayContours)} fill={shapeFill} fillRule="nonzero" transform={objectTransform || undefined} {...eventProps} style={cursorStyle} /></g>;
     }
 
     if (design.kind === 'line') {
-      return <line x1={n(design.x1, 0) * scale} y1={n(design.y1, 0) * scale} x2={n(design.x2, 0) * scale} y2={n(design.y2, 0) * scale} stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
+      return <g clipPath={commonClipPath}><line x1={n(design.x1, 0) * scale} y1={n(design.y1, 0) * scale} x2={n(design.x2, 0) * scale} y2={n(design.y2, 0) * scale} stroke={shapeFill} strokeWidth={strokeWidth} strokeLinecap="butt" transform={objectTransform || undefined} {...eventProps} style={cursorStyle} /></g>;
     }
 
     if (design.kind === 'arc') {
-      return <polygon points={polygonPoints(arcBandPoints)} fill={shapeFill} clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} />;
+      return <g clipPath={commonClipPath}><polygon points={polygonPoints(arcBandPoints)} fill={shapeFill} transform={objectTransform || undefined} {...eventProps} style={cursorStyle} /></g>;
     }
 
     if (design.kind === 'eraser') {
@@ -10517,18 +11847,19 @@ export default function App() {
         .join(' ');
 
       return (
-        <path
-          d={path}
-          fill="none"
-          stroke="#000000"
-          strokeWidth={strokeWidth}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          clipPath={commonClipPath}
-          transform={objectTransform || undefined}
-          {...eventProps}
-          style={cursorStyle}
-        />
+        <g clipPath={commonClipPath}>
+          <path
+            d={path}
+            fill="none"
+            stroke="#000000"
+            strokeWidth={strokeWidth}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            transform={objectTransform || undefined}
+            {...eventProps}
+            style={cursorStyle}
+          />
+        </g>
       );
     }
 
@@ -10537,30 +11868,32 @@ export default function App() {
       const outlineMarkup = getInteriorTextPreviewPath(design);
       const bridgeContours = getInteriorTextBridgeContours(design);
       return (
-        <g clipPath={commonClipPath} transform={objectTransform || undefined} {...eventProps} style={cursorStyle}>
-          <rect
-            x={x * scale}
-            y={y * scale}
-            width={itemWidth * scale}
-            height={itemHeight * scale}
-            fill="transparent"
-          />
-          {textValue && outlineMarkup && (
-            <path
-              d={outlineMarkup}
-              fill={shapeFill}
-              fillRule="nonzero"
-              pointerEvents="none"
+        <g clipPath={commonClipPath}>
+          <g transform={objectTransform || undefined} {...eventProps} style={cursorStyle}>
+            <rect
+              x={x * scale}
+              y={y * scale}
+              width={itemWidth * scale}
+              height={itemHeight * scale}
+              fill="transparent"
             />
-          )}
-          {bridgeContours.map((bridgePoints, bridgeIndex) => (
-            <polygon
-              key={`bridge-${bridgeIndex}`}
-              points={polygonPoints(bridgePoints)}
-              fill="#000000"
-              pointerEvents="none"
-            />
-          ))}
+            {textValue && outlineMarkup && (
+              <path
+                d={outlineMarkup}
+                fill={shapeFill}
+                fillRule="nonzero"
+                pointerEvents="none"
+              />
+            )}
+            {bridgeContours.map((bridgePoints, bridgeIndex) => (
+              <polygon
+                key={`bridge-${bridgeIndex}`}
+                points={polygonPoints(bridgePoints)}
+                fill="#000000"
+                pointerEvents="none"
+              />
+            ))}
+          </g>
         </g>
       );
     }
@@ -11004,7 +12337,9 @@ export default function App() {
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Interior Designer</h1>
                 <p className="text-xs text-slate-500">
-                  {activeInteriorShapeTool
+                  {pendingPatternPathSourceId
+                    ? 'Click an edge to follow (Esc to cancel)'
+                    : activeInteriorShapeTool
                     ? `${getInteriorShapeName(activeInteriorShapeTool)} tool active`
                     : `${safeWidth} x ${safeHeight} mm frame`}
                 </p>
@@ -11119,7 +12454,21 @@ export default function App() {
                   </button>
                 </div>
 
-                {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc' || selectedInteriorDesign.kind === 'eraser') && (
+                {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc') && (
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    Border
+                    <select
+                      value={selectedInteriorDesign.borderPattern === 'meander' ? 'meander' : 'solid'}
+                      onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { borderPattern: e.target.value === 'meander' ? 'meander' : 'solid' })}
+                      className="rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                    >
+                      <option value="solid">Solid</option>
+                      <option value="meander">Meander</option>
+                    </select>
+                  </label>
+                )}
+
+                {(selectedInteriorDesign.kind === 'line' || selectedInteriorDesign.kind === 'arc' || selectedInteriorDesign.kind === 'eraser' || selectedInteriorDesign.borderPattern === 'meander') && (
                   <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
                     T
                     <input
@@ -11128,6 +12477,20 @@ export default function App() {
                       value={selectedInteriorDesign.thickness ?? 8}
                       onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { thickness: e.target.value === '' ? '' : Math.max(0.5, Number(e.target.value)) })}
                       onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { thickness: Math.max(0.5, n(selectedInteriorDesign.thickness, 8)) })}
+                      className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                    />
+                  </label>
+                )}
+
+                {selectedInteriorDesign.borderPattern === 'meander' && (
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    Motif
+                    <input
+                      type="number"
+                      min="1"
+                      value={selectedInteriorDesign.meanderLength ?? 40}
+                      onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { meanderLength: e.target.value === '' ? '' : Math.max(1, Number(e.target.value)) })}
+                      onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { meanderLength: Math.max(1, n(selectedInteriorDesign.meanderLength, 40)) })}
                       className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
                     />
                   </label>
@@ -11241,6 +12604,134 @@ export default function App() {
                 >
                   Clip
                 </button>
+
+                {isImportedInteriorSvg(selectedInteriorDesign) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingPatternPathSourceId(selectedInteriorDesign.id);
+                      setInteriorSelection([]);
+                    }}
+                    className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title="Repeat this SVG along an edge you pick from another shape"
+                  >
+                    Pattern along path
+                  </button>
+                )}
+
+                {isImportedInteriorSvg(selectedInteriorDesign) && (
+                  <button
+                    type="button"
+                    onClick={() => convertImportedSvgToEditablePoints(selectedInteriorDesign)}
+                    className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title="Convert to an editable shape so every corner/point can be dragged independently"
+                  >
+                    Edit points
+                  </button>
+                )}
+
+                {selectedInteriorDesign.kind === 'editableSvg' && (
+                  <button
+                    type="button"
+                    onClick={() => updateInteriorDesign(selectedInteriorDesign.id, {
+                      pointEditMode: selectedInteriorDesign.pointEditMode === false
+                    })}
+                    className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title={selectedInteriorDesign.pointEditMode === false
+                      ? 'Show per-point handles again to edit corners'
+                      : 'Switch back to normal resize/rotate handles (keeps your point edits)'}
+                  >
+                    {selectedInteriorDesign.pointEditMode === false ? 'Edit points' : 'Exit edit points'}
+                  </button>
+                )}
+
+                {(selectedInteriorDesign.kind === 'editableSvg' || selectedInteriorDesign.kind === 'patternAlongPath' || isInteriorGroup(selectedInteriorDesign)) && (
+                  <button
+                    type="button"
+                    onClick={() => toggleInteriorBendLine(selectedInteriorDesign)}
+                    className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                    title={selectedInteriorDesign.bendPoints
+                      ? 'Remove the bend line and flatten back to the original shape'
+                      : (isInteriorGroup(selectedInteriorDesign)
+                        ? 'Add a draggable 3-point bend line through the middle of the group — every shape inside follows it as you drag the points'
+                        : selectedInteriorDesign.kind === 'patternAlongPath'
+                          ? 'Add a draggable 3-point bend line through the middle of the pattern — every repeated instance follows it as you drag the points'
+                          : 'Add a draggable 3-point bend line through the middle of the shape — drag the points to reshape it')}
+                  >
+                    {selectedInteriorDesign.bendPoints ? 'Remove bend line' : 'Add bend line'}
+                  </button>
+                )}
+
+                {(isImportedInteriorSvg(selectedInteriorDesign) || selectedInteriorDesign.kind === 'patternAlongPath') && (
+                  <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                    Line thickness
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={selectedInteriorDesign.lineThicken ?? 0}
+                      onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { lineThicken: e.target.value === '' ? '' : Math.max(0, Number(e.target.value)) })}
+                      onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { lineThicken: Math.max(0, n(selectedInteriorDesign.lineThicken, 0)) })}
+                      className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      title="Grows all black lines/fills of this SVG outward by this amount (mm), all around"
+                    />
+                  </label>
+                )}
+
+                {selectedInteriorDesign.kind === 'patternAlongPath' && (
+                  <>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Count
+                      <input
+                        type="number"
+                        min="1"
+                        value={selectedInteriorDesign.count ?? 6}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { count: e.target.value === '' ? '' : Math.max(1, Math.round(Number(e.target.value))) })}
+                        onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { count: Math.max(1, Math.round(n(selectedInteriorDesign.count, 6))) })}
+                        className="w-14 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Offset
+                      <input
+                        type="number"
+                        value={selectedInteriorDesign.offset ?? 0}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { offset: e.target.value === '' ? '' : Number(e.target.value) })}
+                        onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { offset: n(selectedInteriorDesign.offset, 0) })}
+                        className="w-16 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      Scale
+                      <input
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        value={selectedInteriorDesign.scale ?? 1}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { scale: e.target.value === '' ? '' : Math.max(0.1, Number(e.target.value)) })}
+                        onBlur={() => updateInteriorDesign(selectedInteriorDesign.id, { scale: Math.max(0.1, n(selectedInteriorDesign.scale, 1)) })}
+                        className="w-14 rounded-md border bg-white p-1.5 text-xs text-slate-900"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedInteriorDesign.mirror}
+                        disabled={!!selectedInteriorDesign.alternateMirror}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { mirror: e.target.checked })}
+                      />
+                      Mirror
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedInteriorDesign.alternateMirror}
+                        onChange={e => updateInteriorDesign(selectedInteriorDesign.id, { alternateMirror: e.target.checked })}
+                      />
+                      Alternate mirror
+                    </label>
+                  </>
+                )}
 
                 <div className="flex items-center rounded-md border border-slate-200 bg-white">
                   <button
@@ -11760,9 +13251,10 @@ export default function App() {
                   const strokeWidth = Math.max(0.5, n(design.thickness, 8)) * scale;
                   const arcBandPoints = design.kind === 'arc' ? getInteriorArcBandPoints(design) : [];
                   const objectTransform = getInteriorSvgTransform(design, bounds);
+                  const rotatedOutlineBounds = getInteriorRotatedBounds(design, bounds);
 
                   return (
-                    <g key={design.id} pointerEvents={activeInteriorShapeTool ? 'none' : 'auto'}>
+                    <g key={design.id} pointerEvents={(activeInteriorShapeTool || activeTool === 'measure' || activeTool === 'angle') ? 'none' : 'auto'}>
                       {isInteriorGroup(design) && (
                         <g>
                           {renderInteriorDesignBody(design, design)}
@@ -11773,75 +13265,103 @@ export default function App() {
                         renderInteriorDesignBody(design, design)
                       )}
 
+                      {design.kind === 'patternAlongPath' && (
+                        renderInteriorDesignBody(design, design)
+                      )}
+
+                      {(design.kind === 'line' || design.kind === 'arc') && design.borderPattern === 'meander' && (
+                        <g clipPath={commonClipPath}>
+                          <g
+                            transform={objectTransform || undefined}
+                            onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                            onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                            style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                          >
+                            {buildMeanderPatternContours(design).map((points, index) => (
+                              <polygon key={index} points={polygonPoints(points)} fill={shapeFill} />
+                            ))}
+                          </g>
+                        </g>
+                      )}
+
                       {design.kind === 'rect' && (
-                        <rect
-                          x={x * scale}
-                          y={y * scale}
-                          width={itemWidth * scale}
-                          height={itemHeight * scale}
-                          fill={shapeFill}
-                          clipPath={commonClipPath}
-                          transform={objectTransform || undefined}
-                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
-                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
-                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
-                        />
+                        <g clipPath={commonClipPath}>
+                          <rect
+                            x={x * scale}
+                            y={y * scale}
+                            width={itemWidth * scale}
+                            height={itemHeight * scale}
+                            fill={shapeFill}
+                            transform={objectTransform || undefined}
+                            onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                            onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                            style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                          />
+                        </g>
                       )}
 
                       {design.kind === 'ellipse' && (
-                        <ellipse
-                          cx={(x + itemWidth / 2) * scale}
-                          cy={(y + itemHeight / 2) * scale}
-                          rx={(itemWidth / 2) * scale}
-                          ry={(itemHeight / 2) * scale}
-                          fill={shapeFill}
-                          clipPath={commonClipPath}
-                          transform={objectTransform || undefined}
-                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
-                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
-                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
-                        />
+                        <g clipPath={commonClipPath}>
+                          <ellipse
+                            cx={(x + itemWidth / 2) * scale}
+                            cy={(y + itemHeight / 2) * scale}
+                            rx={(itemWidth / 2) * scale}
+                            ry={(itemHeight / 2) * scale}
+                            fill={shapeFill}
+                            transform={objectTransform || undefined}
+                            onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                            onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                            style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                          />
+                        </g>
                       )}
 
                       {design.kind === 'polygon' && (
-                        <polygon
-                          points={polygonPoints(design.points || [])}
-                          fill={shapeFill}
-                          clipPath={commonClipPath}
-                          transform={objectTransform || undefined}
-                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
-                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
-                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
-                        />
+                        <g clipPath={commonClipPath}>
+                          <polygon
+                            points={polygonPoints(design.points || [])}
+                            fill={shapeFill}
+                            transform={objectTransform || undefined}
+                            onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                            onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                            style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                          />
+                        </g>
                       )}
 
-                      {design.kind === 'line' && (
-                        <line
-                          x1={n(design.x1, 0) * scale}
-                          y1={n(design.y1, 0) * scale}
-                          x2={n(design.x2, 0) * scale}
-                          y2={n(design.y2, 0) * scale}
-                          stroke={shapeFill}
-                          strokeWidth={strokeWidth}
-                          strokeLinecap="butt"
-                          clipPath={commonClipPath}
-                          transform={objectTransform || undefined}
-                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
-                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
-                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
-                        />
+                      {design.kind === 'editableSvg' && (
+                        renderInteriorDesignBody(design, design)
                       )}
 
-                      {design.kind === 'arc' && (
-                        <polygon
-                          points={polygonPoints(arcBandPoints)}
-                          fill={shapeFill}
-                          clipPath={commonClipPath}
-                          transform={objectTransform || undefined}
-                          onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
-                          onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
-                          style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
-                        />
+                      {design.kind === 'line' && design.borderPattern !== 'meander' && (
+                        <g clipPath={commonClipPath}>
+                          <line
+                            x1={n(design.x1, 0) * scale}
+                            y1={n(design.y1, 0) * scale}
+                            x2={n(design.x2, 0) * scale}
+                            y2={n(design.y2, 0) * scale}
+                            stroke={shapeFill}
+                            strokeWidth={strokeWidth}
+                            strokeLinecap="butt"
+                            transform={objectTransform || undefined}
+                            onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                            onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                            style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                          />
+                        </g>
+                      )}
+
+                      {design.kind === 'arc' && design.borderPattern !== 'meander' && (
+                        <g clipPath={commonClipPath}>
+                          <polygon
+                            points={polygonPoints(arcBandPoints)}
+                            fill={shapeFill}
+                            transform={objectTransform || undefined}
+                            onMouseDown={(e) => startInteriorDesignDrag(e, design, 'move')}
+                            onClick={(e) => selectInteriorDesignFromCanvas(e, design.id)}
+                            style={{ cursor: interiorDrag?.id === design.id && interiorDrag.mode === 'move' ? 'grabbing' : 'move' }}
+                          />
+                        </g>
                       )}
 
                       {design.kind === 'eraser' && (
@@ -11855,17 +13375,17 @@ export default function App() {
                       {selected && selectedInteriorDesignIds.length <= 1 && !showInteriorExportPreview && (
                         <g>
                           <rect
-                            x={x * scale}
-                            y={y * scale}
-                            width={itemWidth * scale}
-                            height={itemHeight * scale}
+                            x={rotatedOutlineBounds.x * scale}
+                            y={rotatedOutlineBounds.y * scale}
+                            width={rotatedOutlineBounds.width * scale}
+                            height={rotatedOutlineBounds.height * scale}
                             fill="none"
                             stroke="#2563eb"
                             strokeWidth={1.5 / viewZoom}
                             strokeDasharray={`${5 / viewZoom} ${4 / viewZoom}`}
                             pointerEvents="none"
                           />
-                          {getInteriorDesignHandles({ ...design, x, y, width: itemWidth, height: itemHeight }).map(handle => (
+                          {getInteriorDesignHandles({ ...design, ...rotatedOutlineBounds }).map(handle => (
                             <rect
                               key={handle.id}
                               x={handle.x * scale - 5 / viewZoom}
@@ -11883,13 +13403,23 @@ export default function App() {
                               style={{ cursor: handle.cursor }}
                             />
                           ))}
+                          {design.bendPoints && getInteriorPointHandles(design).some(handle => handle.id.startsWith('bend-')) && (
+                            <polyline
+                              points={polygonPoints(getBendCurveSamples(design.bendPoints)?.curvePoints || [])}
+                              fill="none"
+                              stroke="#f97316"
+                              strokeWidth={1.5 / viewZoom}
+                              strokeDasharray={`${4 / viewZoom} ${3 / viewZoom}`}
+                              pointerEvents="none"
+                            />
+                          )}
                           {getInteriorPointHandles(design).map(handle => (
                             <circle
                               key={handle.id}
                               cx={handle.x * scale}
                               cy={handle.y * scale}
                               r={6 / viewZoom}
-                              fill="#2563eb"
+                              fill={handle.id.startsWith('bend-') ? '#f97316' : '#2563eb'}
                               stroke="white"
                               strokeWidth={1.5 / viewZoom}
                               onMouseDown={(e) => startInteriorDesignDrag(e, design, 'point', handle.id)}
@@ -12158,6 +13688,16 @@ export default function App() {
 
                 {((activeTool === 'measure') || (activeInteriorShapeTool && activeInteriorShapeTool !== 'eraser')) && hoverSnap && !draggingMeasurement && (
                   <rect x={hoverSnap[0] * scale - 5 / viewZoom} y={hoverSnap[1] * scale - 5 / viewZoom} width={10 / viewZoom} height={10 / viewZoom} fill="none" stroke="#2563eb" strokeWidth={2 / viewZoom} />
+                )}
+
+                {pendingPatternPathSourceId && hoveredPatternPathEdge && (
+                  <polyline
+                    points={polygonPoints(hoveredPatternPathEdge.points)}
+                    fill="none"
+                    stroke="#22c55e"
+                    strokeWidth={5 / viewZoom}
+                    pointerEvents="none"
+                  />
                 )}
 
                 {showInteriorExportPreview && (
@@ -12607,6 +14147,39 @@ export default function App() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+            <p className="text-xs font-semibold text-slate-700">Import DXF as frame</p>
+            {importedFrameOutline ? (
+              <div className="space-y-2">
+                <p className="text-[11px] leading-relaxed text-amber-800 bg-amber-50 border border-amber-200 rounded-md p-2">
+                  Using imported outline from <span className="font-medium">{importedFrameFileName}</span>. Width/height, ears, split panel, and top-shape controls below don't apply while an imported frame is active.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { setImportedFrameOutline(null); setImportedFrameFileName(''); }}
+                  className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  Remove imported frame
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => frameDxfFileInputRef.current?.click()}
+                className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                title="Use a DXF file's outline as the board's outer cut shape instead of the parametric ear/split/top-shape controls below"
+              >
+                Import DXF...
+              </button>
+            )}
+            <input
+              ref={frameDxfFileInputRef}
+              type="file"
+              accept=".dxf"
+              onChange={handleFrameDxfFileChange}
+              className="hidden"
+            />
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-slate-500">Width (mm)</label>
