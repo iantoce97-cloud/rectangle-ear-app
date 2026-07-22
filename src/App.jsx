@@ -623,6 +623,14 @@ export default function App() {
   // 64 segments over a 1500mm-wide board's top arc is a ~23mm chord per segment. This caps the
   // chord length instead, so curves stay smooth at laser-cutting scale regardless of size.
   const MAX_CURVE_CHORD_MM = 0.35;
+  // Live editing (dragging, hovering, panning/zooming, selection outlines) redraws every visible
+  // shape's full point array on every React re-render — at MAX_CURVE_CHORD_MM's export-grade
+  // density that means rebuilding+repainting SVG polygons with thousands of points many times a
+  // second, which is what actually made the whole app feel sluggish (not just recomputation cost,
+  // which is already cached elsewhere). Nothing on a laser-cut-sized board is visibly faceted at
+  // this coarser chord length on screen, so live/preview paths default to this instead, and only
+  // the final DXF export path opts into the finer MAX_CURVE_CHORD_MM.
+  const PREVIEW_CURVE_CHORD_MM = 1.5;
   // Circle/ellipse sampling below happens in each SVG's own local units, before its placement
   // matrix scales it to final mm — estimate that scale so segment counts target a physical chord
   // length regardless of how big/small the shape ends up on the board.
@@ -635,10 +643,10 @@ export default function App() {
   // jtRound/etOpenRound join geometry; kept tight for the same "no visible facets" reason as
   // MAX_CURVE_CHORD_MM above.
   const CLIPPER_ARC_TOLERANCE_MM = 0.05;
-  const getAdaptiveCircleSegments = (rx, ry, matrix) => {
+  const getAdaptiveCircleSegments = (rx, ry, matrix, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
     const scale = estimateMatrixScale(matrix);
     const circumference = 2 * Math.PI * Math.max(Math.abs(rx), Math.abs(ry)) * scale;
-    return Math.min(20000, Math.max(24, Math.ceil(circumference / MAX_CURVE_CHORD_MM)));
+    return Math.min(20000, Math.max(24, Math.ceil(circumference / chordTarget)));
   };
   const IMPORTED_SVG_HIT_TOLERANCE_PX = 8;
   const IMPORTED_SVG_HIT_MASK_SIZE = 192;
@@ -1749,8 +1757,11 @@ export default function App() {
 
     // Segment count scales with this span's own physical length (mm), not a fixed total budget
     // shared across the whole arc — a fixed budget makes long arcs (e.g. a board's full top edge)
-    // produce long, visibly straight facets instead of a smooth curve.
-    const segments = Math.max(1, Math.ceil(length / MAX_CURVE_CHORD_MM));
+    // produce long, visibly straight facets instead of a smooth curve. This feeds the on-screen
+    // preview/clip-boundary polygon only — the actual frame DXF export encodes arcs as true DXF
+    // ARC/bulge entities (buildArcTopDXFLwPolyline), not these flattened points — so it uses the
+    // cheaper preview chord target rather than export-grade density.
+    const segments = Math.max(1, Math.ceil(length / PREVIEW_CURVE_CHORD_MM));
     for (let i = 1; i <= segments; i++) {
       const t = i / segments;
       const s = startS + (endS - startS) * t;
@@ -2344,7 +2355,8 @@ export default function App() {
 
   const appendCleanArcSpan = (verts, arc, startS, endS) => {
     const length = Math.abs(endS - startS);
-    const segments = Math.max(1, Math.ceil(length / MAX_CURVE_CHORD_MM));
+    // Preview/clip-boundary use only — see appendArcSegment above.
+    const segments = Math.max(1, Math.ceil(length / PREVIEW_CURVE_CHORD_MM));
     for (let i = 1; i <= segments; i++) {
       const s = startS + (endS - startS) * (i / segments);
       pushPoint(verts, arc.pointAt(s, 0));
@@ -8970,7 +8982,7 @@ export default function App() {
     return [...resultContours, ...passthrough];
   };
 
-  const getInteriorThreePointArcData = (design, segments = 72) => {
+  const getInteriorThreePointArcData = (design, segments = 72, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
     const p1 = [n(design.x1, 0), n(design.y1, 0)];
     const pm = [n(design.x2, 0), n(design.y2, 0)];
     const p2 = [n(design.x3, 0), n(design.y3, 0)];
@@ -9014,7 +9026,7 @@ export default function App() {
     // `segments` acts as a floor, not a fixed total — a big-radius or wide-sweep arc needs more
     // samples to keep facets small, so scale up further from the actual physical arc length.
     const physicalArcLength = radius * Math.abs(span);
-    const pointCount = Math.max(8, segments, Math.ceil(physicalArcLength / MAX_CURVE_CHORD_MM));
+    const pointCount = Math.max(8, segments, Math.ceil(physicalArcLength / chordTarget));
 
     const points = Array.from({ length: pointCount + 1 }, (_, index) => {
       const angle = a1 + span * (index / pointCount);
@@ -9029,8 +9041,8 @@ export default function App() {
     };
   };
 
-  const sampleInteriorThreePointArc = (design, segments = 72) => (
-    getInteriorThreePointArcData(design, segments).points
+  const sampleInteriorThreePointArc = (design, segments = 72, chordTarget = PREVIEW_CURVE_CHORD_MM) => (
+    getInteriorThreePointArcData(design, segments, chordTarget).points
   );
 
   // The visible-SVG render path (renderInteriorDesignBody / the main per-design render loop)
@@ -9039,20 +9051,20 @@ export default function App() {
   // thousands of points from scratch on every re-render of the canvas (e.g. every mousemove that
   // touches any state), for every arc design, not just ones near the cursor. Cached the same way
   // as getInteriorShapeContours above.
-  const getInteriorArcBandPoints = (design, segments = 96) => {
-    const cacheKey = design?.id ? `${JSON.stringify(design)}::${segments}` : null;
+  const getInteriorArcBandPoints = (design, segments = 96, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
+    const cacheKey = design?.id ? `${JSON.stringify(design)}::${segments}::${chordTarget}` : null;
     if (cacheKey) {
       const cached = interiorArcBandPointsCacheRef.current.get(design.id);
       if (cached && cached.key === cacheKey) return cached.points;
     }
-    const points = computeInteriorArcBandPointsUncached(design, segments);
+    const points = computeInteriorArcBandPointsUncached(design, segments, chordTarget);
     if (cacheKey) interiorArcBandPointsCacheRef.current.set(design.id, { key: cacheKey, points });
     return points;
   };
 
-  const computeInteriorArcBandPointsUncached = (design, segments = 96) => {
+  const computeInteriorArcBandPointsUncached = (design, segments = 96, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
     const thickness = Math.max(0.5, n(design.thickness, 8));
-    const arc = getInteriorThreePointArcData(design, segments);
+    const arc = getInteriorThreePointArcData(design, segments, chordTarget);
 
     if (arc.degenerate || !arc.center || !arc.radius || arc.radius <= 0.000001) {
       return offsetOpenStrokeContours(arc.points, thickness, 'butt')[0] || arc.points;
@@ -9602,18 +9614,18 @@ export default function App() {
   // every pixel of cursor movement, not just while dragging) became a real slowdown. Cached per
   // design id, keyed on the design's own serialized fields — any real change (move/resize/edit)
   // naturally busts the cache, so this only skips truly redundant recomputation.
-  const getInteriorShapeContours = (design) => {
-    const cacheKey = design?.id ? JSON.stringify(design) : null;
+  const getInteriorShapeContours = (design, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
+    const cacheKey = design?.id ? `${JSON.stringify(design)}::${chordTarget}` : null;
     if (cacheKey) {
       const cached = interiorShapeContoursCacheRef.current.get(design.id);
       if (cached && cached.key === cacheKey) return cached.contours;
     }
-    const contours = computeInteriorShapeContoursUncached(design);
+    const contours = computeInteriorShapeContoursUncached(design, chordTarget);
     if (cacheKey) interiorShapeContoursCacheRef.current.set(design.id, { key: cacheKey, contours });
     return contours;
   };
 
-  const computeInteriorShapeContoursUncached = (design) => {
+  const computeInteriorShapeContoursUncached = (design, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
     const bounds = getInteriorObjectBounds(design);
     const thickness = Math.max(0.5, n(design.thickness, 8));
     const applyDesignTransform = (contours) => contours
@@ -9630,7 +9642,7 @@ export default function App() {
     }
 
     if (design.kind === 'ellipse') {
-      const ellipseSegments = getAdaptiveCircleSegments(bounds.width / 2, bounds.height / 2, [1, 0, 0, 1, 0, 0]);
+      const ellipseSegments = getAdaptiveCircleSegments(bounds.width / 2, bounds.height / 2, [1, 0, 0, 1, 0, 0], chordTarget);
       return applyDesignTransform([Array.from({ length: ellipseSegments }, (_, index) => {
         const angle = index * Math.PI * 2 / ellipseSegments;
         return [
@@ -9659,7 +9671,7 @@ export default function App() {
 
     if (design.kind === 'arc') {
       if (design.borderPattern === 'meander') return applyDesignTransform(buildMeanderPatternContours(design));
-      return applyDesignTransform([getInteriorArcBandPoints(design)]);
+      return applyDesignTransform([getInteriorArcBandPoints(design, 96, chordTarget)]);
     }
 
     if (design.kind === 'eraser') {
@@ -9799,7 +9811,7 @@ export default function App() {
           return;
         }
 
-        getInteriorShapeContours(design).forEach(points => {
+        getInteriorShapeContours(design, MAX_CURVE_CHORD_MM).forEach(points => {
           const cleaned = cleanDxfPoints(points, true);
           if (cleaned.length < 3) return;
           const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design, clipOptions));
