@@ -614,6 +614,29 @@ export default function App() {
   const INITIAL_DIMENSION_OFFSET = 25;
   const ARC_SEGMENTS = 64;
   const EAR_ARC_SEGMENTS = 12;
+  // Curves get flattened into straight-line segments before export/cutting. Any scheme that
+  // allocates a FIXED total segment count for a curve (rather than scaling with its actual
+  // physical length) produces long, visibly straight facets once that curve is big enough — e.g.
+  // 64 segments over a 1500mm-wide board's top arc is a ~23mm chord per segment. This caps the
+  // chord length instead, so curves stay smooth at laser-cutting scale regardless of size.
+  const MAX_CURVE_CHORD_MM = 0.35;
+  // Circle/ellipse sampling below happens in each SVG's own local units, before its placement
+  // matrix scales it to final mm — estimate that scale so segment counts target a physical chord
+  // length regardless of how big/small the shape ends up on the board.
+  const estimateMatrixScale = (matrix) => {
+    const scaleX = Math.hypot(matrix[0], matrix[1]);
+    const scaleY = Math.hypot(matrix[2], matrix[3]);
+    return Math.max(scaleX, scaleY, 0.0001);
+  };
+  // Clipper's own arcTolerance param (max deviation from the true curve) only affects its
+  // jtRound/etOpenRound join geometry; kept tight for the same "no visible facets" reason as
+  // MAX_CURVE_CHORD_MM above.
+  const CLIPPER_ARC_TOLERANCE_MM = 0.05;
+  const getAdaptiveCircleSegments = (rx, ry, matrix) => {
+    const scale = estimateMatrixScale(matrix);
+    const circumference = 2 * Math.PI * Math.max(Math.abs(rx), Math.abs(ry)) * scale;
+    return Math.min(20000, Math.max(24, Math.ceil(circumference / MAX_CURVE_CHORD_MM)));
+  };
   const IMPORTED_SVG_HIT_TOLERANCE_PX = 8;
   const IMPORTED_SVG_HIT_MASK_SIZE = 192;
 
@@ -1717,11 +1740,14 @@ export default function App() {
     }
   };
 
-  const appendArcSegment = (verts, arc, startS, endS, radialOffset = 0, segmentCount = ARC_SEGMENTS) => {
+  const appendArcSegment = (verts, arc, startS, endS, radialOffset = 0) => {
     const length = Math.abs(endS - startS);
     if (length <= 0.001) return;
 
-    const segments = Math.max(1, Math.ceil(segmentCount * (length / arc.arcLength)));
+    // Segment count scales with this span's own physical length (mm), not a fixed total budget
+    // shared across the whole arc — a fixed budget makes long arcs (e.g. a board's full top edge)
+    // produce long, visibly straight facets instead of a smooth curve.
+    const segments = Math.max(1, Math.ceil(length / MAX_CURVE_CHORD_MM));
     for (let i = 1; i <= segments; i++) {
       const t = i / segments;
       const s = startS + (endS - startS) * t;
@@ -1821,7 +1847,7 @@ export default function App() {
     let currentS = 0;
 
     ears.forEach(ear => {
-      appendArcSegment(verts, arc, currentS, ear.start, 0, ARC_SEGMENTS);
+      appendArcSegment(verts, arc, currentS, ear.start, 0);
 
       const innerStart = arc.pointAt(ear.start, 0);
       const outerStart = arc.pointAt(ear.start, topEarDepth);
@@ -1830,14 +1856,14 @@ export default function App() {
 
       pushPoint(verts, innerStart);
       pushPoint(verts, outerStart);
-      appendArcSegment(verts, arc, ear.start, ear.end, topEarDepth, EAR_ARC_SEGMENTS);
+      appendArcSegment(verts, arc, ear.start, ear.end, topEarDepth);
       pushPoint(verts, outerEnd);
       pushPoint(verts, innerEnd);
 
       currentS = ear.end;
     });
 
-    appendArcSegment(verts, arc, currentS, arc.arcLength, 0, ARC_SEGMENTS);
+    appendArcSegment(verts, arc, currentS, arc.arcLength, 0);
   };
 
   const getHorizontalEarRanges = (startX, endX, length, depth, edgeMargin, useManual, countValue) => {
@@ -1967,7 +1993,7 @@ export default function App() {
     let currentS = startS;
 
     ears.forEach(ear => {
-      appendArcSegment(verts, arc, currentS, ear.start, 0, ARC_SEGMENTS);
+      appendArcSegment(verts, arc, currentS, ear.start, 0);
 
       const innerStart = arc.pointAt(ear.start, 0);
       const outerStart = arc.pointAt(ear.start, topEarDepth);
@@ -1976,14 +2002,14 @@ export default function App() {
 
       pushPoint(verts, innerStart);
       pushPoint(verts, outerStart);
-      appendArcSegment(verts, arc, ear.start, ear.end, topEarDepth, EAR_ARC_SEGMENTS);
+      appendArcSegment(verts, arc, ear.start, ear.end, topEarDepth);
       pushPoint(verts, outerEnd);
       pushPoint(verts, innerEnd);
 
       currentS = ear.end;
     });
 
-    appendArcSegment(verts, arc, currentS, endS, 0, ARC_SEGMENTS);
+    appendArcSegment(verts, arc, currentS, endS, 0);
     pushPoint(verts, arc.pointAt(endS, 0));
     return verts;
   };
@@ -2315,7 +2341,7 @@ export default function App() {
 
   const appendCleanArcSpan = (verts, arc, startS, endS) => {
     const length = Math.abs(endS - startS);
-    const segments = Math.max(1, Math.ceil(ARC_SEGMENTS * (length / arc.arcLength)));
+    const segments = Math.max(1, Math.ceil(length / MAX_CURVE_CHORD_MM));
     for (let i = 1; i <= segments; i++) {
       const s = startS + (endS - startS) * (i / segments);
       pushPoint(verts, arc.pointAt(s, 0));
@@ -2430,7 +2456,7 @@ export default function App() {
     const sourceArea = Math.abs(polygonArea(pointsArray));
 
     const solve = (delta) => {
-      const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * scaleFactor);
+      const offsetter = new ClipperLib.ClipperOffset(2, CLIPPER_ARC_TOLERANCE_MM * scaleFactor);
       offsetter.AddPath(source, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
       const solution = new ClipperLib.Paths();
       offsetter.Execute(solution, delta * scaleFactor);
@@ -2461,7 +2487,7 @@ export default function App() {
     const sourceArea = Math.abs(polygonArea(pointsArray));
 
     const solve = (delta) => {
-      const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * scaleFactor);
+      const offsetter = new ClipperLib.ClipperOffset(2, CLIPPER_ARC_TOLERANCE_MM * scaleFactor);
       offsetter.AddPath(source, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
       const solution = new ClipperLib.Paths();
       offsetter.Execute(solution, delta * scaleFactor);
@@ -4650,8 +4676,9 @@ export default function App() {
         const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
         const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
         const points = [];
-        for (let i = 0; i < 160; i++) {
-          const angle = i * Math.PI * 2 / 160;
+        const circleSegments = getAdaptiveCircleSegments(rx, ry, matrix);
+        for (let i = 0; i < circleSegments; i++) {
+          const angle = i * Math.PI * 2 / circleSegments;
           points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
         }
         addPoints(points);
@@ -5828,7 +5855,7 @@ export default function App() {
   // Converts a DXF's signed bulge (a chord-relative arc encoding: bulge = tan(includedAngle/4),
   // positive = arc bows to the left of the p1->p2 direction / CCW, negative = right / CW) into
   // sampled arc points from p1 to (and including) p2.
-  const sampleDxfBulgeSegment = (p1, p2, bulge, maxSegAngleDeg = 6) => {
+  const sampleDxfBulgeSegment = (p1, p2, bulge) => {
     if (Math.abs(bulge) < 1e-9) return [p2];
     const theta = 4 * Math.atan(bulge);
     const d = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
@@ -5846,7 +5873,7 @@ export default function App() {
     const cx = midX + (-uy) * apothem * sign;
     const cy = midY + ux * apothem * sign;
     const startAngle = Math.atan2(p1[1] - cy, p1[0] - cx);
-    const steps = Math.max(1, Math.ceil(Math.abs(theta) / (maxSegAngleDeg * Math.PI / 180)));
+    const steps = Math.max(1, Math.ceil((radius * Math.abs(theta)) / MAX_CURVE_CHORD_MM));
     const points = [];
     for (let i = 1; i <= steps; i++) {
       const angle = startAngle + theta * (i / steps);
@@ -5872,11 +5899,11 @@ export default function App() {
   };
 
   // DXF ARC entities always sweep counter-clockwise from the start angle to the end angle.
-  const sampleDxfArcEntity = (cx, cy, radius, startDeg, endDeg, maxSegAngleDeg = 6) => {
+  const sampleDxfArcEntity = (cx, cy, radius, startDeg, endDeg) => {
     const a1 = startDeg * Math.PI / 180;
     let sweep = (endDeg - startDeg) * Math.PI / 180;
     while (sweep <= 0) sweep += Math.PI * 2;
-    const steps = Math.max(1, Math.ceil(sweep / (maxSegAngleDeg * Math.PI / 180)));
+    const steps = Math.max(1, Math.ceil((radius * sweep) / MAX_CURVE_CHORD_MM));
     const points = [];
     for (let i = 0; i <= steps; i++) {
       const angle = a1 + sweep * (i / steps);
@@ -5885,12 +5912,13 @@ export default function App() {
     return points;
   };
 
-  const sampleDxfCircleEntity = (cx, cy, radius, segments = 96) => (
-    Array.from({ length: segments }, (_, i) => {
+  const sampleDxfCircleEntity = (cx, cy, radius) => {
+    const segments = Math.min(20000, Math.max(24, Math.ceil((2 * Math.PI * radius) / MAX_CURVE_CHORD_MM)));
+    return Array.from({ length: segments }, (_, i) => {
       const angle = (i / segments) * Math.PI * 2;
       return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
-    })
-  );
+    });
+  };
 
   // Greedily connects open segments (each an array of points; only the first/last points matter
   // for matching) end-to-end into closed loops, for outlines exported as separate LINE/ARC
@@ -7346,8 +7374,15 @@ export default function App() {
         const by = next[1] - current[1];
         const cross = Math.abs(ax * by - ay * bx);
         const base = Math.hypot(next[0] - prev[0], next[1] - prev[1]) || 1;
+        const deviation = cross / base;
 
-        if (cross / base < colinearTolerance) {
+        // A deviation this close to zero is a genuinely straight run (safe to merge no matter how
+        // long the result gets). Anything above that but still under colinearTolerance is a curve
+        // sampled finely enough to look "nearly straight" locally — merging those unboundedly is
+        // exactly what silently re-coarsens a smooth curve (small radius deviation, but large chord
+        // for a big-radius arc) back into visible facets, so those merges stay capped at
+        // MAX_CURVE_CHORD_MM.
+        if (deviation < colinearTolerance && (deviation <= 0.000001 || base <= MAX_CURVE_CHORD_MM)) {
           cleaned.splice(i, 1);
           changed = true;
           break;
@@ -7382,7 +7417,12 @@ export default function App() {
       }
     }
 
-    if (maxDistance <= tolerance) return [start, end];
+    // Deviation-only tolerance (classic Douglas-Peucker) has no notion of segment length, so a big
+    // enough radius keeps deviation under `tolerance` for a long, visibly-straight-looking chord —
+    // same "big curve, coarse facet" bug as elsewhere. A near-zero deviation is a genuinely
+    // straight run (fine to keep as one long segment); anything above that gets a chord cap too.
+    const chordLength = Math.hypot(end[0] - start[0], end[1] - start[1]);
+    if (maxDistance <= tolerance && (maxDistance <= 0.000001 || chordLength <= MAX_CURVE_CHORD_MM)) return [start, end];
 
     const left = simplifyOpenPolyline(points.slice(0, splitIndex + 1), tolerance);
     const right = simplifyOpenPolyline(points.slice(splitIndex), tolerance);
@@ -8301,7 +8341,7 @@ export default function App() {
     }));
 
     const runOffset = (delta) => {
-      const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * scaleFactor);
+      const offsetter = new ClipperLib.ClipperOffset(2, CLIPPER_ARC_TOLERANCE_MM * scaleFactor);
       offsetter.AddPath(clipperPath, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
       const solution = [];
       offsetter.Execute(solution, delta * scaleFactor);
@@ -8328,7 +8368,12 @@ export default function App() {
     cleanDxfPoints(path.map(point => [point.X / clipperScale, point.Y / clipperScale]), true)
   );
 
-  const cleanClipperPaths = (paths, tolerance = 0.05) => (
+  // Clipper's own CleanPolygons removes near-duplicate/degenerate vertices, but its distance
+  // parameter also treats finely-sampled curve points as "spikes" to flatten — the same
+  // radius-dependent facet-widening bug as elsewhere, and one this library call can't be patched
+  // with a chord-length cap. Kept just above the integer-grid quantization noise floor
+  // (1/clipperScale mm) so it still cleans true duplicates without eating real curve resolution.
+  const cleanClipperPaths = (paths, tolerance = 0.0001) => (
     ClipperLib.Clipper.CleanPolygons(paths, tolerance * clipperScale).filter(path => path.length >= 3)
   );
 
@@ -8356,7 +8401,7 @@ export default function App() {
       X: Math.round(x * clipperScale),
       Y: Math.round(y * clipperScale)
     }));
-    const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * clipperScale);
+    const offsetter = new ClipperLib.ClipperOffset(2, CLIPPER_ARC_TOLERANCE_MM * clipperScale);
     offsetter.AddPath(clipperPath, joinType, endType);
     const solution = [];
     offsetter.Execute(solution, (strokeWidth / 2) * clipperScale);
@@ -8513,7 +8558,7 @@ export default function App() {
 
       const rootBox = getSvgRootBox(svg);
       sourceBox = sourceBox || rootBox;
-      const pathTolerance = 0.12;
+      const pathTolerance = 0.03;
       const cssRules = parseSvgCssRules(svg);
       const contours = [];
 
@@ -8582,8 +8627,9 @@ export default function App() {
           const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
           const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
           const points = [];
-          for (let i = 0; i < 160; i++) {
-            const angle = i * Math.PI * 2 / 160;
+          const circleSegments = getAdaptiveCircleSegments(rx, ry, matrix);
+          for (let i = 0; i < circleSegments; i++) {
+            const angle = i * Math.PI * 2 / circleSegments;
             points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
           }
           if (fillVisible) addContour(points, true);
@@ -8684,7 +8730,7 @@ export default function App() {
     const paths = orientClipperPaths(contours.map(contour => toClipperPath(contour.points)).filter(path => path.length >= 3));
     if (!paths.length) return contours;
 
-    const offsetter = new ClipperLib.ClipperOffset(2, 0.25 * clipperScale);
+    const offsetter = new ClipperLib.ClipperOffset(2, CLIPPER_ARC_TOLERANCE_MM * clipperScale);
     paths.forEach(path => offsetter.AddPath(path, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon));
     const solution = [];
     offsetter.Execute(solution, localThicken * clipperScale);
@@ -8962,7 +9008,10 @@ export default function App() {
     const ccwMid = (am - a1 + twoPi) % twoPi;
     const useCcw = ccwMid <= ccwEnd;
     const span = useCcw ? ccwEnd : -((a1 - a2 + twoPi) % twoPi);
-    const pointCount = Math.max(8, segments);
+    // `segments` acts as a floor, not a fixed total — a big-radius or wide-sweep arc needs more
+    // samples to keep facets small, so scale up further from the actual physical arc length.
+    const physicalArcLength = radius * Math.abs(span);
+    const pointCount = Math.max(8, segments, Math.ceil(physicalArcLength / MAX_CURVE_CHORD_MM));
 
     const points = Array.from({ length: pointCount + 1 }, (_, index) => {
       const angle = a1 + span * (index / pointCount);
@@ -9132,7 +9181,7 @@ export default function App() {
     }
 
     if (design.kind === 'ellipse') {
-      const segments = 160;
+      const segments = getAdaptiveCircleSegments(bounds.width / 2, bounds.height / 2, [1, 0, 0, 1, 0, 0]);
       const pts = Array.from({ length: segments + 1 }, (_, index) => {
         const angle = (index % segments) * Math.PI * 2 / segments;
         return [
@@ -9531,8 +9580,9 @@ export default function App() {
     }
 
     if (design.kind === 'ellipse') {
-      return applyDesignTransform([Array.from({ length: 160 }, (_, index) => {
-        const angle = index * Math.PI * 2 / 160;
+      const ellipseSegments = getAdaptiveCircleSegments(bounds.width / 2, bounds.height / 2, [1, 0, 0, 1, 0, 0]);
+      return applyDesignTransform([Array.from({ length: ellipseSegments }, (_, index) => {
+        const angle = index * Math.PI * 2 / ellipseSegments;
         return [
           bounds.x + bounds.width / 2 + Math.cos(angle) * bounds.width / 2,
           bounds.y + bounds.height / 2 + Math.sin(angle) * bounds.height / 2
@@ -9769,7 +9819,7 @@ export default function App() {
       const designHeight = Math.max(10, n(design.height, 10));
       const scaleX = designWidth / (sourceBox.width || 1);
       const scaleY = designHeight / (sourceBox.height || 1);
-      const pathTolerance = Math.max(0.02, 0.08 / Math.max(scaleX, scaleY));
+      const pathTolerance = Math.max(0.01, 0.03 / Math.max(scaleX, scaleY));
       const bounds = getInteriorObjectBounds(design);
       const placePoint = ([x, y]) => transformInteriorDesignPoint(design, [
         n(design.x, 0) + (x - sourceBox.x) * scaleX,
@@ -9874,8 +9924,9 @@ export default function App() {
           const rx = tag === 'circle' ? parseFloat(node.getAttribute('r')) || 0 : parseFloat(node.getAttribute('rx')) || 0;
           const ry = tag === 'circle' ? rx : parseFloat(node.getAttribute('ry')) || 0;
           const points = [];
-          for (let i = 0; i < 160; i++) {
-            const angle = i * Math.PI * 2 / 160;
+          const circleSegments = getAdaptiveCircleSegments(rx, ry, matrix);
+          for (let i = 0; i < circleSegments; i++) {
+            const angle = i * Math.PI * 2 / circleSegments;
             points.push(applyMatrix(matrix, [cx + Math.cos(angle) * rx, cy + Math.sin(angle) * ry]));
           }
           if (fillBlack) {
