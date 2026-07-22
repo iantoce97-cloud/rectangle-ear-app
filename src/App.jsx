@@ -415,6 +415,7 @@ export default function App() {
   const importedSvgHitCacheRef = useRef(new Map());
   const interiorShapeContoursCacheRef = useRef(new Map());
   const interiorPatternPathEdgesCacheRef = useRef(new Map());
+  const interiorArcBandPointsCacheRef = useRef(new Map());
   const importedSvgHitMaskCacheRef = useRef(new Map());
   const [, setImportedSvgHitMaskVersion] = useState(0);
 
@@ -9032,7 +9033,24 @@ export default function App() {
     getInteriorThreePointArcData(design, segments).points
   );
 
+  // The visible-SVG render path (renderInteriorDesignBody / the main per-design render loop)
+  // calls this directly and uncached, on every render — since it now scales its point count with
+  // the arc's physical length (MAX_CURVE_CHORD_MM), that used to mean regenerating potentially
+  // thousands of points from scratch on every re-render of the canvas (e.g. every mousemove that
+  // touches any state), for every arc design, not just ones near the cursor. Cached the same way
+  // as getInteriorShapeContours above.
   const getInteriorArcBandPoints = (design, segments = 96) => {
+    const cacheKey = design?.id ? `${JSON.stringify(design)}::${segments}` : null;
+    if (cacheKey) {
+      const cached = interiorArcBandPointsCacheRef.current.get(design.id);
+      if (cached && cached.key === cacheKey) return cached.points;
+    }
+    const points = computeInteriorArcBandPointsUncached(design, segments);
+    if (cacheKey) interiorArcBandPointsCacheRef.current.set(design.id, { key: cacheKey, points });
+    return points;
+  };
+
+  const computeInteriorArcBandPointsUncached = (design, segments = 96) => {
     const thickness = Math.max(0.5, n(design.thickness, 8));
     const arc = getInteriorThreePointArcData(design, segments);
 
