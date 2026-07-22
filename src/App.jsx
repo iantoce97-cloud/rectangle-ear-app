@@ -8800,9 +8800,21 @@ export default function App() {
       .map(contour => ({ ...contour, area: Math.abs(contour.signedArea) }));
 
     return closedContours.map(contour => {
-      const samplePoint = contour.points[0];
+      // The vertex average, not the first raw vertex — a hole subpath that touches/shares an edge
+      // with its enclosing boundary can have its first point sit right ON that boundary, where
+      // point-in-polygon tests are unreliable. The averaged point is far more likely to land
+      // safely inside the shape.
+      const samplePoint = contour.points.reduce(
+        (sum, point) => [sum[0] + point[0] / contour.points.length, sum[1] + point[1] / contour.points.length],
+        [0, 0]
+      );
+      // Scoped to the SAME design: nesting is only meaningful within one piece of artwork's own
+      // subpaths (its fill-rule holes). Comparing across different designs would misclassify an
+      // ordinary shape placed on top of a larger unrelated one (e.g. a black logo on a white
+      // panel) as a "hole" just because it happens to sit inside the panel's bounds.
       const parentCount = closedContours.filter(candidate => (
         candidate !== contour
+        && candidate.designId === contour.designId
         && candidate.area > contour.area
         && pointInPolygon(samplePoint, candidate.points)
       )).length;
@@ -8870,7 +8882,14 @@ export default function App() {
       const paths = unionClipperPaths(orientClipperPaths([toClipperPath(contour.points)]));
       if (!paths.length) return;
 
-      if (contour.materialColor === 'black' || contour.source === 'knockout') {
+      // A contour nested inside its OWN design at odd depth (role: 'hole', from
+      // analyzeInteriorContours) is a fill-rule hole in that artwork — it flips the normal
+      // black-subtracts/white-adds behavior, so a hole cut into black material still becomes a
+      // cut, and a hole cut into an added white shape still stays uncut.
+      const baseSubtracts = contour.materialColor === 'black' || contour.source === 'knockout';
+      const shouldSubtract = contour.role === 'hole' ? !baseSubtracts : baseSubtracts;
+
+      if (shouldSubtract) {
         accumulatedWhite = differenceClipperPaths(accumulatedWhite, paths);
         return;
       }
@@ -9898,6 +9917,7 @@ export default function App() {
       ...contour,
       ...(byKey.get(`${contour.designId}-${index}`) || { area: 0, depth: 0, role: contour.closed ? 'outer' : 'open' })
     }));
+
     const clearanceContours = getAlignedSlotClearanceContours().map((contour, index) => ({
       ...contour,
       zIndex: sourceDesigns.length + 0.25,
