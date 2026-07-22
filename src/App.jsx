@@ -413,6 +413,8 @@ export default function App() {
   const presentationSvgRef = useRef(null);
   const presentationDecorationFileInputRef = useRef(null);
   const importedSvgHitCacheRef = useRef(new Map());
+  const interiorShapeContoursCacheRef = useRef(new Map());
+  const interiorPatternPathEdgesCacheRef = useRef(new Map());
   const importedSvgHitMaskCacheRef = useRef(new Map());
   const [, setImportedSvgHitMaskVersion] = useState(0);
 
@@ -9151,7 +9153,21 @@ export default function App() {
   // Every individually-pickable edge of a shape, for the "pattern along path" edge picker.
   // Unlike getInteriorMeanderRuns (deliberately narrowed to line/arc), this covers every kind
   // since the user should be able to pick any single edge of any shape as the path to follow.
+  // Recomputed for every other shape on every mousemove while the pattern-along-path edge picker
+  // is armed (findNearestPatternPathEdge) — cached per design id for the same reason as
+  // getInteriorShapeContours above (large-ellipse/arc sampling is no longer a fixed cheap count).
   const getInteriorPatternPathEdges = (design) => {
+    const cacheKey = design?.id ? JSON.stringify(design) : null;
+    if (cacheKey) {
+      const cached = interiorPatternPathEdgesCacheRef.current.get(design.id);
+      if (cached && cached.key === cacheKey) return cached.edges;
+    }
+    const edges = computeInteriorPatternPathEdgesUncached(design);
+    if (cacheKey) interiorPatternPathEdgesCacheRef.current.set(design.id, { key: cacheKey, edges });
+    return edges;
+  };
+
+  const computeInteriorPatternPathEdgesUncached = (design) => {
     const bounds = getInteriorObjectBounds(design);
 
     if (design.kind === 'rect') {
@@ -9563,7 +9579,23 @@ export default function App() {
     });
   };
 
+  // Ellipse/arc contours are now sampled finely enough (MAX_CURVE_CHORD_MM) that regenerating
+  // them from scratch on every mousemove hover-test (isInteriorPointOnWhiteDesignSurface runs on
+  // every pixel of cursor movement, not just while dragging) became a real slowdown. Cached per
+  // design id, keyed on the design's own serialized fields — any real change (move/resize/edit)
+  // naturally busts the cache, so this only skips truly redundant recomputation.
   const getInteriorShapeContours = (design) => {
+    const cacheKey = design?.id ? JSON.stringify(design) : null;
+    if (cacheKey) {
+      const cached = interiorShapeContoursCacheRef.current.get(design.id);
+      if (cached && cached.key === cacheKey) return cached.contours;
+    }
+    const contours = computeInteriorShapeContoursUncached(design);
+    if (cacheKey) interiorShapeContoursCacheRef.current.set(design.id, { key: cacheKey, contours });
+    return contours;
+  };
+
+  const computeInteriorShapeContoursUncached = (design) => {
     const bounds = getInteriorObjectBounds(design);
     const thickness = Math.max(0.5, n(design.thickness, 8));
     const applyDesignTransform = (contours) => contours
