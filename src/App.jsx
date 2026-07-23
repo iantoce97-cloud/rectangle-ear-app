@@ -9803,8 +9803,12 @@ export default function App() {
           textContours.forEach((textContour) => {
             const cleaned = cleanDxfPoints(transformInteriorDesignPoints(design, textContour.points), true);
             if (cleaned.length < 3) return;
-            const isHole = textContour.role === 'hole';
-            const materialColor = design.color === 'black' || isHole ? 'black' : 'white';
+            // Tag every glyph contour (outer AND its inner counters/holes) with the design's own
+            // color uniformly, same as every other shape kind — analyzeInteriorContours already
+            // detects a letter's hole geometrically (nested at odd depth within the same design)
+            // and buildBooleanInteriorContours already inverts the subtract/add decision for it.
+            // Forcing holes to 'black'/'knockout' here as well double-applies that inversion,
+            // which unions the hole back in (filling it solid) instead of cutting it.
             const contourSets = intersectClosedContourWithPaths(cleaned, getInteriorClipPolygonsForDesign(design, clipOptions));
 
             contourSets.forEach(clipped => {
@@ -9812,12 +9816,12 @@ export default function App() {
               contours.push({
                 points: clipped,
                 closed: true,
-                source: isHole ? 'knockout' : 'fill',
+                source: 'fill',
                 fillRule: 'nonzero',
                 layer,
                 designId: design.id,
                 designName: design.name,
-                materialColor,
+                materialColor: design.color || 'white',
                 zIndex: designIndex,
                 contourOrder: contours.length + textContour.textContourIndex / 1000
               });
