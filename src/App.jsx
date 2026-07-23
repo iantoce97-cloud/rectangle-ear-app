@@ -7864,9 +7864,15 @@ export default function App() {
     ) / lineLength;
   };
 
-  const addFlattenedCubic = (points, p0, p1, p2, p3, tolerance, depth = 0) => {
+  // A deviation-only stop condition (flatness <= tolerance) doesn't bound chord length: sagitta
+  // relates to chord via sagitta ≈ chord²/(8r), so a big-radius curve (e.g. a large rounded
+  // letter) can stay "flat enough" at a much longer chord than a small-radius one — same
+  // radius-dependent facet-widening bug fixed elsewhere. maxChord caps it directly; a
+  // near-zero-flatness span (genuinely straight) is still allowed to merge at any length.
+  const addFlattenedCubic = (points, p0, p1, p2, p3, tolerance, maxChord = Infinity, depth = 0) => {
     const flatness = Math.max(distancePointToLine(p1, p0, p3), distancePointToLine(p2, p0, p3));
-    if (flatness <= tolerance || depth >= 14) {
+    const chordLength = Math.hypot(p3[0] - p0[0], p3[1] - p0[1]);
+    if (depth >= 14 || (flatness <= tolerance && (flatness <= 0.000001 || chordLength <= maxChord))) {
       points.push(p3);
       return;
     }
@@ -7878,8 +7884,8 @@ export default function App() {
     const p123 = [(p12[0] + p23[0]) / 2, (p12[1] + p23[1]) / 2];
     const p0123 = [(p012[0] + p123[0]) / 2, (p012[1] + p123[1]) / 2];
 
-    addFlattenedCubic(points, p0, p01, p012, p0123, tolerance, depth + 1);
-    addFlattenedCubic(points, p0123, p123, p23, p3, tolerance, depth + 1);
+    addFlattenedCubic(points, p0, p01, p012, p0123, tolerance, maxChord, depth + 1);
+    addFlattenedCubic(points, p0123, p123, p23, p3, tolerance, maxChord, depth + 1);
   };
 
   const getInteriorFont = (fontFamily) => (
@@ -7926,11 +7932,20 @@ export default function App() {
     ];
   };
 
-  const flattenInteriorTextPath = (design, tolerance = 0.15) => {
+  // Glyph curves are flattened in the FONT's own unit space (fontSize=100), well before the
+  // result gets scaled up to the text design's actual physical size — a fixed tolerance here (the
+  // old behavior) means large lettering inherits a proportionally large real-world deviation on
+  // every curved letter (C/O/S/etc.), the same "big shape, coarse facet" bug fixed elsewhere.
+  // `chordTarget` is a physical-mm deviation target; it gets converted to font-unit space using
+  // this design's own font-size-to-physical-size scale before flattening.
+  const flattenInteriorTextPath = (design, chordTarget = PREVIEW_CURVE_CHORD_MM) => {
     const textData = buildInteriorTextPathData(design);
     if (!textData) return [];
 
     const bounds = getInteriorObjectBounds(design);
+    const glyphScaleX = bounds.width / Math.max(0.001, textData.box.width);
+    const glyphScaleY = bounds.height / Math.max(0.001, textData.box.height);
+    const tolerance = Math.max(0.005, chordTarget / Math.max(0.0001, Math.max(glyphScaleX, glyphScaleY)));
     const contours = [];
     let current = [0, 0];
     let start = [0, 0];
@@ -7977,7 +7992,7 @@ export default function App() {
           p2[1] + (2 / 3) * (p1[1] - p2[1])
         ];
         const curvePoints = [];
-        addFlattenedCubic(curvePoints, p0, cubic1, cubic2, p2, tolerance);
+        addFlattenedCubic(curvePoints, p0, cubic1, cubic2, p2, tolerance, tolerance);
         curvePoints.forEach(pushPoint);
         current = p2;
         return;
@@ -7989,7 +8004,7 @@ export default function App() {
         const p2 = [command.x2, command.y2];
         const p3 = [command.x, command.y];
         const curvePoints = [];
-        addFlattenedCubic(curvePoints, p0, p1, p2, p3, tolerance);
+        addFlattenedCubic(curvePoints, p0, p1, p2, p3, tolerance, tolerance);
         curvePoints.forEach(pushPoint);
         current = p3;
         return;
@@ -8007,7 +8022,7 @@ export default function App() {
   };
 
   const getInteriorTextPreviewPath = (design) => {
-    return flattenInteriorTextPath(design, 0.12)
+    return flattenInteriorTextPath(design)
       .map(contour => (
         contour.map(([px, py], index) => `${index === 0 ? 'M' : 'L'} ${px * scale} ${py * scale}`).join(' ') + ' Z'
       ))
@@ -8034,7 +8049,7 @@ export default function App() {
 
   const getInteriorTextBooleanContours = (design) => {
     const textPaths = cleanClipperPaths(
-      flattenInteriorTextPath(design, 0.12)
+      flattenInteriorTextPath(design, MAX_CURVE_CHORD_MM)
         .map(points => toClipperPath(points))
     );
 
@@ -8174,7 +8189,7 @@ export default function App() {
         const p2 = [command.x2, command.y2];
         const p3 = [command.x, command.y];
         const curvePoints = [];
-        addFlattenedCubic(curvePoints, p0, p1, p2, p3, tolerance);
+        addFlattenedCubic(curvePoints, p0, p1, p2, p3, tolerance, tolerance);
         curvePoints.forEach(pushTransformed);
         current = p3;
         previousCubicControl = p2;
@@ -8196,7 +8211,7 @@ export default function App() {
           end[1] + (2 / 3) * (control[1] - end[1])
         ];
         const curvePoints = [];
-        addFlattenedCubic(curvePoints, current, cubic1, cubic2, end, tolerance);
+        addFlattenedCubic(curvePoints, current, cubic1, cubic2, end, tolerance, tolerance);
         curvePoints.forEach(pushTransformed);
         current = end;
         previousCubicControl = null;
@@ -9679,7 +9694,7 @@ export default function App() {
     }
 
     if (design.kind === 'text') {
-      return applyDesignTransform(flattenInteriorTextPath(design, 0.12));
+      return applyDesignTransform(flattenInteriorTextPath(design, chordTarget));
     }
 
     return [];
