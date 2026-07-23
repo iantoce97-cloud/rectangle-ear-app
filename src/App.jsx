@@ -416,6 +416,8 @@ export default function App() {
   const interiorShapeContoursCacheRef = useRef(new Map());
   const interiorPatternPathEdgesCacheRef = useRef(new Map());
   const interiorArcBandPointsCacheRef = useRef(new Map());
+  const interiorMarginBoundarySetsCacheRef = useRef(null);
+  const interiorPatternContoursCacheRef = useRef(null);
   const importedSvgHitMaskCacheRef = useRef(new Map());
   const [, setImportedSvgHitMaskVersion] = useState(0);
 
@@ -2527,7 +2529,14 @@ export default function App() {
       .flatMap(panel => offsetPolygonInward(transformPoints(panel), Math.max(0, n(distance, 30))))
   );
 
-  const interiorMarginBoundarySets = getInteriorMarginBoundarySetsForDistance(interiorMargin);
+  // Recomputing this (a Clipper inward-offset over the whole board) on every render was a real
+  // cost during an active drag, even though nothing about the frame/margin actually changes while
+  // just moving an interior shape around — freeze it to the last value while a drag is in
+  // progress, and let it resume live the instant the drag ends (mouseup).
+  const interiorMarginBoundarySets = interiorDrag && interiorMarginBoundarySetsCacheRef.current
+    ? interiorMarginBoundarySetsCacheRef.current
+    : getInteriorMarginBoundarySetsForDistance(interiorMargin);
+  interiorMarginBoundarySetsCacheRef.current = interiorMarginBoundarySets;
 
   const getActivePatternCleanPanelVertexSets = () => getCleanMainBodyPanelVertexSets();
 
@@ -3080,8 +3089,17 @@ export default function App() {
 
   const getPatternContours = () => {
     if (patternLocked && lockedPatternContours) return lockedPatternContours;
-    if (patternMode === 'alignedSlots') return getAlignedSlotPatternContours();
-    return getRandomSlotPatternContours();
+
+    // Slot generation re-clips every row against the board on every call (Clipper ops per slot),
+    // and doesn't actually depend on where an interior design is mid-drag — freeze it to the last
+    // computed value while a drag is in progress rather than recomputing on every drag frame.
+    if (interiorDrag && interiorPatternContoursCacheRef.current) {
+      return interiorPatternContoursCacheRef.current;
+    }
+
+    const contours = patternMode === 'alignedSlots' ? getAlignedSlotPatternContours() : getRandomSlotPatternContours();
+    interiorPatternContoursCacheRef.current = contours;
+    return contours;
   };
 
   const lockCurrentPattern = () => {
