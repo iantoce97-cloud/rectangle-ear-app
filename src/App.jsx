@@ -8925,18 +8925,37 @@ export default function App() {
       // subpaths (its fill-rule holes). Comparing across different designs would misclassify an
       // ordinary shape placed on top of a larger unrelated one (e.g. a black logo on a white
       // panel) as a "hole" just because it happens to sit inside the panel's bounds.
-      const parentCount = closedContours.filter(candidate => (
+      const containingCandidates = closedContours.filter(candidate => (
         candidate !== contour
         && candidate.designId === contour.designId
         && candidate.area > contour.area
         && pointInPolygon(samplePoint, candidate.points)
-      )).length;
+      ));
+      const depth = containingCandidates.length;
 
-      return {
-        ...contour,
-        depth: parentCount,
-        role: parentCount % 2 === 0 ? 'outer' : 'hole'
-      };
+      // Which test decides "is this a hole" depends on the declared fill-rule, same as a real SVG
+      // renderer: evenodd is a purely global crossing-depth-parity rule (winding direction is
+      // irrelevant), while nonzero holes are created specifically by a nested subpath winding
+      // OPPOSITE to its immediate (smallest-area) enclosing shape. Using nonzero's winding-match
+      // test for an evenodd path (or vice versa) misreads either convention — an evenodd path
+      // authored without alternating winding (perfectly valid for evenodd) would lose every hole
+      // under the winding test, while a nonzero path with more than one level of unrelated nesting
+      // (e.g. a traced pattern's decorative motif sitting inside a larger, unrelated tile — tracing
+      // tools emit consistent winding for every separate solid region regardless of what bounding
+      // area it falls inside) would misclassify that sub-shape as a hole under plain depth-parity.
+      let role = 'outer';
+      if (depth > 0) {
+        if (contour.fillRule === 'evenodd') {
+          role = depth % 2 === 1 ? 'hole' : 'outer';
+        } else {
+          const immediateParent = containingCandidates.reduce((closest, candidate) => (
+            !closest || candidate.area < closest.area ? candidate : closest
+          ), null);
+          role = Math.sign(contour.signedArea) !== Math.sign(immediateParent.signedArea) ? 'hole' : 'outer';
+        }
+      }
+
+      return { ...contour, depth, role };
     });
   };
 
