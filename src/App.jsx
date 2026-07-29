@@ -625,6 +625,25 @@ export default function App() {
   // 64 segments over a 1500mm-wide board's top arc is a ~23mm chord per segment. This caps the
   // chord length instead, so curves stay smooth at laser-cutting scale regardless of size.
   const MAX_CURVE_CHORD_MM = 0.35;
+  // A deviation at or below this is treated as "no real curvature here, just noise" and allowed
+  // to merge into one long straight segment regardless of chord length, bypassing the
+  // MAX_CURVE_CHORD_MM cap below. Only used at the bezier-flattening source (addFlattenedCubic),
+  // for one specific reason: traced/vectorized artwork (e.g. Inkscape's bitmap tracing) routinely
+  // encodes an intended-straight line as a bezier with a tiny nonzero curvature left over from the
+  // tracing process. A near-machine-epsilon threshold treats that residual noise as "real"
+  // curvature and forces it through the chord cap, chopping one straight edge into hundreds of
+  // pieces that each inherit a slightly different position — reading as a bent/wavy line instead
+  // of a straight one. NOTE: this can't be applied indiscriminately — a genuinely large-radius
+  // circle/arc has, at any small chord, deviation just as tiny as tracing noise (that's what
+  // "smooth" means), so the SAME relaxed epsilon applied to already-sampled circle/arc points
+  // downstream (cleanDxfPoints/simplifyOpenPolyline) would re-coarsen them well past
+  // MAX_CURVE_CHORD_MM. It's safe only right here, where the alternative is literal bezier control
+  // points from source artwork, not a curve deliberately pre-sampled at the target chord already.
+  const STRAIGHT_DEVIATION_EPSILON_MM = 0.02;
+  // Used by the downstream point-cleanup passes instead (cleanDxfPoints, simplifyOpenPolyline),
+  // which also see already-finely-sampled circle/arc points where a looser epsilon would
+  // re-coarsen genuine curves — see STRAIGHT_DEVIATION_EPSILON_MM above for why these differ.
+  const MERGE_STRAIGHT_DEVIATION_EPSILON_MM = 0.000001;
   // Live editing (dragging, hovering, panning/zooming, selection outlines) redraws every visible
   // shape's full point array on every React re-render — at MAX_CURVE_CHORD_MM's export-grade
   // density that means rebuilding+repainting SVG polygons with thousands of points many times a
@@ -7415,7 +7434,7 @@ export default function App() {
         // exactly what silently re-coarsens a smooth curve (small radius deviation, but large chord
         // for a big-radius arc) back into visible facets, so those merges stay capped at
         // MAX_CURVE_CHORD_MM.
-        if (deviation < colinearTolerance && (deviation <= 0.000001 || base <= MAX_CURVE_CHORD_MM)) {
+        if (deviation < colinearTolerance && (deviation <= MERGE_STRAIGHT_DEVIATION_EPSILON_MM || base <= MAX_CURVE_CHORD_MM)) {
           cleaned.splice(i, 1);
           changed = true;
           break;
@@ -7455,7 +7474,7 @@ export default function App() {
     // same "big curve, coarse facet" bug as elsewhere. A near-zero deviation is a genuinely
     // straight run (fine to keep as one long segment); anything above that gets a chord cap too.
     const chordLength = Math.hypot(end[0] - start[0], end[1] - start[1]);
-    if (maxDistance <= tolerance && (maxDistance <= 0.000001 || chordLength <= MAX_CURVE_CHORD_MM)) return [start, end];
+    if (maxDistance <= tolerance && (maxDistance <= MERGE_STRAIGHT_DEVIATION_EPSILON_MM || chordLength <= MAX_CURVE_CHORD_MM)) return [start, end];
 
     const left = simplifyOpenPolyline(points.slice(0, splitIndex + 1), tolerance);
     const right = simplifyOpenPolyline(points.slice(splitIndex), tolerance);
@@ -7890,7 +7909,7 @@ export default function App() {
   const addFlattenedCubic = (points, p0, p1, p2, p3, tolerance, maxChord = Infinity, depth = 0) => {
     const flatness = Math.max(distancePointToLine(p1, p0, p3), distancePointToLine(p2, p0, p3));
     const chordLength = Math.hypot(p3[0] - p0[0], p3[1] - p0[1]);
-    if (depth >= 14 || (flatness <= tolerance && (flatness <= 0.000001 || chordLength <= maxChord))) {
+    if (depth >= 14 || (flatness <= tolerance && (flatness <= STRAIGHT_DEVIATION_EPSILON_MM || chordLength <= maxChord))) {
       points.push(p3);
       return;
     }
