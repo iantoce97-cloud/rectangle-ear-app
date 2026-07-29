@@ -10510,6 +10510,18 @@ export default function App() {
     return getPanelVertexSets().map(vertexSet => dxfPolylineFromRawVertices(vertexSet)).join('');
   };
 
+  // Names the export after whatever SVG-library artwork is actually on the board (e.g.
+  // "cairo-1000x600-straight.dxf") instead of the generic "panel", joining multiple designs with
+  // " + " — falls back to "panel" when nothing recognizable is inserted (a bare frame, or only
+  // plain drawn shapes with generic auto-assigned names).
+  const getInteriorDxfFilenamePrefix = () => {
+    const insertedNames = flattenInteriorDesigns(interiorDesigns)
+      .filter(design => isImportedInteriorSvg(design) && design.name)
+      .map(design => design.name.replace(/[\\/:*?"<>|]/g, '-'));
+
+    return insertedNames.length ? insertedNames.join(' + ') : 'panel';
+  };
+
   const downloadDXF = () => {
     const blockedDesigns = interiorDesigns.filter(design => design.exportable === false);
     if (blockedDesigns.length > 0) {
@@ -10549,7 +10561,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `panel-${safeWidth}x${safeHeight}-${topShape}.dxf`;
+    a.download = `${getInteriorDxfFilenamePrefix()}-${safeWidth}x${safeHeight}-${topShape}.dxf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -13858,32 +13870,42 @@ export default function App() {
                       <polygon points={polygonPoints(geometry.leftArrow)} fill={color} />
                       <polygon points={polygonPoints(geometry.rightArrow)} fill={color} />
 
-                      <text
-                        x={geometry.label[0] * scale}
-                        y={geometry.label[1] * scale}
-                        fontSize={20 / viewZoom}
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        fill="none"
-                        stroke="#000000"
-                        strokeWidth={6 / viewZoom}
-                        transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
-                      >
-                        {geometry.distance.toFixed(1)} mm
-                      </text>
-
-                      <text
-                        x={geometry.label[0] * scale}
-                        y={geometry.label[1] * scale}
-                        fill={color}
-                        fontSize={13 / viewZoom}
-                        fontWeight="600"
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        transform={`rotate(${geometry.angle} ${geometry.label[0] * scale} ${geometry.label[1] * scale})`}
-                      >
-                        {geometry.distance.toFixed(1)} mm
-                      </text>
+                      {(() => {
+                        const labelText = `${geometry.distance.toFixed(1)} mm`;
+                        const labelFontSize = 15 / viewZoom;
+                        const labelPaddingX = 7 / viewZoom;
+                        const labelPaddingY = 4 / viewZoom;
+                        const labelWidth = labelText.length * labelFontSize * 0.62 + labelPaddingX * 2;
+                        const labelHeight = labelFontSize + labelPaddingY * 2;
+                        const lx = geometry.label[0] * scale;
+                        const ly = geometry.label[1] * scale;
+                        return (
+                          <g transform={`rotate(${geometry.angle} ${lx} ${ly})`}>
+                            <rect
+                              x={lx - labelWidth / 2}
+                              y={ly - labelHeight / 2}
+                              width={labelWidth}
+                              height={labelHeight}
+                              rx={4 / viewZoom}
+                              fill="#0f172a"
+                              fillOpacity={0.9}
+                              stroke={color}
+                              strokeWidth={1.5 / viewZoom}
+                            />
+                            <text
+                              x={lx}
+                              y={ly}
+                              fill="#ffffff"
+                              fontSize={labelFontSize}
+                              fontWeight="700"
+                              textAnchor="middle"
+                              dominantBaseline="middle"
+                            >
+                              {labelText}
+                            </text>
+                          </g>
+                        );
+                      })()}
 
                       {(m.selected || draggingMeasurement?.id === m.id) && (
                         <>
