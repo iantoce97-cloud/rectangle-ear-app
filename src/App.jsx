@@ -7258,6 +7258,10 @@ export default function App() {
   const DXF_OPTIMIZE_COLINEAR_TOLERANCE = 0.015;
   const DXF_OPTIMIZE_SIMPLIFY_TOLERANCE = 0.08;
   const DXF_OPTIMIZE_DEDUPE_PRECISION = 0.02;
+  // Closed shapes smaller than a 2mm x 2mm square aren't practically cuttable/usable and are
+  // dropped from the final export/presentation output entirely, rather than sending the laser
+  // after slivers and debris-sized fragments (e.g. a tiny leftover triangle from a boolean merge).
+  const MIN_EXPORT_CONTOUR_AREA_MM2 = 2 * 2;
   let dxfHandleCounter = 0x100;
   const nextDxfHandle = () => (dxfHandleCounter++).toString(16).toUpperCase();
   const resetDxfHandles = () => {
@@ -7557,6 +7561,7 @@ export default function App() {
         points,
         area: contour.closed ? Math.abs(signedPolygonArea(points)) : contour.area
       };
+      if (nextContour.closed && nextContour.area < MIN_EXPORT_CONTOUR_AREA_MM2) return;
       const key = getCanonicalContourKey(nextContour);
       if (seen.has(key)) return;
 
