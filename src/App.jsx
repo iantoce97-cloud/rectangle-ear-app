@@ -333,6 +333,7 @@ export default function App() {
   const [patternRandomGap, setPatternRandomGap] = useState(false);
   const [patternRandomDirectionEnabled, setPatternRandomDirectionEnabled] = useState(false);
   const [patternRandomDirectionAmount, setPatternRandomDirectionAmount] = useState(10);
+  const [patternRandomInset, setPatternRandomInset] = useState(0);
   const [alignedSlotRows, setAlignedSlotRows] = useState(6);
   const [alignedSlotBottomRows, setAlignedSlotBottomRows] = useState(2);
   const [alignedSlotBreakWidth, setAlignedSlotBreakWidth] = useState(30);
@@ -2564,6 +2565,16 @@ export default function App() {
       .map(panel => transformPoints(panel))
   );
 
+  // Random Slots' own placement boundary — separate from both the raw panel edge and the
+  // unrelated "Margin & Clip" distance (which only clips designs, not patterns) — so the pattern
+  // can start some distance in from the panel edge without affecting anything else.
+  const getRandomSlotPatternBoundarySets = () => {
+    const inset = Math.max(0, n(patternRandomInset, 0));
+    const panelBoundarySets = getActivePatternPanelBoundarySets();
+    if (inset <= 0) return panelBoundarySets;
+    return panelBoundarySets.flatMap(panel => offsetPolygonInward(panel, inset));
+  };
+
   const buildInteriorMarginPath = () => (
     interiorMarginBoundarySets
       .map(panel => panel.map((v, i) => `${i === 0 ? 'M' : 'L'} ${v[0] * scale} ${v[1] * scale}`).join(' ') + ' Z')
@@ -2618,7 +2629,7 @@ export default function App() {
   };
 
   const clipPatternSlotToPanel = (points) => {
-    const patternPanelBoundarySets = getActivePatternPanelBoundarySets();
+    const patternPanelBoundarySets = getRandomSlotPatternBoundarySets();
     if (!patternPanelBoundarySets.length) return [];
 
     const subject = cleanClipperPaths([toClipperPath(points)]);
@@ -2990,7 +3001,7 @@ export default function App() {
   };
 
   const getRandomSlotPatternContours = () => {
-    const patternPanelBoundarySets = getActivePatternPanelBoundarySets();
+    const patternPanelBoundarySets = getRandomSlotPatternBoundarySets();
     if (!patternEnabled || patternPanelBoundarySets.length === 0) return [];
 
     const thickness = Math.max(1, n(patternThickness, 15));
@@ -6344,6 +6355,7 @@ export default function App() {
         patternRandomGap,
         patternRandomDirectionEnabled,
         patternRandomDirectionAmount,
+        patternRandomInset,
         alignedSlotRows,
         alignedSlotBottomRows,
         alignedSlotBreakWidth,
@@ -6408,6 +6420,7 @@ export default function App() {
       patternRandomGap: setPatternRandomGap,
       patternRandomDirectionEnabled: setPatternRandomDirectionEnabled,
       patternRandomDirectionAmount: setPatternRandomDirectionAmount,
+      patternRandomInset: setPatternRandomInset,
       alignedSlotRows: setAlignedSlotRows,
       alignedSlotBottomRows: setAlignedSlotBottomRows,
       alignedSlotBreakWidth: setAlignedSlotBreakWidth,
@@ -10653,7 +10666,7 @@ export default function App() {
   const interiorDraftBounds = getInteriorDraftBounds(interiorShapeDraft);
   const interiorExportData = useMemo(
     () => (showInteriorExportPreview ? collectInteriorDesignContours() : null),
-    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternMode, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, patternRandomDirectionEnabled, patternRandomDirectionAmount, alignedSlotRows, alignedSlotBottomRows, alignedSlotBreakWidth, alignedSlotLeftInset, alignedSlotRightInset, alignedSlotMinLength, alignedSlotUseRowSpacing, alignedSlotRowSpacing, alignedSlotStaggerBreaks, alignedSlotRowOffsetInput, excludedPatternSlotIds, interiorClipEnabled, interiorMarginInput]
+    [showInteriorExportPreview, interiorDesigns, patternEnabled, patternMode, patternThickness, patternMinLength, patternMaxLength, patternRowSpacing, patternGap, patternSeed, patternRoundedEnds, patternRandomRowSpacing, patternRandomGap, patternRandomDirectionEnabled, patternRandomDirectionAmount, patternRandomInset, alignedSlotRows, alignedSlotBottomRows, alignedSlotBreakWidth, alignedSlotLeftInset, alignedSlotRightInset, alignedSlotMinLength, alignedSlotUseRowSpacing, alignedSlotRowSpacing, alignedSlotStaggerBreaks, alignedSlotRowOffsetInput, excludedPatternSlotIds, interiorClipEnabled, interiorMarginInput]
   );
   const interiorExportDiagnostics = useMemo(
     () => getInteriorExportDiagnostics(interiorExportData),
@@ -13161,6 +13174,7 @@ export default function App() {
                 {(patternMode === 'random'
                   ? [
                     ['Thickness', patternThickness, setPatternThickness, 1, null, null],
+                    ['Start distance', patternRandomInset, setPatternRandomInset, 0, null, null],
                     ['Min length', patternMinLength, setPatternMinLength, 1, null, null],
                     ['Max length', patternMaxLength, setPatternMaxLength, 1, null, null],
                     ['Row spacing', patternRowSpacing, setPatternRowSpacing, 1, patternRandomRowSpacing, setPatternRandomRowSpacing],
