@@ -3007,7 +3007,8 @@ export default function App() {
     const thickness = Math.max(1, n(patternThickness, 15));
     const minLength = Math.max(1, n(patternMinLength, 80));
     const maxLength = Math.max(minLength, n(patternMaxLength, 260));
-    const rowSpacing = Math.max(thickness + 1, n(patternRowSpacing, 90));
+    const MIN_SLOT_GAP = 20;
+    const rowSpacing = Math.max(thickness + MIN_SLOT_GAP, n(patternRowSpacing, 90));
     const gap = Math.max(0, n(patternGap, 90));
     const random = seededRandom(patternSeed);
     const angle = Math.atan2(shearOffset, angledRun);
@@ -3026,11 +3027,12 @@ export default function App() {
 
     if (maxNormal < minNormal) return [];
 
-    const getNextGap = () => (
+    const getNextGap = () => Math.max(
+      MIN_SLOT_GAP,
       patternRandomGap ? gap * (0.55 + random() * 0.9) : gap
     );
 
-    const minRandomRowSpacing = Math.max(thickness + 1, rowSpacing - 40);
+    const minRandomRowSpacing = Math.max(thickness + MIN_SLOT_GAP, rowSpacing - 40);
     const maxRandomRowSpacing = Math.max(minRandomRowSpacing, rowSpacing + 40);
     const rowJitter = 20;
     const rows = [];
@@ -3041,73 +3043,102 @@ export default function App() {
     }
     if (rows.length === 0 || maxNormal - rows[rows.length - 1] >= minRandomRowSpacing) rows.push(maxNormal);
 
+    // Exact min distance between two slot rectangles that share the same orientation: since both
+    // are axis-aligned in the (projection, normal) frame, the gap on each axis is the standard
+    // 1D range distance, and the true 2D distance is the hypot of the two (0 on an axis they overlap).
+    const slotGapDistance = (aStart, aEnd, aNormal, bStart, bEnd, bNormal) => {
+      const dp = Math.max(0, bStart - aEnd, aStart - bEnd);
+      const dn = Math.max(0, Math.abs(aNormal - bNormal) - thickness);
+      return Math.hypot(dp, dn);
+    };
+    const collidesWithPlaced = (placedSlots, start, end, normalValue) => placedSlots.some(slot => (
+      slotGapDistance(start, end, normalValue, slot.startProjection, slot.endProjection, slot.normal) < MIN_SLOT_GAP
+    ));
+
     const placedSlots = [];
     let rowIndex = 0;
     rows.forEach(normal => {
       let projection = minProjection + (patternRandomGap ? random() * Math.max(1, gap) : 0);
       while (projection <= maxProjection) {
         const length = minLength + random() * (maxLength - minLength);
-        const centerProjection = projection + length / 2;
-        let lineNormal = normal;
+        const baseCenterProjection = projection + length / 2;
+        const baseStart = projection;
+        const baseEnd = projection + length;
 
-        if (patternRandomRowSpacing) {
-          const slotStart = projection;
-          const slotEnd = projection + length;
-          const overlapsTooClose = (candidate) => placedSlots.some(slot => (
-            Math.max(slotStart, slot.startProjection) <= Math.min(slotEnd, slot.endProjection)
-            && Math.abs(candidate - slot.normal) < minRandomRowSpacing
-          ));
+        // Row jitter and position shift can each push a slot toward a neighbor; retry with fresh
+        // randomness until the MIN_SLOT_GAP clearance holds, falling back to the unshifted base
+        // position, and finally dropping the slot rather than ever letting two lines collide.
+        let finalNormal = normal;
+        let finalCenterProjection = baseCenterProjection;
+        let placed = false;
 
-          for (let attempt = 0; attempt < 12; attempt++) {
-            const candidate = clamp(normal + (random() - 0.5) * rowJitter * 2, minNormal, maxNormal);
-            if (!overlapsTooClose(candidate)) {
-              lineNormal = candidate;
-              break;
+        for (let attempt = 0; attempt < 25 && !placed; attempt++) {
+          let candidateNormal = normal;
+          let candidateCenterProjection = baseCenterProjection;
+
+          if (patternRandomRowSpacing) {
+            candidateNormal = clamp(candidateNormal + (random() - 0.5) * rowJitter * 2, minNormal, maxNormal);
+          }
+
+          if (patternRandomDirectionEnabled) {
+            const shiftAmount = Math.max(0, n(patternRandomDirectionAmount, 10));
+            const shiftAngle = random() * Math.PI * 2;
+            candidateCenterProjection += Math.cos(shiftAngle) * shiftAmount;
+            candidateNormal = clamp(candidateNormal + Math.sin(shiftAngle) * shiftAmount, minNormal, maxNormal);
+          }
+
+          const candidateStart = candidateCenterProjection - length / 2;
+          const candidateEnd = candidateCenterProjection + length / 2;
+
+          if (!collidesWithPlaced(placedSlots, candidateStart, candidateEnd, candidateNormal)) {
+            finalNormal = candidateNormal;
+            finalCenterProjection = candidateCenterProjection;
+            placed = true;
+          }
+        }
+
+        if (!placed && !collidesWithPlaced(placedSlots, baseStart, baseEnd, normal)) {
+          finalNormal = normal;
+          finalCenterProjection = baseCenterProjection;
+          placed = true;
+        }
+
+        if (placed) {
+          const cx = ux * finalCenterProjection + nx * finalNormal;
+          const cy = uy * finalCenterProjection + ny * finalNormal;
+
+          const rawSlot = patternRoundedEnds
+            ? makeRoundedSlotPolygon(cx, cy, length, thickness, angle)
+            : makeSlotPolygon(cx, cy, length, thickness, angle);
+
+          clipPatternSlotToPanel(rawSlot).forEach(points => {
+            const projectedLength = getPatternContourProjectedLength(points, angle);
+            const finalPoints = patternRoundedEnds
+              ? roundClippedPatternContour(points, thickness, angle)
+              : points;
+
+            if (finalPoints.length >= 3 && projectedLength >= minLength / 2) {
+              contours.push({
+                points: finalPoints,
+                closed: true,
+                source: 'pattern',
+                fillRule: 'nonzero',
+                layer: 'PATTERN',
+                designId: `pattern-${rowIndex}-${contours.length}`,
+                designName: 'Horizontal line pattern',
+                role: 'outer',
+                area: Math.abs(signedPolygonArea(points)),
+                depth: 0
+              });
             }
-          }
+          });
+
+          placedSlots.push({
+            startProjection: finalCenterProjection - length / 2,
+            endProjection: finalCenterProjection + length / 2,
+            normal: finalNormal
+          });
         }
-
-        let cx = ux * centerProjection + nx * lineNormal;
-        let cy = uy * centerProjection + ny * lineNormal;
-
-        if (patternRandomDirectionEnabled) {
-          const shiftAmount = Math.max(0, n(patternRandomDirectionAmount, 10));
-          const shiftAngle = random() * Math.PI * 2;
-          cx += Math.cos(shiftAngle) * shiftAmount;
-          cy += Math.sin(shiftAngle) * shiftAmount;
-        }
-
-        const rawSlot = patternRoundedEnds
-          ? makeRoundedSlotPolygon(cx, cy, length, thickness, angle)
-          : makeSlotPolygon(cx, cy, length, thickness, angle);
-
-        clipPatternSlotToPanel(rawSlot).forEach(points => {
-          const projectedLength = getPatternContourProjectedLength(points, angle);
-          const finalPoints = patternRoundedEnds
-            ? roundClippedPatternContour(points, thickness, angle)
-            : points;
-
-          if (finalPoints.length >= 3 && projectedLength >= minLength / 2) {
-            contours.push({
-              points: finalPoints,
-              closed: true,
-              source: 'pattern',
-              fillRule: 'nonzero',
-              layer: 'PATTERN',
-              designId: `pattern-${rowIndex}-${contours.length}`,
-              designName: 'Horizontal line pattern',
-              role: 'outer',
-              area: Math.abs(signedPolygonArea(points)),
-              depth: 0
-            });
-          }
-        });
-
-        placedSlots.push({
-          startProjection: projection,
-          endProjection: projection + length,
-          normal: lineNormal
-        });
 
         projection += length + getNextGap();
       }
