@@ -2704,7 +2704,7 @@ export default function App() {
   };
 
   const makeAlignedSlotPanelReferences = () => {
-    const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
+    const angle = Math.atan2(shearOffset, angledRun);
     return getCleanMainBodyPanelVertexSets().map((panel, index) => {
       const boundary = [transformPoints(panel)];
       return {
@@ -2807,7 +2807,7 @@ export default function App() {
     const rightInset = Math.max(0, n(alignedSlotRightInset, 30));
     const fixedRowSpacing = Math.max(0, n(alignedSlotRowSpacing, 80));
     const rowOffset = n(alignedSlotRowOffsetInput, 0);
-    const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
+    const angle = Math.atan2(shearOffset, angledRun);
     const bottomPanelIndex = bottomPanelEnabled ? getCleanMainBodyPanelVertexSets().length - 1 : -1;
     const topPanelRefs = panelRefs.filter(ref => ref.index !== bottomPanelIndex);
     const bottomPanelRefs = panelRefs.filter(ref => ref.index === bottomPanelIndex);
@@ -3010,7 +3010,7 @@ export default function App() {
     const rowSpacing = Math.max(thickness + 1, n(patternRowSpacing, 90));
     const gap = Math.max(0, n(patternGap, 90));
     const random = seededRandom(patternSeed);
-    const angle = Math.atan2(shearOffset, Math.max(1, safeWidth));
+    const angle = Math.atan2(shearOffset, angledRun);
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
     const nx = -uy;
