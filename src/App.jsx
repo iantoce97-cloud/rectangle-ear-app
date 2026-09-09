@@ -18,6 +18,7 @@ import {
   ArrowUp,
   ArrowDown,
   PenLine,
+  Presentation,
   DraftingCompass,
   Lock,
   Unlock,
@@ -6357,6 +6358,9 @@ export default function App() {
       createdAt: Date.now(),
       thumbnail: getInteriorBoardThumbnail(),
       framePanelSets: getPanelVertexSets().map(panel => transformPoints(panel)),
+      cleanPanelPolygons: getCleanMainBodyPanelVertexSets().map(panel => transformPoints(panel)),
+      outerFrameCleanPolygons: getPresentationOuterFrameCleanVertexSets().map(panel => transformPoints(panel)),
+      outerFrameEarOffset: Math.max(topEarDepth, rightEarDepth, bottomEarDepth, leftEarDepth, splitEarDepth),
       marginBoundarySets: interiorMarginBoundarySets.map(panel => panel.map(point => [...point])),
       frame: {
         width: safeWidth,
@@ -6498,6 +6502,56 @@ export default function App() {
 
   const deleteSavedInteriorBoard = (boardId) => {
     setSavedInteriorBoards(prev => prev.filter(board => board.id !== boardId));
+  };
+
+  const sendSavedInteriorBoardToPresentation = (boardId) => {
+    const board = savedInteriorBoards.find(item => item.id === boardId);
+    if (!board) return;
+
+    const panelPolygons = getSavedBoardFramePanelSets(board);
+    const cleanPanelPolygons = board.cleanPanelPolygons?.length
+      ? board.cleanPanelPolygons.map(panel => panel.map(([x, y]) => [x, y]))
+      : panelPolygons;
+    const outerFrameCleanPolygons = board.outerFrameCleanPolygons?.length
+      ? board.outerFrameCleanPolygons.map(panel => panel.map(([x, y]) => [x, y]))
+      : cleanPanelPolygons;
+    const outerFrameEarOffset = Math.max(0, n(board.outerFrameEarOffset, 0));
+
+    const exportData = buildSavedInteriorBoardExportData(board);
+    const whitePolygons = exportData.contours
+      .filter(contour => contour.materialColor === 'white' && contour.closed && contour.points?.length >= 3)
+      .map(contour => contour.points);
+
+    const bounds = getBoundsFromPointSets([...panelPolygons, ...whitePolygons]);
+    const index = presentationItemsRef.current.length + 1;
+
+    const snapshot = {
+      id: crypto.randomUUID(),
+      name: `Panel ${index}`,
+      x: 40 * index,
+      y: 40 * index,
+      width: bounds.width,
+      height: bounds.height,
+      rotation: 0,
+      itemScale: 1,
+      tint: '#000000',
+      showOuterFrame: false,
+      outerFrameThickness: 30,
+      bounds,
+      panelPolygons,
+      cleanPanelPolygons,
+      outerFrameCleanPolygons,
+      whitePolygons,
+      outerFrameEarOffset,
+      hasPanelSplitSnapshot: board.frame?.hasPanelSplit || false,
+      splitFillSnapshot: null,
+      createdAt: Date.now()
+    };
+
+    applyPresentationItems(prev => [...prev, snapshot], { selectedId: snapshot.id });
+    switchWorkspaceMode('presentation');
+    setPresentationPosition(null);
+    setShowInteriorBoardsMenu(false);
   };
 
   const startInteriorDesignDrag = (e, design, mode, handle = null) => {
@@ -14112,6 +14166,17 @@ export default function App() {
                                     title="Import just the design into the current workspace"
                                   >
                                     <PenLine size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      sendSavedInteriorBoardToPresentation(board.id);
+                                    }}
+                                    className="rounded-md border border-emerald-200 bg-emerald-50 p-1.5 text-emerald-700 opacity-80 hover:bg-emerald-100 group-hover:opacity-100"
+                                    title="Send this board's design to presentation"
+                                  >
+                                    <Presentation size={13} />
                                   </button>
                                 </div>
                               </div>
