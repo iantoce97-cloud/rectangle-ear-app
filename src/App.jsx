@@ -6504,10 +6504,7 @@ export default function App() {
     setSavedInteriorBoards(prev => prev.filter(board => board.id !== boardId));
   };
 
-  const sendSavedInteriorBoardToPresentation = (boardId) => {
-    const board = savedInteriorBoards.find(item => item.id === boardId);
-    if (!board) return;
-
+  const buildPresentationSnapshotFromSavedBoard = (board, index) => {
     const panelPolygons = getSavedBoardFramePanelSets(board);
     const cleanPanelPolygons = board.cleanPanelPolygons?.length
       ? board.cleanPanelPolygons.map(panel => panel.map(([x, y]) => [x, y]))
@@ -6523,9 +6520,8 @@ export default function App() {
       .map(contour => contour.points);
 
     const bounds = getBoundsFromPointSets([...panelPolygons, ...whitePolygons]);
-    const index = presentationItemsRef.current.length + 1;
 
-    const snapshot = {
+    return {
       id: crypto.randomUUID(),
       name: `Panel ${index}`,
       x: 40 * index,
@@ -6547,8 +6543,29 @@ export default function App() {
       splitFillSnapshot: null,
       createdAt: Date.now()
     };
+  };
+
+  const sendSavedInteriorBoardToPresentation = (boardId) => {
+    const board = savedInteriorBoards.find(item => item.id === boardId);
+    if (!board) return;
+
+    const snapshot = buildPresentationSnapshotFromSavedBoard(board, presentationItemsRef.current.length + 1);
 
     applyPresentationItems(prev => [...prev, snapshot], { selectedId: snapshot.id });
+    switchWorkspaceMode('presentation');
+    setPresentationPosition(null);
+    setShowInteriorBoardsMenu(false);
+  };
+
+  const sendAllSavedBoardsToPresentation = () => {
+    if (!savedInteriorBoards.length) return;
+
+    const startIndex = presentationItemsRef.current.length;
+    const snapshots = savedInteriorBoards.map((board, i) => (
+      buildPresentationSnapshotFromSavedBoard(board, startIndex + i + 1)
+    ));
+
+    applyPresentationItems(prev => [...prev, ...snapshots], { selectedIds: snapshots.map(s => s.id) });
     switchWorkspaceMode('presentation');
     setPresentationPosition(null);
     setShowInteriorBoardsMenu(false);
@@ -14094,7 +14111,7 @@ export default function App() {
                           <p className="font-semibold text-slate-800">Saved boards</p>
                           <p className="text-[11px] text-slate-500">Click or drag into the workspace</p>
                         </div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
                           <button
                             type="button"
                             disabled={!savedInteriorBoards.length}
@@ -14108,6 +14125,20 @@ export default function App() {
                             title="Export all saved boards in one stacked DXF"
                           >
                             Export all boards
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!savedInteriorBoards.length}
+                            onClick={sendAllSavedBoardsToPresentation}
+                            className={[
+                              'rounded-md border px-2 py-1 text-[10px] font-semibold transition',
+                              savedInteriorBoards.length
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-300'
+                            ].join(' ')}
+                            title="Send all saved boards to presentation"
+                          >
+                            Send all to presentation
                           </button>
                           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
                             {savedInteriorBoards.length}
